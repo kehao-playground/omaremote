@@ -6,7 +6,7 @@
 
 **Architecture:** Every piece of logic lives in `lib/*.mjs` ES modules that take explicit time (`now` in ms) and return **effects** (plain objects) instead of spawning processes or touching QML. Qt 6 QML imports `.mjs` modules directly, so the same files run under `node --test` here and inside `omarchy-shell` later. Plan 2 wires these modules to Quickshell `Process`/`GlobalShortcut`/`IpcHandler` adapters; Plan 3 writes the host setup script. No module under `lib/` spawns a process or reads the environment; the only external commands in this plan are repository housekeeping in Task 1 (license download) and `node --test`.
 
-**Tech Stack:** Node.js ≥ 20 (`node --test`, `node:assert/strict`), ES modules (`.mjs`, no npm dependencies), GNU Make. Target runtime later: Qt 6 QML JavaScript (ES7-level: no `??=`, no top-level await, no Node APIs inside `lib/`).
+**Tech Stack:** Node.js ≥ 20 (`node --test`, `node:assert/strict`), ES modules (`.mjs`, no npm dependencies), GNU Make. Target runtime later: Qt 6 QML JavaScript. Qt 6 documents `.mjs` ES-module imports from QML, but the exact engine level is **verified in Plan 2 task 0** (load a minimal `.mjs` with named exports inside `omarchy-shell`; confirm `Map`, `Set`, object spread, default parameters, template literals, `Array.prototype.includes`). Until then `lib/` avoids anything newer than ES2018 (no optional catch binding, no `??`/`?.`/`??=`, no top-level await, no Node APIs).
 
 **Spec:** `docs/superpowers/specs/2026-09-14-omaremote-design.md` — sections referenced as §N below. Read §4 (engine), §5 (voice session), §3 "Mic apply contract", §6.2 item 4 (doctor rows) and §7 step 6 (self-test) before starting.
 
@@ -1028,7 +1028,7 @@ git commit -m "feat(core): action argv/dispatch mapping and labels"
 - Test: `tests/Dbus.test.mjs`
 
 **Interfaces:**
-- Produces `createSignalParser({ path, iface, member, acceptSender })` → `{ feed(chunk) → events[], bumpGeneration() → number, generation() }`. Input is the stdout of `busctl --user monitor --json=short --match "type='signal',interface='org.atvvoice.Daemon',member='MicStateChanged'"`: one JSON object per line. Event: `{ state, sender, generation }`. Partial lines are buffered across `feed` calls.
+- Produces `createSignalParser({ path, iface, member, acceptSender })` → `{ feed(chunk) → events[], bumpGeneration() → number, generation() }`. Input is the stdout of `busctl --user monitor --json=short --match "type='signal',interface='org.atvvoice.Daemon',member='MicStateChanged'"`: one JSON object per line. Event: `{ state, sender, path, interface, member, generation }` — the parser filters on path/interface/member and **also carries them**, so `VoiceSession.dbus()` re-validates the full source itself (§5.1) instead of trusting the parser. Partial lines are buffered across `feed` calls.
 - Produces `parseProperty(stdout)` → string value from `busctl get-property` output (`s "streaming"`), or `null`.
 - Produces `atvvoiceNames(listStdout)` → array of `org.atvvoice.*` names from `busctl --user list --acquired` output.
 - Plan 2 note: the exact `--json=short` line shape is confirmed on the Omarchy host in Plan 2 task 0 (capture a real sample into `tests/fixtures/`); the parser below follows the systemd documentation (`type, sender, path, interface, member, payload.data`).
@@ -1052,16 +1052,18 @@ const mk = () => createSignalParser({
   acceptSender: (s) => s === ":1.42",
 });
 
-test("parses one signal per line into {state, sender, generation}", () => {
+const EV = (state, generation = 0) => ({ state, sender: ":1.42", path: "/org/atvvoice/Daemon", interface: "org.atvvoice.Daemon", member: "MicStateChanged", generation });
+
+test("parses one signal per line into {state, sender, path, interface, member, generation}", () => {
   const p = mk();
-  assert.deepEqual(p.feed(line("streaming")), [{ state: "streaming", sender: ":1.42", generation: 0 }]);
+  assert.deepEqual(p.feed(line("streaming")), [EV("streaming")]);
 });
 
 test("buffers partial lines across feeds", () => {
   const p = mk();
   const full = line("connected");
   assert.deepEqual(p.feed(full.slice(0, 20)), []);
-  assert.deepEqual(p.feed(full.slice(20)), [{ state: "connected", sender: ":1.42", generation: 0 }]);
+  assert.deepEqual(p.feed(full.slice(20)), [EV("connected")]);
 });
 
 test("rejects other senders, paths, interfaces, members and malformed lines", () => {
@@ -1078,7 +1080,7 @@ test("bumpGeneration discards buffered partial input and tags later events", () 
   const p = mk();
   p.feed(line("streaming").slice(0, 10));
   assert.equal(p.bumpGeneration(), 1);
-  assert.deepEqual(p.feed(line("streaming")), [{ state: "streaming", sender: ":1.42", generation: 1 }]);
+  assert.deepEqual(p.feed(line("streaming")), [EV("streaming", 1)]);
 });
 
 test("parseProperty reads busctl get-property string output", () => {
@@ -1112,13 +1114,13 @@ export function createSignalParser({ path, iface, member, acceptSender }) {
 
   function parseLine(l) {
     let m;
-    try { m = JSON.parse(l); } catch { return null; }
+    try { m = JSON.parse(l); } catch (e) { return null; }
     if (!m || m.type !== "signal") return null;
     if (m.path !== path || m.interface !== iface || m.member !== member) return null;
     if (typeof acceptSender === "function" && !acceptSender(m.sender)) return null;
     const data = m.payload && Array.isArray(m.payload.data) ? m.payload.data[0] : undefined;
     if (typeof data !== "string") return null;
-    return { state: data, sender: m.sender, generation: gen };
+    return { state: data, sender: m.sender, path: m.path, interface: m.interface, member: m.member, generation: gen };
   }
 
   return {
@@ -1234,7 +1236,7 @@ export function parseStatusLine(line) {
   const l = String(line || "").trim();
   if (!l) return null;
   let j;
-  try { j = JSON.parse(l); } catch { return null; }
+  try { j = JSON.parse(l); } catch (e) { return null; }
   if (!j || typeof j !== "object") return null;
   const c0 = typeof j.class === "string" ? j.class : (typeof j.alt === "string" ? j.alt : "");
   const c = ALIAS[c0] || c0;
@@ -1282,7 +1284,7 @@ git commit -m "feat(core): voxtype status parser"
 **Interfaces:**
 - Produces `createVoiceSession(config)` → object with inputs (each returns an effects array):
   - `hidPress(now)`, `hidRelease(now)` — HID mic key (only when `config.keys.mic.ptt`)
-  - `dbus(event, now)` — a parsed monitor event `{ state, sender, generation }` (from `Dbus.mjs`); dropped unless `sender` equals the selected sender and `generation` equals the current monitor generation. `setDbusSource({ sender, generation })` — host calls it after resolving the `org.atvvoice.*` owner and after every monitor (re)start.
+  - `dbus(event, now)` — a parsed monitor event `{ state, sender, path, interface, member, generation }` (from `Dbus.mjs`); dropped unless `path === "/org/atvvoice/Daemon"`, `interface === "org.atvvoice.Daemon"`, `member === "MicStateChanged"`, `sender` equals the selected sender and `generation` equals the current monitor generation (VoiceSession validates all of it; the parser's filtering is not relied upon). `setDbusSource({ sender, generation })` — host calls it after resolving the `org.atvvoice.*` owner and after every monitor (re)start.
   - `atvRead(reading, now)` — answer to a `readAtv` effect: `{ state, requestId, generation }`; dropped unless `requestId` is the outstanding request and `generation` is current, so a late property reply from a retired daemon cannot decide arbitration or a stop
   - `status(cls, now, { fresh })` — a Voxtype status class; `fresh: true` for answers to a `poll` effect, `false` for follow-stream lines
   - `cmdExit(id, code, now)` — a `cmd` effect's process exited
@@ -1311,7 +1313,7 @@ const kinds = (fx) => byType(fx, "cmd").map(c => c.kind);
 const stateOf = (fx) => (last(fx, "state") || {}).state;
 const cmdId = (fx, kind) => byType(fx, "cmd").find(c => c.kind === kind).id;
 // D-Bus event from the selected sender in the current generation; A = answer to the outstanding readAtv.
-const D = (state, extra = {}) => ({ state, sender: ":1.42", generation: 0, ...extra });
+const D = (state, extra = {}) => ({ state, sender: ":1.42", path: "/org/atvvoice/Daemon", interface: "org.atvvoice.Daemon", member: "MicStateChanged", generation: 0, ...extra });
 const A = (vs, state, extra = {}) => ({ state, requestId: vs.snapshot().atvRequestId, generation: 0, ...extra });
 
 // Bring a session to confirmed recording via the HID key.
@@ -1437,6 +1439,7 @@ Run: `node --test tests/VoiceSession.test.mjs` — Expected: module not found.
 import { isHealthy } from "./VoxStatus.mjs";
 
 const VOX = (sub) => ["voxtype", "record", sub];
+const ATV = { path: "/org/atvvoice/Daemon", iface: "org.atvvoice.Daemon", member: "MicStateChanged" };   // §5.1 source identity
 const ARB_CHECK_MS = 500;    // bound for readAtv/poll answers after the arbitration timer
 const RESTART_MS = 10000;    // §5.3 recovery restart verification bound
 const FRESH_MS = 500;        // §5.3 "fresh idle" = poll no older than this
@@ -1479,11 +1482,14 @@ export function createVoiceSession(config) {
   const clearDeadlines = () => { dl = {}; };
   const inferred = (src) => src === "dbus" || src === "keyboard";
   function readAtv(out) { atvRequestId = `atv-${++atvSeq}`; out.push({ type: "readAtv", requestId: atvRequestId }); }
-  function currentSource(ev) {
+  function currentSource(ev) {                              // generation/sender check shared by signals and property replies
     if (!ev || typeof ev !== "object") return false;
     if (dbusSender !== null && ev.sender !== dbusSender) return false;
     if (ev.generation !== undefined && ev.generation !== dbusGeneration) return false;
     return true;
+  }
+  function validSignal(ev) {                                // full §5.1 identity for monitor events
+    return currentSource(ev) && ev.path === ATV.path && ev.interface === ATV.iface && ev.member === ATV.member;
   }
 
   function startSession(out, now, source) {
@@ -1670,7 +1676,7 @@ export function createVoiceSession(config) {
 
   function dbus(event, now) {
     const out = [];
-    if (!currentSource(event)) return out;
+    if (!validSignal(event)) return out;
     const state = event.state;
     const prev = remote; remote = state;
     const was = prev === "streaming", is = state === "streaming";
@@ -1948,9 +1954,13 @@ test("D-Bus start path disabled by remoteWarning; gate holders also block it", (
   assert.deepEqual(vs.dbus(D("streaming"), 2), []);
 });
 
-test("signals from another sender or an older monitor generation are dropped", () => {
+test("signals from another sender, path, interface, member or an older monitor generation are dropped", () => {
   const vs = idleSession();
   assert.deepEqual(vs.dbus(D("streaming", { sender: ":1.99" }), 0), []);
+  assert.deepEqual(vs.dbus(D("streaming", { path: "/org/atvvoice/Other" }), 0), []);
+  assert.deepEqual(vs.dbus(D("streaming", { interface: "org.atvvoice.Other" }), 0), []);
+  assert.deepEqual(vs.dbus(D("streaming", { member: "Other" }), 0), []);
+  assert.deepEqual(vs.dbus({ state: "streaming" }, 0), []);                        // no metadata at all
   assert.equal(vs.snapshot().state, "idle");
   vs.setDbusSource({ sender: ":1.42", generation: 1 });
   assert.deepEqual(vs.dbus(D("streaming", { generation: 0 }), 1), []);      // buffered from the old monitor
@@ -2190,9 +2200,11 @@ git commit -m "test(core): voice session recovery, settle window and escalation 
 **Interfaces:**
 - Produces `createMicApply({ voice })` where `voice` is a VoiceSession (uses `voice.snapshot()` and `voice.gate`). Methods (all return effects unless noted):
   - `request(mode, now, { nodeName })` → `{ effects, result }` with `result` = `{ ok: true, operationId }` or `{ ok: false, reason: "busy" | "invalid-mode" | "no-node" }`
-  - `statusOf(operationId)` → `{ state: "queued"|"applying"|"verifying"|"rollingBack"|"succeeded"|"failed", mode, error?, rollback? }` or `null` for an unknown id (never assume success)
+  - `statusOf(operationId)` → `{ state: "queued"|"applying"|"verifying"|"rollingBack"|"succeeded"|"failed", phase, mode, error?, rollback? }` or `null` for an unknown id (never assume success); `phase` ∈ `get | set | restart | verify | rollback-get | rollback-set | rollback-restart | rollback-verify | null` for diagnostics
   - `backend(cls, now, { fresh })` — same feed as VoiceSession gets; MicApply keeps its own freshness view
-  - `cmdExit(id, code, stdout, now)`, `verifyResult(ok, now)`, `externalRecording(now)`, `reset(now)`, `systemdJob(pending, now)` (host reports `systemctl --user show voxtype --property=Job --value` non-empty = a job is still running), `advance(now)`, `nextDeadline()`, `pending()` → boolean
+  - `cmdExit(id, code, stdout, now)` — **phase contract:** the module dispatches on the operation's current phase, not on `kind`. In phases `get` and `rollback-get` the `stdout` is parsed with `parseConfigGet()`; `get` snapshots `prev` (literal + presence) and fails the operation before any mutation if the output is unparsable; `rollback-get` compares the literal with the value this operation wrote and refuses to mutate on mismatch. Phases `set`/`rollback-set` look only at the exit code; `restart`/`rollback-restart` emit `verify`. A `cmdExit` that arrives after a reset only drains the outstanding-command count.
+  - `verifyResult(ok, now)`, `externalRecording(now)`, `reset(now)`, `systemdJob(pending, now)`, `advance(now)`, `nextDeadline()`, `pending()` → boolean
+  - **systemd job contract (host side, §3):** whenever an operation is queued or a rollback is deferred, and once before every mutation, the host polls `systemctl --user show voxtype --property=Job,ActiveState,InvocationID --value` (1 s cadence) and calls `systemdJob(job !== "", now)`. `Job` prints `<id> <type>` while a job is queued or running and is removed by systemd on completion, so non-empty ⇒ pending. Origin does not matter — an external `restart`/`stop` job blocks us exactly like our own. "Job gone but unit not yet active" is not a job question: it is caught by `verify` (active + new `InvocationID` + fresh idle). A job that never clears is bounded by the 60 s wait/defer deadlines → `wait-timeout` (no mutation yet) or `rollback: "unresolved"` + `unconfigured`.
   - **Reset priority and rollback rules (§3):** `reset` while `queued` → `failed` with no mutation. `reset` after the `set` command was issued (mutated) → the operation is `failed` immediately, no further apply step runs, and rollback is **deferred** until the voice session is idle, the backend reports a fresh idle, every outstanding plugin command has exited, and no systemd job is pending; the deferred rollback is bounded by 60 s, after which the outcome is `unresolved` and the host is told `unconfigured`. Every rollback (immediate or deferred) starts by re-reading `audio.device`; if the literal no longer equals the value this operation wrote, someone else edited the file: no mutation, `rollback: "conflict"`, a `conflict` effect, and Doctor's `voxtype-device` row shows the mismatch until an explicit apply reconciles it.
 - Effects: `cmd` (`kind: "get"|"set"|"unset"|"restart"`, `argv`), `poll`, `verify` (host: `systemctl --user is-active voxtype` = active **and** a new `InvocationID` **and** a fresh `idle` within 10 s), `commit` (`{ mode }` — host writes `voice.mic`), `done` (`{ operationId, state, error?, rollback? }` with `rollback ∈ verified | failed | conflict | deferred | unresolved`), `conflict` (`{ expected, found }`), `unconfigured` (`{ reason }`), `hud`.
 - Also exports `parseConfigGet(stdout)` → `{ effective, literal, literalKnown }` where `literal === null` means the key is absent from the file. Voxtype's `--json` field names are confirmed in Plan 2 task 0 from a real `voxtype config get audio.device --json`; the parser accepts `value`/`effective` for the effective value and `file_value`/`file`/`literal` for the literal, and `literalKnown` is false when none of those keys exists.
@@ -2351,6 +2363,16 @@ test("rollback refuses to overwrite an external edit: conflict, no mutation, Doc
   assert.equal(voice.gate.busy(), false);
 });
 
+test("a pending systemd job blocks the initial mutation until it clears", () => {
+  const { mic } = ready();
+  mic.systemdJob(true, 0);
+  const { effects, result } = mic.request("remote", 1, { nodeName: "N" });
+  assert.deepEqual(kinds(effects), []);
+  assert.equal(mic.statusOf(result.operationId).state, "queued");
+  assert.deepEqual(kinds(mic.systemdJob(false, 100)), ["get"]);
+  assert.equal(mic.statusOf(result.operationId).phase, "get");
+});
+
 test("get failure or unparsable output fails before any mutation", () => {
   const { mic, voice } = ready();
   const { effects } = mic.request("remote", 0, { nodeName: "N" });
@@ -2452,7 +2474,7 @@ const MODES = ["remote", "system"];
 
 export function parseConfigGet(stdout) {
   let j;
-  try { j = JSON.parse(String(stdout || "")); } catch { return { effective: null, literal: null, literalKnown: false }; }
+  try { j = JSON.parse(String(stdout || "")); } catch (e) { return { effective: null, literal: null, literalKnown: false }; }
   if (!j || typeof j !== "object") return { effective: null, literal: null, literalKnown: false };
   const effective = j.value !== undefined ? j.value : (j.effective !== undefined ? j.effective : null);
   for (const k of ["file_value", "file", "literal"]) {
@@ -2478,7 +2500,7 @@ export function createMicApply({ voice }) {
   const targetValue = (o) => (o.mode === "remote" ? o.nodeName : "default");
   const fresh = (now) => backend.cls === "idle" && backend.fresh && now - backend.at <= FRESH_MS;
 
-  function record(id, state, extra) { history.set(id, { state, ...extra }); }
+  function record(id, state, extra) { history.set(id, { state, phase: null, ...extra }); }
 
   function finish(out, state) {
     record(op.id, state, { mode: op.mode, error: op.error, rollback: op.rollback });
@@ -2500,6 +2522,7 @@ export function createMicApply({ voice }) {
     const s = voice.snapshot();
     if (s.state !== "idle" || s.pendingCmds > 0) return;
     if (!fresh(now)) { if (!op.polled) { op.polled = true; out.push({ type: "poll" }); } return; }
+    if (jobPending) return;                                  // §3: never mutate while a systemd job is pending
     if (!voice.gate.acquire("mic-apply")) return;
     delete dl.wait;
     op.state = "applying"; op.phase = "get";
@@ -2529,7 +2552,7 @@ export function createMicApply({ voice }) {
     },
 
     statusOf(id) {
-      if (op && op.id === id) return { state: op.state, mode: op.mode, error: op.error, rollback: op.rollback };
+      if (op && op.id === id) return { state: op.state, phase: op.phase, mode: op.mode, error: op.error, rollback: op.rollback };
       return history.get(id) || null;
     },
 
@@ -2547,6 +2570,7 @@ export function createMicApply({ voice }) {
       jobPending = !!pending;
       const out = [];
       tryDeferred(out, now);
+      tryReserve(out, now);
       return out;
     },
 
@@ -2657,7 +2681,7 @@ export function createMicApply({ voice }) {
 - [ ] **Step 4: Run tests**
 
 Run: `node --test tests/MicApply.test.mjs`
-Expected: `# pass 15`, `# fail 0`. Fix the module if needed.
+Expected: `# pass 16`, `# fail 0`. Fix the module if needed.
 
 - [ ] **Step 5: Commit**
 
@@ -2681,6 +2705,7 @@ git commit -m "feat(core): mic apply transaction with verify, commit and rollbac
   - `active()`, `status(id, now)` → `{ active, remainingMs, failed? }` or `null`.
   - `report(id, now)` → `{ ok, missing, extras, held, counts, failed? }` and ends the lease. Unknown/expired id → `{ ok: false, reason: "unknown" | "expired" }`.
   - `disarm(id, now)` → boolean. `externalRecording(now)` → **ends the lease immediately** (gate released, normal dispatch and observation resume, the external session is not touched); `record()` returns `false` from then on, `status(id)` reports `{ active: false, failed: "external-recording" }`, and `report(id)` still returns the full failure (`ok: false`, `failed`, counts so far) exactly once. `advance(now)` → `[{ type: "selftestExpired", id }]` on expiry; `nextDeadline()`.
+  - **Lifecycle rules:** ids are `st-<n>` with a monotonically increasing `n` and are never reused. A failure record is consumed by the first `report(id)`; every later `report(id)` for that id returns `{ ok: false, reason: "expired" }`. `disarm(id)` on an ended lease (failed, reported or expired) returns `false` and changes nothing. `advance()` emits `selftestExpired` at most once per lease and never for a lease that already ended. A `status(id)` of `null` means the id is neither active nor holding an unreported failure.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2777,10 +2802,14 @@ test("external recording ends the lease at once: gate released, no more injectio
   assert.deepEqual(r.missing, ["ok"]);
   assert.equal(r.counts.shortcut.up.down, 1);
   assert.deepEqual(st.report(id, 301), { ok: false, reason: "expired" });   // reported exactly once
+  assert.equal(st.disarm(id, 302), false);                                  // ended lease: no-op
+  assert.deepEqual(st.advance(40000), []);                                  // no expiry event for an ended lease
   const { id: id2 } = st.arm(400, okCtx);
+  assert.notEqual(id2, id);                                                 // ids are never reused
   assert.equal(st.disarm(id2, 401), true);
+  assert.equal(st.disarm(id2, 402), false);
   assert.equal(g.busy(), false);
-  assert.equal(st.status(id2, 402), null);
+  assert.equal(st.status(id2, 403), null);
 });
 ```
 
@@ -3207,9 +3236,12 @@ git commit -m "feat(core): shared doctor rules and state summary"
 
 ## Done criteria for Plan 1
 
-- `make test` passes: Config, KeyEngine, Actions, Dbus, VoxStatus, VoiceSession, MicApply, SelfTest, Stats, Doctor suites.
-- `lib/` imports nothing from Node: `grep -l 'from "node:' lib/*.mjs` prints nothing.
-- Every `lib/*.mjs` opens with its spec reference: `for f in lib/*.mjs; do head -1 "$f" | grep -q '^// Spec §' || echo "missing spec header: $f"; done` prints nothing.
+Two different things get verified, and only the second counts as completion:
+
+- *Plan-snippet verification (already done while writing this plan):* the code blocks above were extracted into a scratch tree and run; that proves the examples are internally consistent, nothing more.
+- *Repository verification (required to call Plan 1 done):* `make test` runs `node --test "tests/*.test.mjs"` against the committed `tests/` and `lib/` directories in this repository — no extraction script, no copied tree — and reports `fail 0` for the Config, KeyEngine, Actions, Dbus, VoxStatus, VoiceSession, MicApply, SelfTest, Stats and Doctor suites.
+- `lib/` imports nothing from Node: `rg -l 'from "node:' lib/` prints nothing.
+- Every `lib/*.mjs` opens with its spec reference: `for f in lib/*.mjs; do head -1 "$f" | rg -q '^// Spec §' || echo "missing spec header: $f"; done` prints nothing.
 - Recovery never touches an external session: the VoiceSession tests "an external recording after an accepted idle is observed, never cancelled…" and "failed restart or restart timeout…" (restart only when the backend is quiet) pass; no `cancel`/`restart` effect is emitted while an external `recording`/`transcribing` is observed after an accepted idle.
 - Stale inputs are inert: D-Bus events from another sender or an older monitor generation, and ATVVoice property replies for a retired `requestId`/generation, produce no effects (tests in Task 10).
 - Mic apply never overwrites an external edit: the "rollback refuses to overwrite an external edit" test passes; deferred rollback waits for exited commands, no systemd job, fresh idle (Task 12 tests).
@@ -3217,5 +3249,5 @@ git commit -m "feat(core): shared doctor rules and state summary"
 
 ## What Plans 2 and 3 pick up (not in this plan)
 
-- **Plan 2 — QML plugin (needs an Omarchy host):** task 0 spikes from spec §2 (Service↔BarWidget state sharing, Service-owned `PanelWindow`, `GlobalShortcut` press/release via `hl.dsp.global`, Voxtype capture-stream lifetime), capture real `busctl --json=short` and `voxtype config get --json` samples into `tests/fixtures/`, then `Service.qml` (adapters that execute effects, single `Timer` driven by the modules' `nextDeadline()`, `IpcHandler` verbs `key/voice/reset/mic/micStatus/selftest`), `BarWidget.qml`, `Panel.qml`, `components/`.
+- **Plan 2 — QML plugin (needs an Omarchy host):** task 0 spikes from spec §2 (Service↔BarWidget state sharing, Service-owned `PanelWindow`, `GlobalShortcut` press/release via `hl.dsp.global`, Voxtype capture-stream lifetime) **plus** loading a minimal `.mjs` ES module with named exports from QML inside `omarchy-shell` and confirming the engine accepts the syntax `lib/` uses (`Map`, `Set`, object spread, default parameters, template literals, `Array.prototype.includes`) — if not, the fallback is a mechanical rewrite of the offending constructs, not a change of design; capture real `busctl --json=short`, `voxtype config get --json` and `systemctl show -p Job --value` samples into `tests/fixtures/`, then `Service.qml` (adapters that execute effects, single `Timer` driven by the modules' `nextDeadline()`, `IpcHandler` verbs `key/voice/reset/mic/micStatus/selftest`), `BarWidget.qml`, `Panel.qml`, `components/`.
 - **Plan 3 — host setup + docs (needs Omarchy + a remote):** `host/omaremote-setup` (§7), `--doctor` via `node -e` over `lib/Doctor.mjs`, `tests/fake-remote.sh`, `docs/hw-checklist.md`, README (zh-TW + English).
