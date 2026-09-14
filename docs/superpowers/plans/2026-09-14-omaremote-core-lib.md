@@ -129,7 +129,7 @@ Expected: FAIL — `Cannot find module './helpers.mjs'`
   "version": "0.1.0",
   "author": "Kehao Chen",
   "license": "GPL-3.0-only",
-  "homepage": "https://github.com/kehao-chen/OmaRemote",
+  "homepage": "https://github.com/kehao-playground/omaremote",
   "category": "Input",
   "description": "ATVV Bluetooth voice remote as couch controller: push-to-talk via Voxtype and a 13-key mapping engine.",
   "kinds": ["bar-widget", "service"],
