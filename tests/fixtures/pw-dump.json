@@ -1,0 +1,8 @@
+[
+  { "id": 30, "type": "PipeWire:Interface:Node", "info": { "props": { "node.name": "alsa_output.pci-0000_00_1f.3.analog-stereo", "media.class": "Audio/Sink" } } },
+  { "id": 40, "type": "PipeWire:Interface:Node", "info": { "props": { "node.name": "atvvoice_mic", "node.description": "ATVVoice Remote Mic", "media.class": "Audio/Source" } } },
+  { "id": 41, "type": "PipeWire:Interface:Node", "info": { "props": { "node.name": "alsa_input.pci-0000_00_1f.3.analog-stereo", "media.class": "Audio/Source" } } },
+  { "id": 60, "type": "PipeWire:Interface:Node", "info": { "props": { "node.name": "voxtype", "application.name": "voxtype", "media.class": "Stream/Input/Audio" } } },
+  { "id": 61, "type": "PipeWire:Interface:Port", "info": { "props": { "node.id": 60, "port.direction": "in" } } },
+  { "id": 70, "type": "PipeWire:Interface:Link", "info": { "output-node-id": 40, "output-port-id": 42, "input-node-id": 60, "input-port-id": 61, "state": "active" } }
+]
