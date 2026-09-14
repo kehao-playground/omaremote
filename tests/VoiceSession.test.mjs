@@ -432,6 +432,52 @@ test("stop timeout: backend stays recording after stop -> recovering; after rest
   assert.equal(byType(vs.status("idle", 31000), "restart").length, 1);
 });
 
+test("a busy-blocked recovery restart polls instead of stranding, then forces the restart once the backend stops answering", () => {
+  const vs = hidRecording();
+  vs.hidRelease(500);
+  vs.advance(15500);                                              // cancel #1, recovering
+  vs.status("recording", 15600);                                  // cancel #2
+  vs.status("recording", 15700);                                  // cancel #3, budget exhausted
+  const b = vs.advance(15500 + 15000);                            // budget expiry: backend busy -> poll instead of restart
+  assert.equal(byType(b, "restart").length, 0);
+  assert.equal(byType(b, "poll").length, 1);
+  assert.equal(vs.nextDeadline(), 30500 + 15000);
+  const b2 = vs.advance(30500 + 15000);                           // next expiry: no observation newer than the poll -> forced restart
+  assert.equal(byType(b2, "restart").length, 1);
+});
+
+test("a fresh busy observation after the recovery poll defers the forced restart with another poll", () => {
+  const vs = hidRecording();
+  vs.hidRelease(500);
+  vs.advance(15500);
+  vs.status("recording", 15600);
+  vs.status("recording", 15700);
+  const b = vs.advance(30500);
+  assert.equal(byType(b, "poll").length, 1);
+  vs.status("recording", 30600);                                  // still busy, observed after the poll (cancels exhausted already)
+  const b2 = vs.advance(45500);
+  assert.equal(byType(b2, "restart").length, 0);
+  assert.equal(byType(b2, "poll").length, 1);
+  assert.equal(vs.nextDeadline(), 60500);
+});
+
+test("an unanswered D-Bus end re-read is bounded and forces the stop", () => {
+  const vs = idleSession();
+  vs.dbus(D("streaming"), 0);
+  vs.advance(250);
+  vs.atvRead(A(vs, "streaming"), 260);
+  vs.status("idle", 270, { fresh: true });                        // start, owner dbus
+  vs.status("recording", 400);                                    // confirmed
+  const end = vs.dbus(D("connected"), 900);                       // remote end signal: readAtv issued
+  assert.deepEqual(kinds(end), []);
+  assert.equal(byType(end, "readAtv").length, 1);
+  const fx = vs.advance(900 + 500);                                // no answer arrives -> bounded stop
+  assert.deepEqual(kinds(fx), ["stop"]);
+  assert.equal(vs.snapshot().state, "stopping");
+  const late = vs.atvRead(A(vs, "connected"), 900 + 600);          // late answer produces nothing
+  assert.deepEqual(late, []);
+});
+
 test("stale command callbacks from before recovery are ignored", () => {
   const vs = createVoiceSession(cfg());
   const fx = vs.hidPress(0);
