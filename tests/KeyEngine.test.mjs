@@ -77,3 +77,45 @@ test("unknown key names are ignored", () => {
   const e = engine();
   assert.deepEqual(e.press("nope", 0), []);
 });
+
+test("repeat key (up): tap at holdMs then every repeatMs until release", () => {
+  const e = engine();
+  e.press("up", 0);
+  assert.deepEqual(acts(e.advance(350)), ["up:tap*"]);
+  assert.equal(e.nextDeadline(), 430);
+  assert.deepEqual(acts(e.advance(430)), ["up:tap*"]);
+  assert.deepEqual(acts(e.advance(600)), ["up:tap*", "up:tap*"]); // 510, 590
+  assert.deepEqual(acts(e.release("up", 620)), []);
+  assert.equal(e.nextDeadline(), null);
+});
+
+test("repeat key released before holdMs emits a single non-repeat tap", () => {
+  const e = engine();
+  e.press("up", 0);
+  const fx = e.release("up", 100);
+  assert.deepEqual(acts(fx), ["up:tap"]);
+  assert.equal(byType(fx, "action")[0].repeat, false);
+});
+
+test("hold and repeat both bound: hold fires once, then tap repeats", () => {
+  const e = engine({ down: { tap: { type: "key", keys: "Down" }, hold: { type: "key", keys: "End" }, repeat: true } });
+  e.press("down", 0);
+  assert.deepEqual(acts(e.advance(350)), ["down:hold", "down:tap*"]);
+  assert.deepEqual(acts(e.advance(430)), ["down:tap*"]);
+});
+
+test("reload clears in-flight state without emitting", () => {
+  const e = engine();
+  e.press("up", 0);
+  assert.deepEqual(e.reload(normalizeConfig(DEFAULT_CONFIG).config), []);
+  assert.equal(e.nextDeadline(), null);
+  assert.deepEqual(acts(e.advance(1000)), []);
+  assert.deepEqual(acts(e.release("up", 1000)), []);
+});
+
+test("press while already down is ignored (no double-start of timers)", () => {
+  const e = engine();
+  e.press("ok", 0);
+  assert.deepEqual(acts(e.press("ok", 100)), []);
+  assert.equal(e.nextDeadline(), 350);
+});
