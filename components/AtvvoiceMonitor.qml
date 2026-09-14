@@ -35,6 +35,7 @@ Item {
 
   function _lost() {                             // monitor gone or owner unresolvable: fail closed, then rediscover with backoff
     root.sender = ""
+    root.busName = ""                             // finding #8: report absent, not the stale bus name, so remoteState/warning update now
     root.generation = root.parser.bumpGeneration()
     root.source("", root.generation, root.busName)
     backoff.interval = Systemd.backoffMs(root.attempts++)
@@ -59,6 +60,7 @@ Item {
       var s = Dbus.parseProperty(text)
       if (!s) { root._lost(); return }
       root.sender = s
+      root.attempts = 0                                            // finding #8: a resolved owner is a success, not just a later signal
       root.generation = root.parser.bumpGeneration()
       root.source(root.sender, root.generation, root.busName)     // host obligation: setDbusSource before any signal
       monitor.running = true
