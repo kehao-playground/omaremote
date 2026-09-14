@@ -123,6 +123,133 @@ scenario ipc_reset_clears_held_keys s_ipc_reset_clears_held_keys
 scenario config_external_reload s_config_external_reload
 scenario corrupt_config_never_overwritten s_corrupt_config_never_overwritten
 
+# ---- Task 6: voice session through real adapters + fakes ----
+ready() { wait_for '.config' true 5 && wait_for '.backend' idle 5 && wait_for '.remote.sender' ":1.99" 5; }
+s_hid_session() {
+  ready || return 1
+  ipc key mic down > /dev/null
+  wait_for '.voice.state' recording 3 || return 1
+  [[ $(jget '.voice.owner') == hid ]] || return 1
+  [[ $(jget '.hud') == "● 00:00" || $(jget '.hud') == "● 00:01" ]] || { echo "    hud=$(jget '.hud')"; return 1; }
+  has_line "$F/vox.log" "voxtype record start" || return 1
+  ipc key mic up > /dev/null
+  wait_for '.voice.state' idle 5 || return 1
+  has_line "$F/vox.log" "voxtype record stop" || return 1
+  no_line "$F/vox.log" "voxtype record cancel"
+}
+s_hid_release_while_starting() {          # §9: no stop before confirmed recording; exactly one stop on confirmation
+  ready || return 1
+  echo 0.4 > "$F/vox.start-delay"
+  ipc key mic down > /dev/null; sleep 0.1; ipc key mic up > /dev/null; sleep 0.1
+  no_line "$F/vox.log" "voxtype record stop" || return 1
+  wait_for '.voice.state' idle 5 || return 1
+  (( $(grep -cxF "voxtype record stop" "$F/vox.log") == 1 ))
+}
+s_start_never_confirms() {                # §9: 1500 ms without recording → cancel + recovering; settles without a daemon restart
+  ready || return 1
+  : > "$F/vox.no-confirm"
+  ipc key mic down > /dev/null
+  wait_for '.voice.state' recovering 3 || return 1
+  has_line "$F/vox.log" "voxtype record cancel" || return 1
+  ipc key mic up > /dev/null
+  wait_for '.voice.state' idle 6 || return 1
+  no_line "$F/sysd.log" "systemctl --user restart voxtype"
+}
+s_dbus_arbitration_short_tap() {          # §9: release before 250 ms → no plugin start
+  ready || return 1
+  echo streaming >> "$F/atv.signals"
+  wait_for '.voice.state' arbitrating 2 || return 1
+  echo connected >> "$F/atv.signals"
+  wait_for '.voice.state' idle 2 || return 1
+  no_line "$F/vox.log" "voxtype record start"
+}
+s_dbus_session() {                        # button held: fresh re-reads at 250 ms allow the start; release → re-read → stop
+  ready || return 1
+  echo streaming >> "$F/atv.signals"
+  wait_for '.voice.state' recording 3 || return 1
+  [[ $(jget '.voice.owner') == dbus ]] || return 1
+  [[ $(jget '.voice.inferred') == true ]] || return 1
+  echo connected >> "$F/atv.signals"
+  wait_for '.voice.state' idle 5 || return 1
+  has_line "$F/vox.log" "voxtype record stop"
+}
+s_voice_state_verb() {                    # §2: `voice state <state>` injects a D-Bus state for deterministic tests
+  ready || return 1
+  ipc voice state streaming > /dev/null
+  wait_for '.voice.state' arbitrating 2 || return 1
+  ipc voice state connected > /dev/null
+  wait_for '.voice.state' idle 2
+}
+s_keyboard_session_observed() {           # F9 elsewhere: recording not requested by us → owner keyboard, no plugin commands
+  ready || return 1
+  echo recording > "$F/vox.state"
+  wait_for '.voice.state' recording 3 || return 1
+  [[ $(jget '.voice.owner') == keyboard ]] || return 1
+  echo transcribing > "$F/vox.state"
+  wait_for '.voice.state' transcribing 3 || return 1
+  [[ $(jget '.hud') == "… transcribing" ]] || return 1
+  echo idle > "$F/vox.state"
+  wait_for '.voice.state' idle 3 || return 1
+  ! grep -q "voxtype record" "$F/vox.log"
+}
+s_panic_during_recording() {              # §9: reset cancels (never stops) and recovers
+  ready || return 1
+  ipc key mic down > /dev/null
+  wait_for '.voice.state' recording 3 || return 1
+  ipc reset > /dev/null
+  wait_for '.voice.state' recovering 2 || return 1
+  has_line "$F/vox.log" "voxtype record cancel" || return 1
+  no_line "$F/vox.log" "voxtype record stop" || return 1
+  [[ $(jget '.flash') == Reset ]] || return 1
+  ipc key mic up > /dev/null
+  wait_for '.voice.state' idle 6
+}
+s_config_reload_aborts_session() {        # §5.2: abort on config reload; keys still hot-reload
+  ready || return 1
+  ipc key mic down > /dev/null
+  wait_for '.voice.state' recording 3 || return 1
+  local f=$XDG_CONFIG_HOME/omaremote/config.json
+  jq '.timing.holdMs = 700' "$f" > "$F/c.json" && cat "$F/c.json" > "$f"
+  wait_for '.voice.state' recovering 5 || return 1
+  has_line "$F/vox.log" "voxtype record cancel" || return 1
+  ipc key mic up > /dev/null
+  wait_for '.timing.holdMs' 700 2
+}
+s_voxtype_absent_is_unconfigured() {      # §5.4: stopped → unconfigured, starts refused; healthy again → idle
+  ready || return 1
+  : > "$F/vox.stopped"
+  ipc voice poll - > /dev/null
+  wait_for '.voice.state' unconfigured 3 || return 1
+  ipc key mic down > /dev/null; sleep 0.1; ipc key mic up > /dev/null
+  no_line "$F/vox.log" "voxtype record start" || return 1
+  rm "$F/vox.stopped"; ipc voice poll - > /dev/null
+  wait_for '.voice.state' idle 3
+}
+s_remote_warning_disables_dbus_path() {   # §5.4: audio.device ≠ NodeName in remote mode → warning, D-Bus start path off, HID still works
+  ready || return 1
+  printf 'default' > "$F/vox.config"
+  ipc voice audioDevice - > /dev/null
+  wait_for '.remote.warning' true 3 || return 1
+  echo streaming >> "$F/atv.signals"; sleep 0.4
+  [[ $(jget '.voice.state') == idle ]] || return 1
+  echo connected >> "$F/atv.signals"
+  ipc key mic down > /dev/null
+  wait_for '.voice.state' recording 3 || return 1
+  ipc key mic up > /dev/null
+  wait_for '.voice.state' idle 5
+}
+scenario hid_session s_hid_session
+scenario hid_release_while_starting s_hid_release_while_starting
+scenario start_never_confirms s_start_never_confirms
+scenario dbus_arbitration_short_tap s_dbus_arbitration_short_tap
+scenario dbus_session s_dbus_session
+scenario voice_state_verb s_voice_state_verb
+scenario keyboard_session_observed s_keyboard_session_observed
+scenario panic_during_recording s_panic_during_recording
+scenario config_reload_aborts_session s_config_reload_aborts_session
+scenario voxtype_absent_is_unconfigured s_voxtype_absent_is_unconfigured
+scenario remote_warning_disables_dbus_path s_remote_warning_disables_dbus_path
+
 # ---- summary ---------------------------------------------------------------------
 echo "integration: $pass passed, $fail failed"
 (( fail == 0 )) || { printf '  %s\n' "${failed[@]}"; exit 1; }
