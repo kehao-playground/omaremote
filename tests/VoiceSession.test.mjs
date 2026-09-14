@@ -421,10 +421,9 @@ test("from a confirmed session, a recording after an accepted idle is external: 
   assert.equal(vs.nextDeadline(), 15300);                         // settle paused; only the budget remains
   vs.status("transcribing", 1500);
   assert.deepEqual(kinds(vs.advance(1820)), []);
-  const back = vs.status("idle", 2000);                           // transition after cancelAt -> re-armed
+  vs.status("idle", 2000);                                        // transition after cancelAt -> re-armed
   assert.equal(vs.nextDeadline(), 3500);
   assert.equal(stateOf(vs.advance(3500)), "idle");
-  void back;
 });
 
 test("late recording during recovering is never adopted as a keyboard session", () => {

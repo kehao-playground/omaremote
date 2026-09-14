@@ -1,0 +1,14 @@
+# Plan 1 core library — host obligations for Plan 2
+
+The `lib/*.mjs` modules are effect-driven; the QML host (Plan 2) must honour these contracts, which the modules cannot enforce themselves:
+
+- **Polls:** answer every `{ type: "poll" }` from VoiceSession *and* MicApply with a fresh `voxtype status` reading, delivered as `status(cls, now, { fresh: true })` / `backend(cls, now, { fresh: true })`. Only poll answers are `fresh: true`; follow-stream lines are `fresh: false`. Deliver poll answers within 500 ms or they count as stale.
+- **ATVVoice reads:** answer every `{ type: "readAtv", requestId }` with `atvRead({ state, requestId, generation }, now)`; on a failed read deliver a non-`"streaming"` state. VoiceSession bounds an unanswered read at 500 ms and stops a dbus-owned session.
+- **D-Bus source:** call `setDbusSource({ sender, generation })` after resolving the `org.atvvoice.*` owner and after every monitor (re)start, before delivering signals; signals and property replies without a matching sender and generation are dropped. Discard status buffered by the pre-restart monitor before calling `restartResult(true)`.
+- **Verify ids:** `{ type: "verify", id }` from MicApply must be answered with `verifyResult(ok, now, id)`; the host's verifier checks `systemctl --user is-active voxtype`, a new `InvocationID`, and a fresh `idle` within 10 s.
+- **systemd jobs:** while a mic operation is queued, applying, or deferred, poll `systemctl --user show voxtype --property=Job,ActiveState,InvocationID --value` at 1 s and call `systemdJob(job !== "", now)`.
+- **Commit:** execute `{ type: "commit", mode }` by writing `voice.mic` to `config.json` synchronously; a write failure is an apply failure to surface in Doctor/UI (MicApply reports `succeeded` in the same step).
+- **Done effects:** a deferred rollback emits `done` twice for the same `operationId` (once `deferred`, once terminal); the IPC `micStatus` reply should use `statusOf(id)`.
+- **External recording:** call `mic.externalRecording(now)` only once an operation has reserved (state `applying`/`verifying`/`rollingBack`); a request that is still `queued` keeps waiting.
+- **Timers:** drive `advance(now)` of KeyEngine, VoiceSession, MicApply and SelfTest from one Timer armed at the minimum non-null `nextDeadline()`.
+- **Manifest:** `entryPoints` name `Service.qml`/`BarWidget.qml`, which exist only after Plan 2; `omarchy plugin validate` fails until then.

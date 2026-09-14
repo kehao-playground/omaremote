@@ -209,7 +209,7 @@ test("reset while the restart is in flight never launches a second restart", () 
 
 test("a live systemd job blocks the deferred rollback until it clears; the 60s bound ends unresolved", () => {
   const { mic } = ready();
-  const { effects, result } = mic.request("remote", 0, { nodeName: "N" });
+  const { effects } = mic.request("remote", 0, { nodeName: "N" });
   const set = mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 1);
   const restart = mic.cmdExit(cmdId(set, "set"), 0, "", 2);
   mic.cmdExit(cmdId(restart, "restart"), 0, "", 3);                          // client exited; job may still be live
@@ -228,7 +228,6 @@ test("a live systemd job blocks the deferred rollback until it clears; the 60s b
   const u = m2.advance(4 + 60000);
   assert.equal(byType(u, "unconfigured")[0].reason, "mic change unresolved");
   assert.equal(m2.statusOf(r2.operationId).rollback, "unresolved");
-  void result;
 });
 
 test("external recording during apply interrupts; 60s without a quiet system ends unresolved", () => {
@@ -246,9 +245,9 @@ test("external recording during apply interrupts; 60s without a quiet system end
 // ---- Fix round 1 regressions: ---------------------------------------------------------------
 // review findings on paths the 16 tests above do not cover, each ruled against spec §3.
 
-test("[ruling 1] a deferred rollback holds the shared gate for its whole run, not just the initial apply", () => {
+test("a deferred rollback holds the shared gate for its whole run, not just the initial apply", () => {
   const { voice, mic } = ready();
-  const { effects, result } = mic.request("remote", 0, { nodeName: "N" });
+  const { effects } = mic.request("remote", 0, { nodeName: "N" });
   const set = mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 1);          // set issued, not yet exited
   mic.reset(2);
   assert.equal(voice.gate.busy(), false);                                  // failed op released the gate; nothing runs yet
@@ -269,10 +268,9 @@ test("[ruling 1] a deferred rollback holds the shared gate for its whole run, no
   assert.equal(byType(done, "done")[0].rollback, "verified");
   assert.equal(voice.gate.busy(), false);
   assert.equal(mic.pending(), false);
-  void result;
 });
 
-test("[ruling 3c] reset while the rollback unset is in flight also corrects the deferred expected literal", () => {
+test("reset while the rollback unset is in flight also corrects the deferred expected literal", () => {
   const { mic } = ready();
   const { effects, result } = mic.request("remote", 0, { nodeName: "N" });
   const set = mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 1);
@@ -297,7 +295,7 @@ test("[ruling 3c] reset while the rollback unset is in flight also corrects the 
   assert.equal(d.rollback, "verified");
 });
 
-test("[ruling minor] the 60s defer bound does not restart on a re-deferral", () => {
+test("the 60s defer bound does not restart on a re-deferral", () => {
   const { mic } = ready();
   const { effects, result } = mic.request("remote", 0, { nodeName: "N" });
   const set = mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 1);
@@ -315,8 +313,8 @@ test("[ruling minor] the 60s defer bound does not restart on a re-deferral", () 
   assert.equal(mic.statusOf(result.operationId).rollback, "unresolved");
 });
 
-test("[ruling 2] a stale command from a reset operation cannot be misdispatched as the next operation's phase", () => {
-  const { voice, mic } = ready();
+test("a stale command from a reset operation cannot be misdispatched as the next operation's phase", () => {
+  const { mic } = ready();
   const { effects, result: r1 } = mic.request("remote", 0, { nodeName: "N" });
   mic.reset(1);                                                            // failed while the get is still in flight, no mutation
   assert.equal(mic.statusOf(r1.operationId).state, "failed");
@@ -330,10 +328,9 @@ test("[ruling 2] a stale command from a reset operation cannot be misdispatched 
   const set = mic.cmdExit(cmdId(go, "get"), 0, GET_OUT, 5);
   assert.deepEqual(byType(set, "cmd")[0].argv, ["voxtype", "config", "set", "audio.device", "default"]);
   assert.equal(mic.statusOf(r2.operationId).state, "applying");
-  void voice;
 });
 
-test("[ruling 3a] rollback after a failed set finds the file untouched and finishes without any write", () => {
+test("rollback after a failed set finds the file untouched and finishes without any write", () => {
   const { mic } = ready();
   const { effects } = mic.request("remote", 0, { nodeName: "N" });
   const rb = mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 1);
@@ -348,7 +345,7 @@ test("[ruling 3a] rollback after a failed set finds the file untouched and finis
   assert.equal(d.rollback, "verified");
 });
 
-test("[ruling 3b] a reset mid rollback-restart re-verifies without re-writing, keeping the original error", () => {
+test("a reset mid rollback-restart re-verifies without re-writing, keeping the original error", () => {
   const { mic } = ready();
   const { effects, result } = mic.request("remote", 0, { nodeName: "N" });
   const set = mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 1);
@@ -373,7 +370,7 @@ test("[ruling 3b] a reset mid rollback-restart re-verifies without re-writing, k
   assert.equal(d.rollback, "verified");
 });
 
-test("[ruling 4a] a systemd job discovered right after the preflight read blocks the set with no mutation", () => {
+test("a systemd job discovered right after the preflight read blocks the set with no mutation", () => {
   const { voice, mic } = ready();
   const { effects, result } = mic.request("remote", 0, { nodeName: "N" });
   mic.systemdJob(true, 1);
@@ -384,7 +381,7 @@ test("[ruling 4a] a systemd job discovered right after the preflight read blocks
   assert.equal(voice.gate.busy(), false);
 });
 
-test("[ruling 4b] a systemd job discovered right before the apply restart defers rollback instead of racing it", () => {
+test("a systemd job discovered right before the apply restart defers rollback instead of racing it", () => {
   const { mic } = ready();
   const { effects, result } = mic.request("remote", 0, { nodeName: "N" });
   const fx = mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 1);
@@ -404,7 +401,7 @@ test("[ruling 4b] a systemd job discovered right before the apply restart defers
   assert.equal(mic.statusOf(result.operationId).state, "rollingBack");
 });
 
-test("[ruling 4c] a systemd job discovered at verify failure defers rollback without reading first", () => {
+test("a systemd job discovered at verify failure defers rollback without reading first", () => {
   const { mic } = ready();
   const { effects } = mic.request("remote", 0, { nodeName: "N" });
   const set = mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 1);
@@ -417,7 +414,7 @@ test("[ruling 4c] a systemd job discovered at verify failure defers rollback wit
   assert.equal(mic.pending(), true);
 });
 
-test("[ruling 5] a verify report is correlated to the outstanding verify only", () => {
+test("a verify report is correlated to the outstanding verify only", () => {
   const { mic } = ready();
   const { effects, result } = mic.request("remote", 0, { nodeName: "N" });
   const set = mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 1);
