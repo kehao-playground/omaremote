@@ -37,11 +37,16 @@ Item {
   // watcher firing again on its own); _lastGoodText below makes that a no-op instead of a second, spurious
   // "external" change (which would otherwise re-run engine.reload()/voice.abort() with nothing to abort — a fake
   // regression a currently in-flight key press could observe as its held state being wiped mid-hold).
+  property int _emptyRetries: 0                 // budget for the transient-empty retry: a file left truncated is not re-read forever
   Timer { id: reloadRetry; interval: 100; repeat: false; onTriggered: file.reload() }
 
   function _ingest(text, createIfMissing) {
+    if (root.loaded && !createIfMissing && text.trim() === "") {            // checked before the echo test: "" is never a write of ours
+      if (root._emptyRetries < 20) { root._emptyRetries++; reloadRetry.restart() }
+      return
+    }
     if (root.loaded && (text === root._lastWritten || text === root._lastGoodText)) return   // nothing actually changed
-    if (root.loaded && !createIfMissing && text.trim() === "") { reloadRetry.restart(); return }
+    root._emptyRetries = 0
     var r = ConfigFile.load(text)
     root.raw = r.raw; root.config = r.config; root.problems = r.problems; root.invalid = r.invalid
     var first = !root.loaded

@@ -14,13 +14,17 @@ Item {
   property bool _pollKilled: false
   property bool _followStarted: false              // reset before each (re)start attempt, set by onStarted
   property bool _pollStarted: false                // same, for the one-shot poll process
+  // A failed start emits no running=true, so the flags cannot be reset from onRunningChanged: clear them here,
+  // right before every start, or a process that ran once and then vanished mid-session is misread as started.
+  function _startFollow() { root._followStarted = false; follow.running = true }
+  function _startPoll() { root._pollStarted = false; pollProc.running = true }
 
-  function start() { root.generation++; follow.running = true }
+  function start() { root.generation++; root._startFollow() }
   function restart() {                             // after a Voxtype restart: drop the old monitor and its buffered lines
     root.generation++
-    if (follow.running) { root._restartNow = true; follow.signal(15) } else follow.running = true
+    if (follow.running) { root._restartNow = true; follow.signal(15) } else root._startFollow()
   }
-  function poll() { if (pollProc.running) { root._pollAgain = true; return } pollProc.running = true }
+  function poll() { if (pollProc.running) { root._pollAgain = true; return } root._startPoll() }
 
   Process {
     id: follow
@@ -31,7 +35,7 @@ Item {
     // is silently dead forever: no backoff, no status, §5.4's degradation case never surfaces. Treat a
     // failed start exactly like a normal exit so the existing backoff path retries it (bounded, 1 s → 30 s).
     onRunningChanged: {
-      if (follow.running) { root._followStarted = false; return }
+      if (follow.running) return
       if (root._restartNow) return                                  // onExited already handles a deliberate restart
       if (!root._followStarted) { backoff.interval = Systemd.backoffMs(root.attempts++); backoff.restart() }
     }
@@ -46,12 +50,12 @@ Item {
       }
     }
     onExited: function(code, st) {
-      if (root._restartNow) { root._restartNow = false; root.generation++; follow.running = true; return }
+      if (root._restartNow) { root._restartNow = false; root.generation++; root._startFollow(); return }
       backoff.interval = Systemd.backoffMs(root.attempts++)
       backoff.restart()
     }
   }
-  Timer { id: backoff; repeat: false; onTriggered: { root.generation++; follow.running = true } }
+  Timer { id: backoff; repeat: false; onTriggered: { root.generation++; root._startFollow() } }
 
   Process {
     id: pollProc
@@ -67,17 +71,17 @@ Item {
       }
     }
     onRunningChanged: {
-      if (pollProc.running) { root._pollStarted = false; pollGuard.restart(); return }
+      if (pollProc.running) { pollGuard.restart(); return }
       pollGuard.stop()
       // A missing/unexecutable `voxtype` never reaches the StdioCollector above, so without this a poll
       // answers nothing at all (not even "stopped") and a caller waiting on it (e.g. selftestArm) is stuck
       // busy forever. Still honour a poll that was requested again while this one was "in flight".
       if (!root._pollStarted) {
         root.status("stopped", true, null)
-        if (root._pollAgain) { root._pollAgain = false; pollProc.running = true }
+        if (root._pollAgain) { root._pollAgain = false; root._startPoll() }
       }
     }
-    onExited: function(code, st) { if (root._pollAgain) { root._pollAgain = false; pollProc.running = true } }
+    onExited: function(code, st) { if (root._pollAgain) { root._pollAgain = false; root._startPoll() } }
   }
   Timer { id: pollGuard; interval: 2000; repeat: false; onTriggered: if (pollProc.running) { root._pollKilled = true; pollProc.signal(9) } }
 }
