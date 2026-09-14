@@ -242,3 +242,150 @@ test("external recording during apply interrupts; 60s without a quiet system end
   const u = mic.advance(10 + 60000);
   assert.equal(byType(u, "unconfigured")[0].reason, "mic change unresolved");
 });
+
+// ---- Fix round 1 regressions: ---------------------------------------------------------------
+// review findings on paths the 16 tests above do not cover, each ruled against spec §3.
+
+test("[ruling 1] a deferred rollback holds the shared gate for its whole run, not just the initial apply", () => {
+  const { voice, mic } = ready();
+  const { effects, result } = mic.request("remote", 0, { nodeName: "N" });
+  const set = mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 1);          // set issued, not yet exited
+  mic.reset(2);
+  assert.equal(voice.gate.busy(), false);                                  // failed op released the gate; nothing runs yet
+  const after = mic.cmdExit(cmdId(set, "set"), 0, "", 20);                // set drains -> deferred rollback resumes
+  assert.deepEqual(kinds(after), ["get"]);
+  assert.equal(voice.gate.busy(), true);                                   // the rollback itself now holds the gate
+  assert.equal(voice.gate.acquire("someone-else"), false);
+  const done = mic.cmdExit(cmdId(after, "get"), 0, GET_OUT, 21);          // file still holds the original: nothing to write
+  assert.deepEqual(kinds(done), []);
+  assert.equal(byType(done, "done")[0].rollback, "verified");
+  assert.equal(voice.gate.busy(), false);
+  assert.equal(mic.pending(), false);
+  void result;
+});
+
+test("[ruling 2] a stale command from a reset operation cannot be misdispatched as the next operation's phase", () => {
+  const { voice, mic } = ready();
+  const { effects, result: r1 } = mic.request("remote", 0, { nodeName: "N" });
+  mic.reset(1);                                                            // failed while the get is still in flight, no mutation
+  assert.equal(mic.statusOf(r1.operationId).state, "failed");
+  const { effects: e2, result: r2 } = mic.request("system", 2, {});        // accepted, but must wait for the stale get to drain
+  assert.deepEqual(kinds(e2), []);
+  assert.equal(mic.statusOf(r2.operationId).state, "queued");
+  const stale = mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 3);         // the first op's get finally exits
+  assert.deepEqual(kinds(stale), []);                                      // drained only: no set spawned for either operation
+  const go = mic.advance(4);                                               // now the new op can issue its own get
+  assert.deepEqual(kinds(go), ["get"]);
+  const set = mic.cmdExit(cmdId(go, "get"), 0, GET_OUT, 5);
+  assert.deepEqual(byType(set, "cmd")[0].argv, ["voxtype", "config", "set", "audio.device", "default"]);
+  assert.equal(mic.statusOf(r2.operationId).state, "applying");
+  void voice;
+});
+
+test("[ruling 3a] rollback after a failed set finds the file untouched and finishes without any write", () => {
+  const { mic } = ready();
+  const { effects } = mic.request("remote", 0, { nodeName: "N" });
+  const rb = mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 1);
+  const chk = mic.cmdExit(cmdId(rb, "set"), 1, "", 2);                     // config set itself fails: file never touched
+  assert.deepEqual(kinds(chk), ["get"]);                                   // rollback still starts with the conflict check
+  const done = mic.cmdExit(cmdId(chk, "get"), 0, GET_OUT, 3);              // file still holds the original (absent) literal
+  assert.deepEqual(kinds(done), []);                                       // no set/unset/restart: nothing to undo
+  assert.deepEqual(byType(done, "conflict"), []);
+  const d = byType(done, "done")[0];
+  assert.equal(d.state, "failed");
+  assert.equal(d.error, "set-failed");
+  assert.equal(d.rollback, "verified");
+});
+
+test("[ruling 3b] a reset mid rollback-restart re-verifies without re-writing, keeping the original error", () => {
+  const { mic } = ready();
+  const { effects, result } = mic.request("remote", 0, { nodeName: "N" });
+  const set = mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 1);
+  const restart = mic.cmdExit(cmdId(set, "set"), 0, "", 2);
+  mic.cmdExit(cmdId(restart, "restart"), 0, "", 3);
+  const chk = mic.verifyResult(false, 5000);                               // verify fails -> rollback entry
+  const rb = mic.cmdExit(cmdId(chk, "get"), 0, JSON.stringify({ value: "N", file_value: "N" }), 5001);
+  const restart2 = mic.cmdExit(cmdId(rb, "unset"), 0, "", 5002);           // rollback-restart issued
+  assert.deepEqual(kinds(restart2), ["restart"]);
+  mic.reset(5003);                                                          // reset while that restart is in flight
+  assert.equal(mic.statusOf(result.operationId).rollback, "deferred");
+  assert.deepEqual(kinds(mic.backend("idle", 5100, { fresh: true })), []); // restart still outstanding
+  const resumed = mic.cmdExit(cmdId(restart2, "restart"), 0, "", 5200);    // stale restart drains; deferred rollback resumes
+  assert.deepEqual(kinds(resumed), ["get"]);                                 // re-checks for external edits first
+  const again = mic.cmdExit(cmdId(resumed, "get"), 0, JSON.stringify({ value: null, file_value: null }), 5201);
+  assert.deepEqual(kinds(again), ["restart"]);                               // file already reverted: exactly one further restart
+  const v = mic.cmdExit(cmdId(again, "restart"), 0, "", 5202);
+  assert.equal(byType(v, "verify").length, 1);
+  const done = mic.verifyResult(true, 6000);
+  const d = byType(done, "done")[0];
+  assert.equal(d.error, "verify-failed");                                  // original failure reason survives the deferred rollback
+  assert.equal(d.rollback, "verified");
+});
+
+test("[ruling 4a] a systemd job discovered right after the preflight read blocks the set with no mutation", () => {
+  const { voice, mic } = ready();
+  const { effects, result } = mic.request("remote", 0, { nodeName: "N" });
+  mic.systemdJob(true, 1);
+  const fx = mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 2);
+  assert.deepEqual(kinds(fx), []);
+  assert.equal(byType(fx, "done")[0].error, "job-pending");
+  assert.equal(mic.statusOf(result.operationId).state, "failed");
+  assert.equal(voice.gate.busy(), false);
+});
+
+test("[ruling 4b] a systemd job discovered right before the apply restart defers rollback instead of racing it", () => {
+  const { mic } = ready();
+  const { effects, result } = mic.request("remote", 0, { nodeName: "N" });
+  const fx = mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 1);
+  mic.systemdJob(true, 2);
+  const done = mic.cmdExit(cmdId(fx, "set"), 0, "", 3);
+  assert.deepEqual(kinds(done), []);                                       // no restart raced the job
+  assert.equal(byType(done, "done")[0].rollback, "deferred");
+  assert.equal(mic.pending(), true);
+  const resumed = mic.systemdJob(false, 100);                              // job clears; backend view still fresh from ready()
+  assert.deepEqual(kinds(resumed), ["get"]);                                 // deferred rollback resumes with its own conflict check
+  const rb = mic.cmdExit(cmdId(resumed, "get"), 0, JSON.stringify({ value: "N", file_value: "N" }), 101);
+  assert.deepEqual(byType(rb, "cmd")[0].argv, ["voxtype", "config", "unset", "audio.device"]);
+  const restart2 = mic.cmdExit(cmdId(rb, "unset"), 0, "", 102);
+  assert.deepEqual(kinds(restart2), ["restart"]);
+  const verify2 = mic.cmdExit(cmdId(restart2, "restart"), 0, "", 103);
+  assert.equal(byType(verify2, "verify").length, 1);
+  assert.equal(mic.statusOf(result.operationId).state, "rollingBack");
+});
+
+test("[ruling 4c] a systemd job discovered at verify failure defers rollback without reading first", () => {
+  const { mic } = ready();
+  const { effects } = mic.request("remote", 0, { nodeName: "N" });
+  const set = mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 1);
+  const restart = mic.cmdExit(cmdId(set, "set"), 0, "", 2);
+  mic.cmdExit(cmdId(restart, "restart"), 0, "", 3);
+  mic.systemdJob(true, 4);
+  const fx = mic.verifyResult(false, 100);
+  assert.deepEqual(kinds(fx), []);                                          // no get/unset/restart issued while the job is live
+  assert.equal(byType(fx, "done")[0].rollback, "deferred");
+  assert.equal(mic.pending(), true);
+});
+
+test("[ruling 5] a verify report is correlated to the outstanding verify only", () => {
+  const { mic } = ready();
+  const { effects, result } = mic.request("remote", 0, { nodeName: "N" });
+  const set = mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 1);
+  const restart = mic.cmdExit(cmdId(set, "set"), 0, "", 2);
+  const verified = mic.cmdExit(cmdId(restart, "restart"), 0, "", 3);
+  const firstVerifyId = byType(verified, "verify")[0].id;
+  assert.ok(firstVerifyId);
+  const timedOut = mic.advance(3 + 10000);                                 // apply verify times out -> rollback begins
+  assert.deepEqual(kinds(timedOut), ["get"]);
+  const rb = mic.cmdExit(cmdId(timedOut, "get"), 0, JSON.stringify({ value: "N", file_value: "N" }), 10004);
+  const rbRestart = mic.cmdExit(cmdId(rb, "unset"), 0, "", 10005);
+  const rbVerified = mic.cmdExit(cmdId(rbRestart, "restart"), 0, "", 10006);
+  const secondVerifyId = byType(rbVerified, "verify")[0].id;
+  assert.ok(secondVerifyId);
+  assert.notEqual(secondVerifyId, firstVerifyId);
+  const stale = mic.verifyResult(true, 20000, firstVerifyId);              // the long-dead apply verify reports back late
+  assert.deepEqual(stale, []);
+  assert.equal(mic.statusOf(result.operationId).state, "rollingBack");     // ignored: the rollback verify is still outstanding
+  const done = mic.verifyResult(true, 20001, secondVerifyId);
+  assert.equal(byType(done, "done")[0].rollback, "verified");
+  assert.equal(mic.statusOf(result.operationId).state, "failed");
+});
