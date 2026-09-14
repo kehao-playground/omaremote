@@ -17,8 +17,12 @@ lint:
 	@if [ -n "$(QML)" ]; then QT_QPA_PLATFORM=offscreen QT_FORCE_STDERR_LOGGING=1 "$(QML)" tests/harness/ModuleLoad.qml 2>&1 | grep -q '^.*module-load: ok$$' && echo "module-load: ok"; else echo "qml tool not found - module load check skipped"; fi
 	@if command -v omarchy >/dev/null 2>&1; then omarchy plugin validate .; else echo "omarchy CLI not found - skipped"; fi
 
+# Finding #6 (final-review.md): gate on quickshell + a discoverable Wayland socket, not $$WAYLAND_DISPLAY —
+# that's unset in every non-interactive shell (Ruling 7), so `make check` silently skipped integration there
+# even though tests/fake-remote.sh itself recovers the socket fine. Mirror that recovery here.
 check: test lint
-	@if [ -n "$$WAYLAND_DISPLAY" ] && command -v qs >/dev/null 2>&1; then bash tests/fake-remote.sh; else echo "integration skipped (no Wayland session / quickshell)"; fi
+	@RUNTIME="$${XDG_RUNTIME_DIR:-/run/user/$$(id -u)}"; \
+	if command -v qs >/dev/null 2>&1 && ls "$$RUNTIME"/wayland-[0-9]* >/dev/null 2>&1; then bash tests/fake-remote.sh; else echo "integration skipped (no Wayland session / quickshell)"; fi
 
 # Integration scenarios against a second Quickshell instance with fake adapters (Task 4+).
 integration:
