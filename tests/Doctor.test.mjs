@@ -87,3 +87,53 @@ test("missing facts are unknown, never pass", () => {
   assert.ok(rows.every(r => r.status !== "pass" || r.id === "panic-key"));
   assert.equal(row(rows, "keyd-service").status, "unknown");
 });
+
+test("tools fix: only pw-dump missing -> pacman install pipewire", () => {
+  const f = good(); f.tools["pw-dump"] = false;
+  const r = row(evaluate(f, config), "tools");
+  assert.equal(r.status, "fail");
+  assert.equal(r.fix, "sudo pacman -S --needed pipewire");
+});
+
+test("tools fix: wpctl and pw-dump missing -> pacman install wireplumber and pipewire", () => {
+  const f = good(); f.tools.wpctl = false; f.tools["pw-dump"] = false;
+  const r = row(evaluate(f, config), "tools");
+  assert.equal(r.status, "fail");
+  assert.equal(r.fix, "sudo pacman -S --needed wireplumber pipewire");
+});
+
+test("tools fix: only voxtype missing -> omarchy-update", () => {
+  const f = good(); f.tools.voxtype = false;
+  const r = row(evaluate(f, config), "tools");
+  assert.equal(r.status, "fail");
+  assert.equal(r.fix, "omarchy-update");
+});
+
+test("tools fix: wtype and voxtype missing -> pacman install wtype && omarchy-update", () => {
+  const f = good(); f.tools.wtype = false; f.tools.voxtype = false;
+  const r = row(evaluate(f, config), "tools");
+  assert.equal(r.status, "fail");
+  assert.equal(r.fix, "sudo pacman -S --needed wtype && omarchy-update");
+});
+
+test("voxtype-version: tools.voxtype false with no version -> fail with voxtype not installed", () => {
+  const f = good(); f.tools.voxtype = false; f.voxtype = {};
+  const r = row(evaluate(f, config), "voxtype-version");
+  assert.equal(r.status, "fail");
+  assert.equal(r.detail, "voxtype not installed");
+  assert.equal(r.fix, "omarchy-update  # Voxtype >= 0.8 ships with Omarchy");
+});
+
+test("summarize: tools fail does not mark summary unconfigured in remote mode", () => {
+  const f = good(); f.tools.wtype = false;
+  const rows = evaluate(f, config);
+  assert.equal(row(rows, "tools").status, "fail");
+  assert.equal(summarize(rows, config), "ready");
+});
+
+test("summarize: voxtype binary missing marks summary unconfigured", () => {
+  const f = good(); f.tools.voxtype = false; f.voxtype = {};
+  const rows = evaluate(f, config);
+  assert.equal(row(rows, "voxtype-version").status, "fail");
+  assert.equal(summarize(rows, config), "unconfigured");
+});
