@@ -58,6 +58,71 @@ trap 'stop_harness; rm -rf "$OMAREMOTE_FAKE_DIR"' EXIT
 s_ping() { [[ $(ipc ping) == ok ]]; }
 scenario ping s_ping
 
+# ---- Task 5: config + engine + actions ----
+s_config_created() {
+  wait_for '.config' true 5 || return 1
+  jq -e '.version == 1 and .keys.menu.panic == true' "$XDG_CONFIG_HOME/omaremote/config.json" > /dev/null
+}
+s_tap_and_hold() {
+  wait_for '.config' true 5 || return 1
+  ipc key ok down > /dev/null; sleep 0.45; ipc key ok up > /dev/null; sleep 0.15
+  has_line "$F/actions.log" "wtype -M ctrl -k c -m ctrl" || return 1
+  [[ $(jget '.lastAction') == "ok:hold:Ctrl+C" ]] || { echo "    lastAction=$(jget '.lastAction')"; return 1; }
+  [[ $(jget '.flash') == "OK · hold → Ctrl+C" ]] || return 1
+  ipc key ok down > /dev/null; ipc key ok up > /dev/null; sleep 0.15
+  has_line "$F/actions.log" "wtype -k Return"
+}
+s_simple_key_fires_on_press() {
+  wait_for '.config' true 5 || return 1
+  ipc key home down > /dev/null; sleep 0.15
+  [[ $(jget '.lastAction') == "home:tap:exec omarchy-menu" ]] || return 1
+  has_line "$F/actions.log" "hyprctl dispatch exec omarchy-menu"      # OMAREMOTE_DISPATCH=hyprctl in the harness; live shell uses Hyprland.dispatch
+}
+s_repeat() {
+  wait_for '.config' true 5 || return 1
+  ipc key up down > /dev/null; sleep 0.65; ipc key up up > /dev/null; sleep 0.1
+  (( $(grep -cxF "wtype -k Up" "$F/actions.log") >= 3 ))
+}
+s_panic_reset() {
+  wait_for '.config' true 5 || return 1
+  ipc key menu down > /dev/null; sleep 1.6
+  [[ $(jget '.flash') == Reset ]] || { echo "    flash=$(jget '.flash')"; return 1; }
+  [[ $(jget '.heldKeys | length') == 0 ]] || return 1
+  ipc key menu up > /dev/null; sleep 0.1
+  no_line "$F/actions.log" "wtype -k Tab"
+}
+s_ipc_reset_clears_held_keys() {
+  wait_for '.config' true 5 || return 1
+  ipc key ok down > /dev/null; sleep 0.05
+  [[ $(jget '.heldKeys | join(",")') == ok ]] || return 1
+  [[ $(ipc reset) == ok ]] && wait_for '.heldKeys | length' 0
+}
+s_config_external_reload() {
+  wait_for '.config' true 5 || return 1
+  local f=$XDG_CONFIG_HOME/omaremote/config.json
+  jq '.timing.holdMs = 900 | .keep_me = {"x": 1}' "$f" > "$F/c.json" && cat "$F/c.json" > "$f"     # in-place: keep the watched inode
+  wait_for '.timing.holdMs' 900 5 || return 1
+  ipc key ok down > /dev/null; sleep 0.5; ipc key ok up > /dev/null; sleep 0.15
+  has_line "$F/actions.log" "wtype -k Return"                                                        # 500 ms < new holdMs: tap, not hold
+}
+s_corrupt_config_never_overwritten() {
+  wait_for '.config' true 5 || return 1
+  local f=$XDG_CONFIG_HOME/omaremote/config.json
+  printf '{ broken' > "$f"
+  wait_for '.configInvalid' true 5 || return 1
+  ipc key ok down > /dev/null; ipc key ok up > /dev/null; sleep 0.15
+  has_line "$F/actions.log" "wtype -k Return" || return 1          # defaults keep working
+  [[ $(cat "$f") == '{ broken' ]]
+}
+scenario config_created s_config_created
+scenario tap_and_hold s_tap_and_hold
+scenario simple_key_fires_on_press s_simple_key_fires_on_press
+scenario repeat s_repeat
+scenario panic_reset s_panic_reset
+scenario ipc_reset_clears_held_keys s_ipc_reset_clears_held_keys
+scenario config_external_reload s_config_external_reload
+scenario corrupt_config_never_overwritten s_corrupt_config_never_overwritten
+
 # ---- summary ---------------------------------------------------------------------
 echo "integration: $pass passed, $fail failed"
 (( fail == 0 )) || { printf '  %s\n' "${failed[@]}"; exit 1; }
