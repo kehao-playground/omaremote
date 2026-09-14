@@ -38,6 +38,7 @@ Item {
       property var argv
       property int deadlineMs
       property bool timedOut: false
+      property bool started: false
       property bool exitedSeen: false
       property bool streamDone: false
       property bool killed: false
@@ -48,6 +49,18 @@ Item {
       Process {
         id: proc
         command: job.argv
+        onStarted: job.started = true
+        // A binary that cannot be found/exec'd flips `running` back to false without ever emitting `started`
+        // or `exited` (verified live in a scratch Quickshell 0.3.1 instance) — the StdioCollector below never
+        // finishes either, so without this the job would stay in `_live` forever. Synthesize exit 127.
+        onRunningChanged: {
+          if (!proc.running && !job.started && !job.exitedSeen) {
+            job.code = 127
+            job.exitedSeen = true
+            job.streamDone = true
+            job.maybeDone()
+          }
+        }
         stdout: StdioCollector {
           waitForEnd: true
           onStreamFinished: { job.outText = text; job.streamDone = true; job.maybeDone() }
