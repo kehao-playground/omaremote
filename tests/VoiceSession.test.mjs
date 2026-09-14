@@ -447,3 +447,107 @@ test("stopped during recovery (not restart-pending) is unconfigured; healthy idl
   assert.equal(stateOf(vs.status("stopped", 400)), "unconfigured");
   assert.equal(stateOf(vs.status("idle", 500, { fresh: true })), "idle");
 });
+
+// ---- fix round 1 regressions ----
+test("dl.settle is cleared by maybeRestart; recovery stays under a pending restart, not idle-and-deaf", () => {
+  const vs = hidRecording();
+  const fx = vs.abort(300);
+  vs.cmdExit(cmdId(fx, "cancel"), 0, 310);
+  vs.status("idle", 14000, { fresh: true });          // settle would arm at 15500
+  const b = vs.advance(15300);                         // recovery budget: escalate -> restart (backend idle)
+  assert.equal(byType(b, "restart").length, 1);
+  assert.equal(vs.nextDeadline(), 25300);              // only the restart bound remains, settle was dropped
+  assert.deepEqual(kinds(vs.advance(15500)), []);      // the old settle deadline must not fire underneath the restart
+  assert.equal(vs.snapshot().state, "recovering");
+  assert.equal(vs.nextDeadline(), 25300);
+  const rr = vs.restartResult(true, 25300);            // still honoured, not orphaned
+  assert.equal(byType(rr, "poll").length, 1);
+});
+
+test("a second abort() during recovery-from-starting preserves phantom classification: a late recording is re-cancelled, not external", () => {
+  const vs = createVoiceSession(cfg());
+  vs.status("idle", 0, { fresh: true });
+  vs.hidPress(10);
+  const fx = vs.advance(1510);                         // start-timeout -> recovering (unconfirmedEntry = true)
+  vs.cmdExit(cmdId(fx, "cancel"), 0, 1520);
+  vs.status("idle", 1530, { fresh: true });            // accepted fresh idle
+  const fx2 = vs.abort(1600);                          // abort again while already recovering
+  assert.deepEqual(kinds(fx2), ["cancel"]);
+  vs.cmdExit(cmdId(fx2, "cancel"), 0, 1610);           // cancel reaped
+  vs.status("idle", 1620, { fresh: true });            // accepted fresh idle again
+  const phantom = vs.status("recording", 1700);         // late SIGUSR1 lands
+  assert.deepEqual(kinds(phantom), ["cancel"]);          // re-cancelled, not treated as external
+  assert.equal(vs.snapshot().cancels, 2);
+});
+
+test("abort during a pending restart preserves it; restartResult is honoured and no restart is ever emitted twice", () => {
+  const vs = hidRecording();
+  const fx = vs.abort(300);
+  vs.cmdExit(cmdId(fx, "cancel"), 0, 310);
+  vs.status("idle", 14000, { fresh: true });
+  const b = vs.advance(15300);                          // escalate -> restart (the only restart so far)
+  assert.equal(byType(b, "restart").length, 1);
+  const fx2 = vs.abort(15400);                          // abort while the host restart is in flight
+  assert.deepEqual(kinds(fx2), ["cancel"]);
+  assert.equal(byType(fx2, "restart").length, 0);
+  assert.equal(vs.nextDeadline(), 25300);               // original restart deadline preserved, not replaced by a fresh recovery budget
+  const rr = vs.restartResult(true, 25300);             // still honoured -- not orphaned
+  assert.equal(byType(rr, "poll").length, 1);
+  assert.equal(vs.snapshot().state, "recovering");
+});
+
+test("the recovery budget pauses across external dictation instead of escalating to a restart", () => {
+  const vs = hidRecording();
+  const fx = vs.abort(300);
+  vs.cmdExit(cmdId(fx, "cancel"), 0, 310);
+  vs.status("idle", 320, { fresh: true });              // accepted; settle armed
+  vs.status("recording", 900);                           // external dictation begins
+  assert.equal(vs.snapshot().state, "recovering");
+  const b = vs.advance(15300);                           // recovery budget expires mid external work
+  assert.deepEqual(kinds(b), []);
+  assert.equal(byType(b, "restart").length, 0);           // must not escalate/restart while external
+  assert.equal(vs.nextDeadline(), 15300 + 15000);          // budget re-armed, not converted into a restart deadline
+  const idle = vs.status("idle", 16000);                   // external session ends
+  assert.equal(byType(idle, "restart").length, 0);
+  assert.equal(vs.nextDeadline(), 16000 + 1500);            // settle window re-armed instead
+  assert.equal(stateOf(vs.advance(17500)), "idle");
+});
+
+test("a signal is dropped when no setDbusSource has been called yet (fails closed, not open)", () => {
+  const vs = createVoiceSession(cfg());
+  vs.status("idle", 0, { fresh: true });
+  assert.deepEqual(vs.dbus(D("streaming"), 0), []);
+  assert.equal(vs.snapshot().state, "idle");
+});
+
+test("a signal missing the generation field is dropped even from the correct sender", () => {
+  const vs = idleSession();
+  const ev = D("streaming");
+  delete ev.generation;
+  assert.deepEqual(vs.dbus(ev, 0), []);
+  assert.equal(vs.snapshot().state, "idle");
+});
+
+test("after a successful restart, a later recording following an accepted idle is treated as external, not phantom", () => {
+  const vs = createVoiceSession(cfg());
+  vs.status("idle", 0, { fresh: true });
+  vs.hidPress(10);
+  const fx = vs.advance(1510);                          // start-timeout -> recovering, unconfirmedEntry = true
+  vs.cmdExit(cmdId(fx, "cancel"), 0, 1520);
+  vs.status("idle", 1530, { fresh: true });
+  const c2 = vs.status("recording", 1600); assert.deepEqual(kinds(c2), ["cancel"]);
+  vs.cmdExit(cmdId(c2, "cancel"), 0, 1610);
+  vs.status("idle", 1620);
+  const c3 = vs.status("recording", 1700); assert.deepEqual(kinds(c3), ["cancel"]);
+  vs.cmdExit(cmdId(c3, "cancel"), 0, 1710);
+  vs.status("idle", 1720);
+  const c4 = vs.status("recording", 1800); assert.deepEqual(kinds(c4), []);   // budget exhausted, escalate
+  const quiet = vs.status("idle", 1900);
+  assert.equal(byType(quiet, "restart").length, 1);
+  const rr = vs.restartResult(true, 3000);
+  assert.equal(byType(rr, "poll").length, 1);
+  vs.status("idle", 3100, { fresh: true });              // accepted fresh idle post-restart
+  const ext = vs.status("recording", 3200);               // user starts F9 for real this time
+  assert.deepEqual(kinds(ext), []);                        // observed as external, no cancel -- unconfirmedEntry was cleared
+  assert.equal(vs.snapshot().cancels, 0);
+});
