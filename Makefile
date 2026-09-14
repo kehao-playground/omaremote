@@ -18,6 +18,7 @@ lint:
 	@if command -v omarchy >/dev/null 2>&1; then omarchy plugin validate .; else echo "omarchy CLI not found - skipped"; fi
 
 check: test lint
+	@if [ -n "$$WAYLAND_DISPLAY" ] && command -v qs >/dev/null 2>&1; then bash tests/fake-remote.sh; else echo "integration skipped (no Wayland session / quickshell)"; fi
 
 # Integration scenarios against a second Quickshell instance with fake adapters (Task 4+).
 integration:
