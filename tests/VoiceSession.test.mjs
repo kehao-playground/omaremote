@@ -627,3 +627,24 @@ test("after a successful restart, a later recording following an accepted idle i
   assert.deepEqual(kinds(ext), []);                        // observed as external, no cancel -- unconfirmedEntry was cleared
   assert.equal(vs.snapshot().cancels, 0);
 });
+
+test("a pending D-Bus end re-read is dropped when the backend leaves recording on its own", () => {
+  const vs = idleSession();
+  vs.dbus(D("streaming"), 0); vs.advance(250); vs.atvRead(A(vs, "streaming"), 260);
+  vs.status("idle", 270, { fresh: true }); vs.status("recording", 400);
+  vs.dbus(D("connected"), 900);                                   // readAtv issued, bounded at 1400
+  vs.status("transcribing", 950);                                 // backend stopped by itself
+  assert.equal(vs.nextDeadline(), 950 + 15000);                   // no stale 1400 deadline
+  assert.deepEqual(vs.advance(1400), []);
+  assert.equal(vs.nextDeadline(), 950 + 15000);
+});
+
+test("a pending D-Bus end re-read is dropped when a stop is requested for another reason", () => {
+  const vs = idleSession(); vs.setConfig(cfg({ voice: { ...DEFAULT_CONFIG.voice, maxSessionSec: 1 } }));
+  vs.dbus(D("streaming"), 0); vs.advance(250); vs.atvRead(A(vs, "streaming"), 260);
+  vs.status("idle", 270, { fresh: true }); vs.status("recording", 400);   // max session at 1400
+  vs.dbus(D("connected"), 950);                                   // re-read bounded at 1450
+  assert.deepEqual(kinds(vs.advance(1400)), ["stop"]);            // max session stops first
+  assert.equal(vs.nextDeadline(), 1400 + 15000);                  // no stale 1450 deadline
+  assert.deepEqual(vs.advance(1450), []);
+});
