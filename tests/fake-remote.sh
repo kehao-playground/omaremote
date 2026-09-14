@@ -298,15 +298,15 @@ s_mic_apply_restart_fails_rolls_back() {  # §9: verification fails → rollback
   [[ $(jq -r .voice.mic "$XDG_CONFIG_HOME/omaremote/config.json") == remote ]] || return 1
   [[ $(jget '.voice.state') == idle ]]
 }
-s_mic_apply_job_pending_blocks() {         # §3: a live systemd job (any origin) blocks the initial mutation
-  ready || return 1
+s_mic_apply_job_pending_blocks() {         # §3: a live systemd job (any origin) blocks the initial mutation; a request made while
+  ready || return 1                        # one is already live simply waits (queued), like a busy session — never fails fast
   printf '55 start\n' > "$F/sysd.job"
   local id; id=$(ipc mic system | jq -r .operationId)
-  [[ $(mic_wait "$id" 8) == failed ]] || return 1
+  sleep 1.5                                                          # let the verifier's fresh `show` land and confirm the job
+  [[ $(ipc micStatus "$id" | jq -r .state) == queued ]] || { ipc micStatus "$id"; return 1; }
   no_line "$F/vox.log" "voxtype config set audio.device default" || return 1
   no_line "$F/sysd.log" "systemctl --user restart voxtype" || return 1
-  : > "$F/sysd.job"
-  id=$(ipc mic system | jq -r .operationId)
+  : > "$F/sysd.job"                                                  # job clears; the same still-queued operation proceeds on its own
   [[ $(mic_wait "$id") == succeeded ]]
 }
 s_recovery_restart_bounded() {             # §5.3/§9: daemon hangs after abort (cancel ignored, polls unanswered) → one bounded restart → verified → idle

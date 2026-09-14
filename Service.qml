@@ -105,6 +105,7 @@ Item {
       case "readAtv": atv.readState(e.requestId); break
       case "micClose": atv.micClose(); voice.micClosed(); break
       case "restart": runner.cancelAll("voice"); vox.restart(); verifier.beginRecovery(Date.now()); break   // §5.3: reap, then bounded restart
+      case "show": verifier.pollJob(); break                                                            // Fix round 1 (Ruling 14): mic needs a fresh systemd job reading
       case "verify": verifier.beginVerify("mic", e.id, Date.now()); break
       case "commit": configStore.setVoiceMic(e.mode); root.refreshAudioDevice(); break                 // §3 step 4
       case "done": root.micLast = e; root.micPending = mic.pending(); if (e.state !== "queued") root.refreshDoctor(); break

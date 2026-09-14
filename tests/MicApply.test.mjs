@@ -15,6 +15,7 @@ function ready() {
   voice.status("idle", 0, { fresh: true });
   const mic = createMicApply({ voice });
   mic.backend("idle", 0, { fresh: true });
+  mic.systemdJob(false, 0);       // Fix round 1 (Ruling 14): a fresh systemd job reading, exactly like the backend reading above
   return { voice, mic };
 }
 
@@ -27,8 +28,10 @@ test("parseConfigGet distinguishes absent literal from a set one", () => {
 
 test("happy path: get -> set -> restart -> verify -> commit -> succeeded, gate released", () => {
   const { voice, mic } = ready();
-  const { effects, result } = mic.request("remote", 10, { nodeName: "G20S PRO" });
+  const { effects: requested, result } = mic.request("remote", 10, { nodeName: "G20S PRO" });
   assert.equal(result.ok, true);
+  assert.deepEqual(kinds(requested), []);                          // ready()'s job reading (t=0) predates this request
+  const effects = mic.systemdJob(false, 10);                       // a fresh reading, taken at the request
   assert.deepEqual(kinds(effects), ["get"]);
   assert.deepEqual(byType(effects, "cmd")[0].argv, ["voxtype", "config", "get", "audio.device", "--json"]);
   assert.equal(voice.gate.busy(), true);
@@ -74,6 +77,7 @@ test("once the session goes idle a queued request needs a fresh backend idle, th
   const { voice, mic } = ready();
   const st = voice.hidPress(0); voice.cmdExit(cmdId(st, "start"), 0, 10); voice.status("recording", 50);
   const { result } = mic.request("system", 100, {});
+  mic.systemdJob(false, 100);                                   // a fresh job reading taken at the request; session is still busy either way
   const sp = voice.hidRelease(200); voice.cmdExit(cmdId(sp, "stop"), 0, 210);
   voice.status("transcribing", 250); voice.status("idle", 1400);
   const p = mic.advance(1401);                                  // session idle, but our backend view (t=0) is stale -> poll
@@ -321,6 +325,7 @@ test("a stale command from a reset operation cannot be misdispatched as the next
   const { effects: e2, result: r2 } = mic.request("system", 2, {});        // accepted, but must wait for the stale get to drain
   assert.deepEqual(kinds(e2), []);
   assert.equal(mic.statusOf(r2.operationId).state, "queued");
+  mic.systemdJob(false, 2);                                                // a fresh job reading for op2, taken at its request
   const stale = mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 3);         // the first op's get finally exits
   assert.deepEqual(kinds(stale), ["get"]);                                 // draining kicks the new op's own get immediately, never a `set`
   assert.equal(mic.statusOf(r2.operationId).state, "applying");
@@ -471,4 +476,39 @@ test("a deferred rollback blocked only on backend freshness re-polls, then proce
   const go = mic.backend("idle", 1000, { fresh: true });                   // fresh answer -> deferred rollback starts
   assert.deepEqual(kinds(go), ["get"]);
   assert.equal(mic.statusOf(result.operationId).state, "rollingBack");
+});
+
+// ---- Fix round 1 (Controller Ruling 14): tryReserve must wait for a systemd job reading taken at or
+// after the request, not act on a stale/absent reading from before it (§3 "never mutate while a
+// systemd job is pending" — a `voxtype config get` racing the verifier's first `show` must not win). ----
+
+test("a fresh systemd job reading is required after the request before any mutation begins", () => {
+  const { mic } = ready();
+  const t0 = 1000;
+  const { effects, result } = mic.request("system", t0, {});
+  assert.deepEqual(kinds(effects), []);                          // no `get` yet: the ready() job reading (t=0) predates this request
+  assert.equal(byType(effects, "show").length, 1);                // a fresh systemd job reading is requested
+  const stillBlocked = mic.systemdJob(true, t0 + 10);             // a job is in fact live: still no mutation
+  assert.deepEqual(kinds(stillBlocked), []);
+  assert.equal(mic.statusOf(result.operationId).state, "queued");
+  mic.backend("idle", t0 + 20, { fresh: true });                  // keep the backend reading fresh too: only the job gate is under test
+  const go = mic.systemdJob(false, t0 + 20);                      // job clears; this reading was taken after the request
+  assert.deepEqual(kinds(go), ["get"]);
+  assert.equal(mic.statusOf(result.operationId).state, "applying");
+});
+
+test("a systemd job reading taken only before the request does not satisfy the freshness check", () => {
+  const { mic } = ready();
+  const t0 = 5000;
+  mic.systemdJob(false, t0 - 5000);                               // a reading exists, but it predates the request by 5s
+  const { effects, result } = mic.request("system", t0, {});
+  assert.deepEqual(kinds(effects), []);
+  assert.equal(byType(effects, "show").length, 1);                // stale relative to this request: ask again
+  const stale = mic.systemdJob(false, t0 - 1);                    // still before the request: still not enough
+  assert.deepEqual(kinds(stale), []);
+  assert.equal(mic.statusOf(result.operationId).state, "queued");
+  mic.backend("idle", t0 + 1, { fresh: true });                   // keep the backend reading fresh too: only the job gate is under test
+  const go = mic.systemdJob(false, t0 + 1);                       // a reading taken after the request
+  assert.deepEqual(kinds(go), ["get"]);
+  assert.equal(mic.statusOf(result.operationId).state, "applying");
 });
