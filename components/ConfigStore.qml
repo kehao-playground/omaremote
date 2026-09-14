@@ -16,6 +16,7 @@ Item {
   signal changed(string kind)                  // load | external | keys | timing | voice | commit | reset-keys
   signal saveFailed(string reason)
   property string _lastWritten: ""
+  property string _lastGoodText: ""             // the raw text behind the current root.raw/config, whoever wrote it
 
   FileView {
     id: file
@@ -28,13 +29,24 @@ Item {
     onFileChanged: file.reload()
     onSaveFailed: function(error) { root.saveFailed(String(error)) }
   }
+  // §3/§8: an in-place external edit (`cat new > config.json`, what many editors/scripts do) truncates then
+  // writes; FileView's watcher can fire and be read in that gap, landing an empty read that is NOT a real
+  // "file missing". Only the very first load, or a genuine FileNotFound, may treat empty as "apply defaults" —
+  // any later empty read is transient: ignore it and retry the reload once, rather than aborting the session.
+  // The retry's own reload can itself land after the real content already arrived by some other path (the
+  // watcher firing again on its own); _lastGoodText below makes that a no-op instead of a second, spurious
+  // "external" change (which would otherwise re-run engine.reload()/voice.abort() with nothing to abort — a fake
+  // regression a currently in-flight key press could observe as its held state being wiped mid-hold).
+  Timer { id: reloadRetry; interval: 100; repeat: false; onTriggered: file.reload() }
 
   function _ingest(text, createIfMissing) {
-    if (root.loaded && text === root._lastWritten) return          // our own write echoed by the watcher
+    if (root.loaded && (text === root._lastWritten || text === root._lastGoodText)) return   // nothing actually changed
+    if (root.loaded && !createIfMissing && text.trim() === "") { reloadRetry.restart(); return }
     var r = ConfigFile.load(text)
     root.raw = r.raw; root.config = r.config; root.problems = r.problems; root.invalid = r.invalid
     var first = !root.loaded
     root.loaded = true
+    root._lastGoodText = text
     if (r.missing && createIfMissing) root._write(r.raw)
     root.changed(first ? "load" : "external")
   }
@@ -44,6 +56,7 @@ Item {
     var text = ConfigFile.serialize(raw)
     var r = ConfigFile.load(text)
     root._lastWritten = text
+    root._lastGoodText = text
     root.raw = r.raw; root.config = r.config; root.problems = r.problems
     file.setText(text)
     return true
