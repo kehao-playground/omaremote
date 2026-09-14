@@ -98,3 +98,13 @@ test("external recording ends the lease at once: gate released, no more injectio
   assert.equal(g.busy(), false);
   assert.equal(st.status(id2, 403), null);
 });
+
+test("status reports an expired lease as inactive without ending it", () => {
+  const { g, st } = mk();
+  const { id } = st.arm(0, okCtx);
+  assert.deepEqual(st.status(id, 29999), { active: true, remainingMs: 1, failed: undefined });
+  assert.deepEqual(st.status(id, 30000), { active: false, remainingMs: 0, failed: undefined });
+  assert.equal(g.busy(), true);
+  assert.deepEqual(st.advance(30000), [{ type: "selftestExpired", id }]);
+  assert.equal(g.busy(), false);
+});
