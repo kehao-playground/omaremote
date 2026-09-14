@@ -28,7 +28,7 @@ Item {
   }
 
   GlobalShortcut {
-    appid: "omaremote"
+    appid: Quickshell.env("OMAREMOTE_APPID") || "omaremote"
     name: "up"
     onPressed: root.pressCount++
     onReleased: root.releaseCount++
@@ -54,7 +54,7 @@ Item {
   }
 
   IpcHandler {
-    target: "omaremote"
+    target: Quickshell.env("OMAREMOTE_IPC_TARGET") || "omaremote"
     function ping(): string { return "ok" }
     function es(): string { return root.esCheck() }
     function counts(): string {

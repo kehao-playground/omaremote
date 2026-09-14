@@ -5,7 +5,6 @@
 # Usage: tests/fake-remote.sh [scenario-name]
 set -uo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-HARNESS=$ROOT/tests/harness
 
 # Non-interactive shells lack the session variables; recover them like /usr/bin/omarchy-shell does.
 RUNTIME=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
@@ -20,6 +19,7 @@ export PATH=$ROOT/tests/fakes/bin:$PATH
 ONLY=${1:-}
 pass=0; fail=0; failed=(); HPID=""
 F=$OMAREMOTE_FAKE_DIR
+HARNESS=$F/harness # materialized by start_harness — Quickshell only loads QML under its config root
 
 ipc() { qs ipc -p "$HARNESS" call -- omaremote-test "$@"; }
 jget() { ipc status | jq -r "$1"; }
@@ -37,6 +37,8 @@ reset_fakes() {
   cp "$ROOT/tests/fixtures/pw-dump.json" "$F/pw-dump.json"
 }
 start_harness() {
+  mkdir -p "$HARNESS"; cp "$ROOT/tests/harness/shell.qml" "$HARNESS/shell.qml"
+  for e in Service.qml lib components host; do [[ -e $ROOT/$e ]] && ln -sfn "$ROOT/$e" "$HARNESS/$e"; done
   qs -p "$HARNESS" --no-duplicate > "$F/harness.log" 2>&1 & HPID=$!
   for _ in $(seq 1 100); do [[ $(ipc ping 2>/dev/null) == ok ]] && return 0; sleep 0.1; done
   echo "    harness did not answer ping:"; sed 's/^/      /' "$F/harness.log"; return 1
