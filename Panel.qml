@@ -49,7 +49,11 @@ Panel {
       id: keyCatcher
       anchors.fill: parent
       blocked: root.editing
-      onMoveRequested: function(dx, dy) { if (dx !== 0) root.switchTab(dx); else root.currentTab.moveCursor(dy) }
+      onMoveRequested: function(dx, dy) {
+        if (dx !== 0 && root.tabIndex === 1 && keysTab.cursor >= 0 && keysTab.cursor < 13) keysTab.moveColumn(dx)
+        else if (dx !== 0) root.switchTab(dx)
+        else root.currentTab.moveCursor(dy)
+      }
       onActivateRequested: root.currentTab.activate()
       onReturnRequested: root.currentTab.activate()
       onCloseRequested: root.close()

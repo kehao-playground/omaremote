@@ -493,6 +493,12 @@ Item {
     return "ok"
   }
 
+  // ---- config writers for the Panel (§6.2: BarWidget/Panel write config only through the Service) ----
+  function setKeyField(name, fields) { configStore.setKey(name, fields) }
+  function setTiming(t) { configStore.setTiming(t) }
+  function resetKeys() { configStore.resetKeys() }
+  function setVoiceField(field, value) { configStore.setVoiceField(field, value) }
+
   // ---- IPC (§2 hardware-free testability) ---------------------------------------
   function statusJson() {
     return JSON.stringify({
