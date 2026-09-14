@@ -34,7 +34,9 @@ case "$sub" in
       printf '{"type":"signal","sender":":1.99","destination":null,"path":"/org/atvvoice/Daemon","interface":"org.atvvoice.Daemon","member":"MicStateChanged","payload":{"signature":"s","data":["%s"]}}\n' "$s"
     done &
     tp=$!
-    trap 'kill $tp 2>/dev/null; exit 0' TERM INT
-    wait $tp ;;
+    cleanup() { pkill -P $$ 2>/dev/null; exit 0; }          # the tail and the reader are both our children; reap both
+    trap cleanup TERM INT
+    while kill -0 "$tp" 2>/dev/null && [[ -d $d ]] && kill -0 "$PPID" 2>/dev/null; do sleep 0.2; done   # stop with the harness
+    cleanup ;;
 esac
 exit 0

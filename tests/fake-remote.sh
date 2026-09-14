@@ -39,11 +39,13 @@ reset_fakes() {
 start_harness() {
   mkdir -p "$HARNESS"; cp "$ROOT/tests/harness/shell.qml" "$HARNESS/shell.qml"
   for e in Service.qml lib components host; do [[ -e $ROOT/$e ]] && ln -sfn "$ROOT/$e" "$HARNESS/$e"; done
-  qs -p "$HARNESS" --no-duplicate > "$F/harness.log" 2>&1 & HPID=$!
+  setsid qs -p "$HARNESS" --no-duplicate > "$F/harness.log" 2>&1 & HPID=$!   # own process group: stop_harness reaps every fake it spawned
   for _ in $(seq 1 100); do [[ $(ipc ping 2>/dev/null) == ok ]] && return 0; sleep 0.1; done
   echo "    harness did not answer ping:"; sed 's/^/      /' "$F/harness.log"; return 1
 }
-stop_harness() { [[ -n $HPID ]] && { kill "$HPID" 2>/dev/null; wait "$HPID" 2>/dev/null; }; HPID=""; }
+stop_harness() {   # kill the whole group — a follow/monitor fake left behind would spin on its state file for hours
+  [[ -n $HPID ]] && { kill -- -"$HPID" 2>/dev/null; kill "$HPID" 2>/dev/null; wait "$HPID" 2>/dev/null; }; HPID=""
+}
 scenario() {   # scenario <name> <function>
   local name=$1 fn=$2
   [[ -n $ONLY && $ONLY != "$name" ]] && return 0
@@ -65,10 +67,11 @@ s_config_created() {
 }
 s_tap_and_hold() {
   wait_for '.config' true 5 || return 1
-  ipc key ok down > /dev/null; sleep 0.45; ipc key ok up > /dev/null; sleep 0.15
+  ipc key ok down > /dev/null; sleep 0.4; ipc key ok up > /dev/null
+  local st; st=$(ipc status)                  # one snapshot right after the edge: the 600 ms flash must be read before IPC round-trips eat it
+  [[ $(jq -r '.lastAction' <<< "$st") == "ok:hold:Ctrl+C" ]] || { echo "    lastAction=$(jq -r '.lastAction' <<< "$st")"; return 1; }
+  [[ $(jq -r '.flash' <<< "$st") == "OK · hold → Ctrl+C" ]] || { echo "    flash=$(jq -r '.flash' <<< "$st")"; return 1; }
   has_line "$F/actions.log" "wtype -M ctrl -k c -m ctrl" || return 1
-  [[ $(jget '.lastAction') == "ok:hold:Ctrl+C" ]] || { echo "    lastAction=$(jget '.lastAction')"; return 1; }
-  [[ $(jget '.flash') == "OK · hold → Ctrl+C" ]] || return 1
   ipc key ok down > /dev/null; ipc key ok up > /dev/null; sleep 0.15
   has_line "$F/actions.log" "wtype -k Return"
 }

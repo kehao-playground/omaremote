@@ -11,6 +11,7 @@ printf '%s\n' "voxtype $*" >> "$d/vox.log"
 state() { cat "$d/vox.state" 2>/dev/null || echo idle; }
 setstate() { printf '%s\n' "$1" > "$d/vox.state"; }
 json() { printf '{"text":"x","alt":"%s","class":"%s","tooltip":""}\n' "$1" "$1"; }
+alive() { [[ -d $d ]] && kill -0 "$PPID" 2>/dev/null; }   # long-running modes stop when the harness (parent) or its temp dir is gone
 case "${1:-}" in
   --version) echo "voxtype 1.0.1" ;;
   record)
@@ -29,9 +30,9 @@ case "${1:-}" in
     if [[ -e $d/vox.stopped ]]; then json stopped; exit 0; fi
     if [[ " $* " == *" --follow "* ]]; then
       last=""
-      while :; do s=$(state); if [[ $s != "$last" && ! -e $d/vox.hang ]]; then json "$s"; last=$s; fi; sleep 0.05; done
+      while alive; do s=$(state); if [[ $s != "$last" && ! -e $d/vox.hang ]]; then json "$s"; last=$s; fi; sleep 0.05; done
     else
-      while [[ -e $d/vox.hang ]]; do sleep 0.2; done
+      while [[ -e $d/vox.hang ]] && alive; do sleep 0.2; done
       json "$(state)"
     fi ;;
   config)
