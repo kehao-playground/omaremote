@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Spec §9: fake busctl for ATVVoice. State files in $OMAREMOTE_FAKE_DIR:
+#   atv.present  exists → org.atvvoice.fake owned by :1.99      atv.state   connected|streaming|disconnected
+#   atv.signals  append a state per line to emit MicStateChanged from `monitor`      atv.log  every invocation
+set -u
+d=${OMAREMOTE_FAKE_DIR:?}
+printf '%s\n' "busctl $*" >> "$d/atv.log"
+sub=""; for a in "$@"; do case $a in --*) ;; *) sub=$a; break ;; esac; done
+present() { [[ -e $d/atv.present ]]; }
+case "$sub" in
+  list)
+    echo ":1.1 858 dbus-broker kehao :1.1 user@1000.service - -"
+    present && echo "org.atvvoice.fake 4242 atvvoice kehao :1.99 user@1000.service - -" ;;
+  call)
+    if [[ " $* " == *" GetNameOwner "* ]]; then
+      present && { echo 's ":1.99"'; exit 0; }
+      echo "Call failed: The name is not activatable" >&2; exit 1
+    fi
+    [[ " $* " == *" MicClose "* ]] && printf 'connected\n' > "$d/atv.state"
+    if [[ " $* " == *" MicToggle "* ]]; then
+      if [[ $(cat "$d/atv.state" 2>/dev/null) == streaming ]]; then printf 'connected\n' > "$d/atv.state"; else printf 'streaming\n' > "$d/atv.state"; fi
+    fi ;;
+  get-property)
+    present || { echo "Failed to get property: no such name" >&2; exit 1; }
+    case "${*: -1}" in
+      State) printf 's "%s"\n' "$(cat "$d/atv.state" 2>/dev/null || echo connected)" ;;
+      NodeName) echo 's "atvvoice_mic"' ;;
+      DeviceAddress) echo 's "AA:BB:CC:DD:EE:FF"' ;;
+    esac ;;
+  monitor)
+    : >> "$d/atv.signals"
+    tail -n 0 -F "$d/atv.signals" 2>/dev/null | while read -r s; do
+      printf '%s\n' "$s" > "$d/atv.state"
+      printf '{"type":"signal","sender":":1.99","destination":null,"path":"/org/atvvoice/Daemon","interface":"org.atvvoice.Daemon","member":"MicStateChanged","payload":{"signature":"s","data":["%s"]}}\n' "$s"
+    done &
+    tp=$!
+    trap 'kill $tp 2>/dev/null; exit 0' TERM INT
+    wait $tp ;;
+esac
+exit 0

@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Spec §9: fake Voxtype CLI. State files in $OMAREMOTE_FAKE_DIR:
+#   vox.state      idle|recording|transcribing (default idle)      vox.config   audio.device literal (absent = unset)
+#   vox.log        every invocation                                 vox.stopped  status reports "stopped"
+#   knobs: vox.start-fails (start exits 1), vox.no-confirm (start never records), vox.start-delay (seconds),
+#          vox.stop-fails, vox.stop-hangs (stop never leaves recording), vox.cancel-ignored, vox.set-fails,
+#          vox.hang (daemon hung: one-shot status never answers, follow stream goes silent; cleared by a fake restart)
+set -u
+d=${OMAREMOTE_FAKE_DIR:?}
+printf '%s\n' "voxtype $*" >> "$d/vox.log"
+state() { cat "$d/vox.state" 2>/dev/null || echo idle; }
+setstate() { printf '%s\n' "$1" > "$d/vox.state"; }
+json() { printf '{"text":"x","alt":"%s","class":"%s","tooltip":""}\n' "$1" "$1"; }
+case "${1:-}" in
+  --version) echo "voxtype 1.0.1" ;;
+  record)
+    case "${2:-}" in
+      start)
+        [[ -e $d/vox.start-fails ]] && exit 1
+        [[ -e $d/vox.no-confirm ]] && exit 0
+        ( sleep "$(cat "$d/vox.start-delay" 2>/dev/null || echo 0.05)"; setstate recording ) & ;;
+      stop)
+        [[ -e $d/vox.stop-fails ]] && exit 1
+        [[ -e $d/vox.stop-hangs ]] && exit 0
+        ( sleep 0.05; setstate transcribing; sleep 0.2; setstate idle ) & ;;
+      cancel) [[ -e $d/vox.cancel-ignored ]] || setstate idle ;;
+    esac ;;
+  status)
+    if [[ -e $d/vox.stopped ]]; then json stopped; exit 0; fi
+    if [[ " $* " == *" --follow "* ]]; then
+      last=""
+      while :; do s=$(state); if [[ $s != "$last" && ! -e $d/vox.hang ]]; then json "$s"; last=$s; fi; sleep 0.05; done
+    else
+      while [[ -e $d/vox.hang ]]; do sleep 0.2; done
+      json "$(state)"
+    fi ;;
+  config)
+    case "${2:-}" in
+      get)
+        case "${3:-}" in
+          audio.device)
+            if [[ -e $d/vox.config ]]; then v=$(cat "$d/vox.config"); printf '{"file_value":"%s","key":"audio.device","value":"%s"}\n' "$v" "$v"
+            else printf '{"file_value":null,"key":"audio.device","value":"default"}\n'; fi ;;
+          output.mode) printf '{"file_value":"type","key":"output.mode","value":"type"}\n' ;;
+        esac ;;
+      set) [[ -e $d/vox.set-fails ]] && exit 1; printf '%s' "${4:-}" > "$d/vox.config" ;;
+      unset) rm -f "$d/vox.config" ;;
+    esac ;;
+esac
+exit 0

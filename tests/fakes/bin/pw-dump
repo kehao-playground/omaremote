@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Spec §9: fake pw-dump — prints $OMAREMOTE_FAKE_DIR/pw-dump.json (default []).
+source "$(dirname "$0")/fake-log.sh"; fake_log "pw-dump $*"
+cat "$OMAREMOTE_FAKE_DIR/pw-dump.json" 2>/dev/null || echo "[]"
+exit 0

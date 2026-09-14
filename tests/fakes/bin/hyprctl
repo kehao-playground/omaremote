@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Spec §9: fake hyprctl — logs argv; `binds -j` prints the bind list from $OMAREMOTE_FAKE_DIR/hypr-binds.json (default []).
+source "$(dirname "$0")/fake-log.sh"; fake_log "hyprctl $*"
+if [[ ${1:-} == binds ]]; then cat "$OMAREMOTE_FAKE_DIR/hypr-binds.json" 2>/dev/null || echo "[]"; fi
+if [[ ${1:-} == version ]]; then echo "Hyprland 0.56.2 (fake)"; fi
+exit 0

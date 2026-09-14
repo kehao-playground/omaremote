@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Spec §9: fake `systemctl --user`. State files in $OMAREMOTE_FAKE_DIR:
+#   sysd.job          non-empty → a job is pending           sysd.invocation   current InvocationID (default inv-0)
+#   sysd.log          every invocation                        sysd.restart-count
+#   knobs: sysd.restart-fails (exit 1), sysd.restart-fails-once (first restart exits 1 and removes the knob),
+#          sysd.restart-hangs (leaves a job pending, no restart), vox.stopped (voxtype inactive)
+set -u
+d=${OMAREMOTE_FAKE_DIR:?}
+printf '%s\n' "systemctl $*" >> "$d/sysd.log"
+args=("$@"); [[ ${args[0]:-} == --user ]] && args=("${args[@]:1}")
+unit=""; for a in "${args[@]:1}"; do case $a in --*) ;; *) unit=$a; break ;; esac; done
+case "${args[0]:-}" in
+  show)
+    printf '%s\n' "$(cat "$d/sysd.job" 2>/dev/null)"
+    if [[ $unit == voxtype && -e $d/vox.stopped ]]; then echo inactive; else echo active; fi
+    printf '%s\n' "$(cat "$d/sysd.invocation" 2>/dev/null || echo inv-0)" ;;
+  restart)
+    [[ -e $d/sysd.restart-fails ]] && exit 1
+    if [[ -e $d/sysd.restart-fails-once ]]; then rm -f "$d/sysd.restart-fails-once"; exit 1; fi
+    if [[ -e $d/sysd.restart-hangs ]]; then printf '77 restart\n' > "$d/sysd.job"; exit 0; fi
+    n=$(cat "$d/sysd.restart-count" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$d/sysd.restart-count"
+    printf 'inv-%s\n' "$n" > "$d/sysd.invocation"
+    rm -f "$d/vox.stopped" "$d/vox.hang" "$d/vox.cancel-ignored"; printf 'idle\n' > "$d/vox.state" ;;   # a restart heals a hung daemon
+  is-active) if [[ $unit == voxtype && -e $d/vox.stopped ]]; then echo inactive; exit 3; fi; echo active ;;
+  is-enabled) echo enabled ;;
+esac
+exit 0
