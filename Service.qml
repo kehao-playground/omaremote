@@ -75,6 +75,7 @@ Item {
   property string doctorSummary: "unknown"
   property var doctorFacts: null
   property double doctorAt: 0
+  property int doctorSeq: 0
   readonly property bool unconfigured: root.voiceState === "unconfigured" || root.doctorSummary === "unconfigured" || root.configInvalid
   readonly property string hudLine: Presentation.hudLine({ voiceState: root.voiceState, hudText: root.hudText, elapsedMs: root.elapsedMs, flash: root.flash })
   Timer { interval: 250; repeat: true; running: root.voiceState === "recording"; onTriggered: root.elapsedMs = Date.now() - root.recordingSince }
@@ -289,6 +290,17 @@ Item {
       var now = Date.now()
       if (src === "voice" && root.voice) root.dispatch(root.guarded("voice.cmdExit", function() { return root.voice.cmdExit(id, code, now) }), "voice")
       if (src === "mic" && root.mic) root.dispatch(root.guarded("mic.cmdExit", function() { return root.mic.cmdExit(id, code, stdout, now) }), "mic")
+      if (src === "doctor") {
+        if (code === 0) {
+          try { root.doctorFacts = JSON.parse(stdout) } catch (e) { console.log("omaremote: facts parse failed: " + e); root.doctorFacts = null }
+          root.evaluateDoctor()
+        } else {                                    // Ruling 16: a wedged/killed facts run (124/137, or any other non-zero exit) is recoverable,
+          root.doctorRows = []                       // never a stuck `doctor` — refreshDoctor() can simply be called again afterwards
+          root.doctorSummary = "facts-timeout"
+          root.errorCount++; root.lastError = "doctor: facts timed out"
+          root.doctorAt = now
+        }
+      }
       root.rearm()
     }
   }
@@ -422,7 +434,7 @@ Item {
     if (mic && mic.pending()) return { ok: false, reason: "busy", detail: "mic operation pending" }
     var s = voice.snapshot()
     var fresh = s.backend === "idle" && s.backendFresh && now - s.backendAt <= 500
-    if (!fresh) { vox.poll(); return { ok: false, reason: "busy", detail: "backend not fresh; retry" } }
+    if (!fresh) { vox.poll(); return { ok: false, reason: "busy", detail: "backend not fresh; retry", retryAfterMs: 300 } }   // Ruling 17: explicit cold-start retry contract
     // DEVIATION (Task 5 review ruling, applied here as it was to Task 7's mic.* call sites): selftest.arm() returns a
     // plain result object, not an effects array, so `guarded` is used with a fallback instead of dispatch().
     var r = root.guarded("selftest.arm", function() {
@@ -452,15 +464,12 @@ Item {
   }
 
   // ---- doctor (§6.2 item 4; same rules as host/omaremote-setup --doctor) --------
-  Process {
-    id: factsProc
-    command: [root.pluginDir + "/host/omaremote-facts"]
-    stdout: StdioCollector { waitForEnd: true; onStreamFinished: {
-      try { root.doctorFacts = JSON.parse(text) } catch (e) { console.log("omaremote: facts parse failed: " + e); root.doctorFacts = null }
-      root.evaluateDoctor()
-    } }
+  // Ruling 16: host/omaremote-facts bounds each of its own tool calls with `timeout 2`, but their sum can exceed
+  // shortCmdMs, so this runs through CommandRunner with the 10 s restartCmdMs bound instead of a bare Process —
+  // a wedged facts run is killed and reported via onFinished (code 124/137) rather than hanging `doctor` forever.
+  function refreshDoctor() {
+    if (runner.pending("doctor") === 0) runner.run("doctor", ++root.doctorSeq, [root.pluginDir + "/host/omaremote-facts"], root.restartCmdMs)
   }
-  function refreshDoctor() { if (!factsProc.running) factsProc.running = true }
   function evaluateDoctor() {
     if (!root.config) return
     var facts = ({})

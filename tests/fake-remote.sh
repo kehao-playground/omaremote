@@ -422,6 +422,20 @@ s_mic_toggle_owned_mic_closed_on_reset() {   # §5.1/§6.1: a plugin-opened remo
   ipc reset > /dev/null; sleep 0.2
   has_line "$F/atv.log" "busctl --user call org.atvvoice.fake /org/atvvoice/Daemon org.atvvoice.Daemon MicClose"
 }
+s_selftest_arm_cold_retry() {   # Ruling 17: a cold (never-polled) backend gets an explicit, bounded retry contract
+  wait_for '.config' true 5 || return 1
+  wait_for '.backend' idle 5 || return 1
+  wait_for '.remote.sender' ":1.99" 5 || return 1
+  local r; r=$(ipc selftestArm)
+  [[ $(jq -r .ok <<<"$r") == false ]] || { echo "    $r"; return 1; }
+  [[ $(jq -r .reason <<<"$r") == busy ]] || { echo "    $r"; return 1; }
+  [[ $(jq -r .retryAfterMs <<<"$r") == 300 ]] || { echo "    $r"; return 1; }
+  sleep 0.35
+  r=$(ipc selftestArm)
+  [[ $(jq -r .ok <<<"$r") == true ]] || { echo "    $r"; return 1; }
+  local id; id=$(jq -r .id <<<"$r"); [[ -n $id ]] || return 1
+  ipc selftestDisarm "$id" > /dev/null
+}
 scenario selftest_counts_shortcut_not_ipc s_selftest_counts_shortcut_not_ipc
 scenario selftest_busy_during_session s_selftest_busy_during_session
 scenario selftest_external_f9_fails_test s_selftest_external_f9_fails_test
@@ -429,6 +443,7 @@ scenario selftest_unknown_or_used_id s_selftest_unknown_or_used_id
 scenario selftest_blocks_voice_starts s_selftest_blocks_voice_starts
 scenario doctor_rows s_doctor_rows
 scenario mic_toggle_owned_mic_closed_on_reset s_mic_toggle_owned_mic_closed_on_reset
+scenario selftest_arm_cold_retry s_selftest_arm_cold_retry
 
 # ---- summary ---------------------------------------------------------------------
 echo "integration: $pass passed, $fail failed"

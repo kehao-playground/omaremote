@@ -15,7 +15,7 @@ prop=""; for a in "${args[@]:1}"; do case $a in --property=*) prop=${a#--propert
 case "${args[0]:-}" in
   show)
     if [[ $prop == ExecStart ]]; then
-      echo "/usr/bin/atvvoice --mic-on-demand"
+      echo '{ path=/usr/bin/atvvoice ; argv[]=/usr/bin/atvvoice --mic-on-demand ; ignore_errors=no }'
     else
       printf '%s\n' "$(cat "$d/sysd.job" 2>/dev/null)"
       if [[ $unit == voxtype && -e $d/vox.stopped ]]; then echo inactive; else echo active; fi

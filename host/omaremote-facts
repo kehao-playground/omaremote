@@ -1,45 +1,60 @@
 #!/usr/bin/env bash
 # Spec §6.2 item 4 and §7 `--doctor`: collect host facts as one JSON object for lib/Doctor.mjs, so the panel and the
 # setup script can never disagree. Read-only; needs jq and awk (Omarchy ships both). Never sudo.
+# Ruling 16 (Task 8 fix round 1): every external tool invocation is bounded by `timeout 2` so a wedged tool
+# (keyd/hyprctl/voxtype/systemctl/busctl/pw-dump) degrades the fact it feeds to the same null/absent shape this
+# script already uses when the tool is missing entirely, instead of hanging the script (and the CommandRunner
+# job on the Service side) forever. The single-JSON-object guarantee holds either way.
 set -u
+TO=2
 has() { command -v "$1" >/dev/null 2>&1; }
-jbool() { if "$@" >/dev/null 2>&1; then echo true; else echo false; fi; }
+jbool() { if "$@" >/dev/null 2>&1; then echo true; else echo false; fi; }                    # unbounded: local/instant checks only
+jbool_bounded() { if timeout "$TO" "$@" >/dev/null 2>&1; then echo true; else echo false; fi; }   # a timeout kill (124/137) reads as false, same as any other failure
 jstr() { if [[ -n ${1:-} ]]; then jq -Rn --arg v "$1" '$v'; else echo null; fi; }
+# Runs "$@" bounded by `timeout $TO`; prints its stdout and succeeds, or prints nothing and fails on a timeout
+# kill — callers use the failure to degrade the fact to the same shape used when the tool itself is missing.
+bounded() { local out; out=$(timeout "$TO" "$@" 2>/dev/null); local rc=$?; (( rc == 124 || rc == 137 )) && return 1; printf '%s' "$out"; }
 
 tools=""
 for t in keyd wtype playerctl wpctl pw-dump voxtype evtest jq node; do tools+="\"$t\":$(jbool has "$t"),"; done
 tools="{${tools%,}}"
 
-keyd_enabled=$(jbool systemctl is-enabled keyd)
-keyd_active=$(jbool systemctl is-active keyd)
-if has keyd && [[ -r /etc/keyd/omaremote.conf ]]; then keyd_check=$(jbool keyd check /etc/keyd/omaremote.conf); else keyd_check=null; fi
+keyd_enabled=$(jbool_bounded systemctl is-enabled keyd)
+keyd_active=$(jbool_bounded systemctl is-active keyd)
+if has keyd && [[ -r /etc/keyd/omaremote.conf ]]; then keyd_check=$(jbool_bounded keyd check /etc/keyd/omaremote.conf); else keyd_check=null; fi
 # The evdev grab itself is only visible to root; keyd's virtual keyboard existing while keyd is active is the observable proxy.
-keyd_grab=$(jbool grep -q 'keyd virtual keyboard' /proc/bus/input/devices)
+keyd_grab=$(jbool_bounded grep -q 'keyd virtual keyboard' /proc/bus/input/devices)
 
-hypr_required=$(jbool grep -q 'require("hypr.omaremote")' "$HOME/.config/hypr/hyprland.lua")
-if has hyprctl; then hypr_desc=$(hyprctl binds -j 2>/dev/null | jq -c '[.[] | (.description // "") | select(startswith("omaremote:"))]' 2>/dev/null); fi
+hypr_required=$(jbool_bounded grep -q 'require("hypr.omaremote")' "$HOME/.config/hypr/hyprland.lua")
+if has hyprctl && raw=$(bounded hyprctl binds -j); then
+  hypr_desc=$(jq -c '[.[] | (.description // "") | select(startswith("omaremote:"))]' <<<"$raw" 2>/dev/null)
+fi
 hypr_desc=${hypr_desc:-null}
 
 if has voxtype; then
-  vox_version=$(jstr "$(voxtype --version 2>/dev/null | awk '{print $2}')")
-  vox_class=$(voxtype status --format json 2>/dev/null | jq -c '.class // "stopped"' 2>/dev/null); vox_class=${vox_class:-\"stopped\"}
-  vox_out=$(voxtype config get output.mode --json 2>/dev/null | jq -c '.value' 2>/dev/null); vox_out=${vox_out:-null}
-  vox_dev=$(voxtype config get audio.device --json 2>/dev/null | jq -c '.value' 2>/dev/null); vox_dev=${vox_dev:-null}
+  if raw=$(bounded voxtype --version); then vox_version=$(jstr "$(awk '{print $2}' <<<"$raw")"); else vox_version=null; fi
+  if raw=$(bounded voxtype status --format json); then vox_class=$(jq -c '.class // "stopped"' <<<"$raw" 2>/dev/null); vox_class=${vox_class:-null}; else vox_class=null; fi
+  if raw=$(bounded voxtype config get output.mode --json); then vox_out=$(jq -c '.value' <<<"$raw" 2>/dev/null); vox_out=${vox_out:-null}; else vox_out=null; fi
+  if raw=$(bounded voxtype config get audio.device --json); then vox_dev=$(jq -c '.value' <<<"$raw" 2>/dev/null); vox_dev=${vox_dev:-null}; else vox_dev=null; fi
 else
   vox_version=null; vox_class=null; vox_out=null; vox_dev=null
 fi
 
-atv_active=$(jbool systemctl --user is-active atvvoice)
-atv_ondemand=$(jbool bash -c 'systemctl --user show atvvoice --property=ExecStart --value 2>/dev/null | grep -q -- "--mic-on-demand"')
-atv_names=$(busctl --user list --no-legend 2>/dev/null | awk '$1 ~ /^org\.atvvoice\./ { print $1 }' | jq -R . | jq -sc .)
+atv_active=$(jbool_bounded systemctl --user is-active atvvoice)
+atv_ondemand=$(jbool_bounded bash -c 'systemctl --user show atvvoice --property=ExecStart --value 2>/dev/null | grep -q -- "--mic-on-demand"')
+if raw=$(bounded busctl --user list --no-legend); then
+  atv_names=$(awk '$1 ~ /^org\.atvvoice\./ { print $1 }' <<<"$raw" | jq -R . | jq -sc .)
+else
+  atv_names="[]"
+fi
 atv_first=$(jq -r '.[0] // empty' <<<"$atv_names")
 atv_node=null
-if [[ -n $atv_first ]]; then
-  atv_node=$(jstr "$(busctl --user get-property "$atv_first" /org/atvvoice/Daemon org.atvvoice.Daemon NodeName 2>/dev/null | sed -n 's/^s "\(.*\)"$/\1/p')")
+if [[ -n $atv_first ]] && raw=$(bounded busctl --user get-property "$atv_first" /org/atvvoice/Daemon org.atvvoice.Daemon NodeName); then
+  atv_node=$(jstr "$(sed -n 's/^s "\(.*\)"$/\1/p' <<<"$raw")")
 fi
 
-if has pw-dump; then
-  pw_sources=$(pw-dump 2>/dev/null | jq -c '[.[] | select(.type == "PipeWire:Interface:Node") | select((.info.props["media.class"] // "") == "Audio/Source") | .info.props["node.name"]]' 2>/dev/null)
+if has pw-dump && raw=$(bounded pw-dump); then
+  pw_sources=$(jq -c '[.[] | select(.type == "PipeWire:Interface:Node") | select((.info.props["media.class"] // "") == "Audio/Source") | .info.props["node.name"]]' <<<"$raw" 2>/dev/null)
 fi
 pw_sources=${pw_sources:-null}
 
