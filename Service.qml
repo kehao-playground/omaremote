@@ -43,6 +43,7 @@ Item {
   property string lastAction: ""
   property int errorCount: 0
   property string lastError: ""
+  property string _lastVoiceErrorReason: ""       // finding #16: voice's own error reason, kept apart from the shared lastError slot
   property var heldKeys: []
   signal resetHappened()                          // §4.3: BarWidget closes the Panel
 
@@ -104,7 +105,11 @@ Item {
       case "action": root.runAction(e); break
       case "reset": root.onEngineReset(); break
       case "hud": root.hudText = e.text; break
-      case "error": root.errorCount++; root.lastError = e.reason; console.log("omaremote: " + src + " error " + e.reason); break
+      case "error":
+        root.errorCount++; root.lastError = e.reason
+        if (src === "voice") root._lastVoiceErrorReason = e.reason   // finding #16: onVoiceState's unconfigured case reads this, not the shared root.lastError
+        console.log("omaremote: " + src + " error " + e.reason)
+        break
       // ---- voice effects (Task 6) ----
       case "cmd":
         if (src === "mic" && e.kind === "restart") { verifier.markRestart(); vox.restart() }
@@ -257,7 +262,7 @@ Item {
     root.voiceOwner = e.owner || ""
     root.voiceInferred = e.owner === "dbus" || e.owner === "keyboard"
     if (e.state === "recording" && prev !== "recording") { root.recordingSince = Date.now(); root.elapsedMs = 0 }
-    if (e.state === "unconfigured") root.unconfiguredReason = root.lastError
+    if (e.state === "unconfigured") root.unconfiguredReason = root._lastVoiceErrorReason
     if (e.state === "recording" && prev !== "recording") captureDelay.restart()                 // §3 capture verification
     if (e.state === "recording" && e.owner === "keyboard" && mic && root.micCurrentId) {
       var cur = mic.statusOf(root.micCurrentId)
@@ -538,5 +543,21 @@ Item {
     function selftestDisarm(id: string): string { return root.selftestDisarm(id) ? "ok" : "unknown" }
     function doctor(): string { root.refreshDoctor(); return JSON.stringify({ rows: root.doctorRows, summary: root.doctorSummary, facts: root.doctorFacts, at: root.doctorAt }) }
     function micToggle(): string { return root.micToggle() }
+  }
+
+  // Finding #5 (final-review.md): spec §5.2 "shell exit makes a best-effort `voxtype record cancel`, closes
+  // only a plugin-opened remote mic" was a plan gap for the host process itself — `omarchy-restart-shell`
+  // (what `make dev-restart` runs) during a recording otherwise leaves the daemon recording with no owner.
+  // Startup reconciliation already covers the other half (the real `--follow` stream emits the current state
+  // first). Best-effort only: must never throw during shell teardown.
+  Component.onDestruction: {
+    try {
+      if (voice) {
+        var snap = voice.snapshot()
+        if (["starting", "recording", "transcribing", "arbitrating"].indexOf(snap.state) !== -1 || snap.pendingCmds > 0)
+          Quickshell.execDetached(["voxtype", "record", "cancel"])
+        if (snap.pluginMic) atv.micClose()
+      }
+    } catch (e) { }
   }
 }
