@@ -25,7 +25,7 @@ Panel {
 
   function open() { setCenterHoverRevealSuppressed(false); root.controller.show(); currentTab.onShown(); if (service) service.refreshDoctor() }
   function openFromHotkey() { open(); Qt.callLater(function() { if (root.opened) setCenterHoverRevealSuppressed(true) }) }
-  function close() { setCenterHoverRevealSuppressed(false); root.controller.hide() }
+  function close() { setCenterHoverRevealSuppressed(false); root.controller.hide(); statusTab.onHidden() }   // finding #4: the mic-test timer must not survive the panel closing
   function toggle() { if (root.opened) root.close(); else root.openFromHotkey() }
   function switchPanel(direction) { return root.bar && typeof root.bar.switchPanelFrom === "function" ? root.bar.switchPanelFrom(root.barIdentity, direction) : false }
   function setCenterHoverRevealSuppressed(value) {

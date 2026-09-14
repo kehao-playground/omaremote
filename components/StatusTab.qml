@@ -17,6 +17,11 @@ Item {
   function moveCursor(dy) { cursor = cursor < 0 ? 0 : Math.max(0, Math.min(rowCount - 1, cursor + dy)) }
   function activate() { if (cursor === 0) root.micTest() }
   function onShown() { cursor = -1 }
+  // finding #4 (final-review.md): the 3 s mic-test Timer must not survive a reset (which already closed the
+  // plugin-owned mic) or the panel closing — either would let this Timer's trailing micToggle() fire later,
+  // during/after recovery, and re-open a mic that was just deliberately closed.
+  function onHidden() { micTimer.stop(); root.micTestLeft = 0 }
+  Connections { target: root.service; function onResetHappened() { root.onHidden() } }
   function micTest() {                                  // §6.2: 3 s MicToggle round trip through the same voice rules
     if (!service || micTestLeft > 0) return
     if (service.micToggle() !== "ok") return
