@@ -119,3 +119,45 @@ test("press while already down is ignored (no double-start of timers)", () => {
   assert.deepEqual(acts(e.press("ok", 100)), []);
   assert.equal(e.nextDeadline(), 350);
 });
+
+const dbl = () => engine({ ok: { tap: { type: "key", keys: "Return" }, double: { type: "key", keys: "ctrl+Return" } } });
+
+test("double-bound key: single tap is deferred until doubleMs elapses", () => {
+  const e = dbl();
+  e.press("ok", 0);
+  assert.deepEqual(acts(e.release("ok", 50)), []);
+  assert.equal(e.nextDeadline(), 300);
+  assert.deepEqual(acts(e.advance(299)), []);
+  assert.deepEqual(acts(e.advance(300)), ["ok:tap"]);
+});
+
+test("double-bound key: second press within doubleMs emits double and consumes its release", () => {
+  const e = dbl();
+  e.press("ok", 0); e.release("ok", 50);
+  assert.deepEqual(acts(e.press("ok", 200)), ["ok:double"]);
+  assert.deepEqual(acts(e.release("ok", 260)), []);
+  assert.deepEqual(acts(e.advance(1000)), []);
+});
+
+test("double-bound key: second press after doubleMs is a new single press", () => {
+  const e = dbl();
+  e.press("ok", 0); e.release("ok", 50);
+  const fx = e.press("ok", 400);                // 300 deadline fires first -> tap, then new press
+  assert.deepEqual(acts(fx), ["ok:tap"]);
+  assert.deepEqual(acts(e.release("ok", 450)), []); // now waiting for a possible double again
+  assert.deepEqual(acts(e.advance(700)), ["ok:tap"]);
+});
+
+test("double + long key: hold still fires while down; release after hold emits nothing", () => {
+  const e = engine({ ok: { tap: { type: "key", keys: "Return" }, hold: { type: "key", keys: "ctrl+c" }, double: { type: "key", keys: "ctrl+Return" } } });
+  e.press("ok", 0);
+  assert.deepEqual(acts(e.advance(350)), ["ok:hold"]);
+  assert.deepEqual(acts(e.release("ok", 400)), []);
+});
+
+test("pressing another key resolves a pending double as tap first (no cross-key doubles)", () => {
+  const e = dbl();
+  e.press("ok", 0); e.release("ok", 50);
+  const fx = e.press("home", 100);
+  assert.deepEqual(acts(fx), ["ok:tap", "home:tap"]);
+});
