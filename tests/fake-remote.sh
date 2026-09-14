@@ -127,7 +127,11 @@ scenario config_external_reload s_config_external_reload
 scenario corrupt_config_never_overwritten s_corrupt_config_never_overwritten
 
 # ---- Task 6: voice session through real adapters + fakes ----
-ready() { wait_for '.config' true 5 && wait_for '.backend' idle 5 && wait_for '.remote.sender' ":1.99" 5; }
+ready() {   # Task 8 addition: also settle a fresh idle poll so selftestArm's 500 ms freshness check has something to see
+  wait_for '.config' true 5 && wait_for '.backend' idle 5 && wait_for '.remote.sender' ":1.99" 5 || return 1
+  ipc voice poll - > /dev/null
+  wait_for '.voice.backendFresh' true 3
+}
 s_hid_session() {
   ready || return 1
   ipc key mic down > /dev/null
@@ -346,6 +350,85 @@ scenario mic_apply_restart_fails_rolls_back s_mic_apply_restart_fails_rolls_back
 scenario mic_apply_job_pending_blocks s_mic_apply_job_pending_blocks
 scenario recovery_restart_bounded s_recovery_restart_bounded
 scenario stats_and_capture s_stats_and_capture
+
+# ---- Task 8: self-test lease, doctor ----
+s_selftest_counts_shortcut_not_ipc() {   # §7 step 6: IPC-injected events are tracked separately and cannot pass the transport check
+  ready || return 1
+  [[ $(ipc selftestPing) == ok ]] || return 1
+  local r; r=$(ipc selftestArm)
+  [[ $(jq -r .ok <<<"$r") == true ]] || { echo "    $r"; return 1; }
+  local id; id=$(jq -r .id <<<"$r")
+  [[ $(jget '.selftest.active') == true && $(jget '.hud') == self-test ]] || return 1
+  [[ $(ipc selftestStatus "$id" | jq -r .active) == true ]] || return 1
+  ipc key ok down > /dev/null; ipc key ok up > /dev/null; sleep 0.15
+  no_line "$F/actions.log" "wtype -k Return" || return 1                       # real actions suppressed
+  local rep; rep=$(ipc selftestReport "$id")
+  [[ $(jq -r .ok <<<"$rep") == false ]] || { echo "    $rep"; return 1; }
+  jq -e '.missing | index("ok") != null' <<<"$rep" > /dev/null || return 1     # ok never arrived through GlobalShortcut
+  jq -e '.counts.ipc.ok.down == 1' <<<"$rep" > /dev/null || return 1
+  [[ $(jget '.selftest.active') == false && $(jget '.hud') == "" ]]
+}
+s_selftest_busy_during_session() {       # §9: arm returns busy without cancelling the session
+  ready || return 1
+  ipc key mic down > /dev/null; wait_for '.voice.state' recording 3 || return 1
+  [[ $(ipc selftestArm | jq -r .reason) == busy ]] || return 1
+  [[ $(jget '.voice.state') == recording ]] || return 1
+  no_line "$F/vox.log" "voxtype record cancel" || return 1
+  ipc key mic up > /dev/null; wait_for '.voice.state' idle 5
+}
+s_selftest_external_f9_fails_test() {    # §9: external recording fails the test and stays observed, never cancelled
+  ready || return 1
+  local id; id=$(ipc selftestArm | jq -r .id); [[ $id == st-* ]] || return 1
+  echo recording > "$F/vox.state"
+  wait_for '.voice.state' recording 3 || return 1
+  wait_for '.selftest.active' false 2 || return 1
+  local rep; rep=$(ipc selftestReport "$id")
+  [[ $(jq -r .failed <<<"$rep") == external-recording ]] || { echo "    $rep"; return 1; }
+  no_line "$F/vox.log" "voxtype record cancel" || return 1
+  echo idle > "$F/vox.state"; wait_for '.voice.state' idle 3
+}
+s_selftest_unknown_or_used_id() {
+  ready || return 1
+  [[ $(ipc selftestReport st-99 | jq -r .reason) == unknown ]] || return 1
+  [[ $(ipc selftestStatus st-99 | jq -r .ok) == false ]] || return 1
+  local id; id=$(ipc selftestArm | jq -r .id)
+  [[ $(ipc selftestDisarm "$id") == ok ]] || return 1
+  [[ $(ipc selftestReport "$id" | jq -r .reason) == expired ]]
+}
+s_selftest_blocks_voice_starts() {       # §7 step 6: HID and D-Bus starts suppressed while the lease is active
+  ready || return 1
+  local id; id=$(ipc selftestArm | jq -r .id)
+  ipc key mic down > /dev/null; sleep 0.1; ipc key mic up > /dev/null
+  echo streaming >> "$F/atv.signals"; sleep 0.4; echo connected >> "$F/atv.signals"; sleep 0.2
+  no_line "$F/vox.log" "voxtype record start" || return 1
+  [[ $(jget '.voice.state') == idle ]] || return 1
+  ipc selftestDisarm "$id" > /dev/null
+}
+s_doctor_rows() {                          # §6.2 item 4 through host/omaremote-facts + lib/Doctor.mjs
+  ready || return 1
+  ipc doctor > /dev/null
+  for _ in $(seq 1 50); do [[ $(ipc doctor | jq -r '.rows | length') == 15 ]] && break; sleep 0.1; done
+  local d; d=$(ipc doctor)
+  [[ $(jq -r '.rows | length' <<<"$d") == 15 ]] || { echo "    $d"; return 1; }
+  [[ $(jq -r '.summary' <<<"$d") == ready ]] || { echo "    $d"; return 1; }
+  [[ $(jq -r '.rows[] | select(.id == "voxtype-device") | .status' <<<"$d") == pass ]] || return 1
+  [[ $(jq -r '.rows[] | select(.id == "last-capture") | .detail' <<<"$d") == "not yet verified" ]] || return 1
+  [[ $(jq -r '.rows[] | select(.id == "config-valid") | .status' <<<"$d") == pass ]]
+}
+s_mic_toggle_owned_mic_closed_on_reset() {   # §5.1/§6.1: a plugin-opened remote mic is the only mic reset ever closes
+  ready || return 1
+  [[ $(ipc micToggle) == ok ]] || return 1
+  sleep 0.2; has_line "$F/atv.log" "busctl --user call org.atvvoice.fake /org/atvvoice/Daemon org.atvvoice.Daemon MicToggle" || return 1
+  ipc reset > /dev/null; sleep 0.2
+  has_line "$F/atv.log" "busctl --user call org.atvvoice.fake /org/atvvoice/Daemon org.atvvoice.Daemon MicClose"
+}
+scenario selftest_counts_shortcut_not_ipc s_selftest_counts_shortcut_not_ipc
+scenario selftest_busy_during_session s_selftest_busy_during_session
+scenario selftest_external_f9_fails_test s_selftest_external_f9_fails_test
+scenario selftest_unknown_or_used_id s_selftest_unknown_or_used_id
+scenario selftest_blocks_voice_starts s_selftest_blocks_voice_starts
+scenario doctor_rows s_doctor_rows
+scenario mic_toggle_owned_mic_closed_on_reset s_mic_toggle_owned_mic_closed_on_reset
 
 # ---- summary ---------------------------------------------------------------------
 echo "integration: $pass passed, $fail failed"

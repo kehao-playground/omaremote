@@ -12,6 +12,8 @@ import "lib/VoiceSession.mjs" as VoiceSession
 import "lib/MicApply.mjs" as MicApply
 import "lib/Stats.mjs" as Stats
 import "lib/Pipewire.mjs" as Pipewire
+import "lib/SelfTest.mjs" as SelfTest
+import "lib/Doctor.mjs" as Doctor
 import "components"
 
 Item {
@@ -67,6 +69,13 @@ Item {
   property string unconfiguredReason: ""
   property var lastCapture: null                  // null = not yet verified (§3); { node, at, mode }
   property var statsSummary: ({ today: { count: 0, seconds: 0 }, week: { count: 0, seconds: 0 }, all: { count: 0, seconds: 0 }, longest: null })
+  property var selftest: null
+  property bool selftestActive: false
+  property var doctorRows: []
+  property string doctorSummary: "unknown"
+  property var doctorFacts: null
+  property double doctorAt: 0
+  readonly property bool unconfigured: root.voiceState === "unconfigured" || root.doctorSummary === "unconfigured" || root.configInvalid
   readonly property string hudLine: Presentation.hudLine({ voiceState: root.voiceState, hudText: root.hudText, elapsedMs: root.elapsedMs, flash: root.flash })
   Timer { interval: 250; repeat: true; running: root.voiceState === "recording"; onTriggered: root.elapsedMs = Date.now() - root.recordingSince }
 
@@ -112,7 +121,7 @@ Item {
       case "conflict": root.micConflict = { expected: e.expected, found: e.found }; break
       case "unconfigured": root.unconfiguredReason = e.reason; break
       case "stat": stats.add(e.session); statsStore.save(stats.entries()); root.statsSummary = stats.summary(Date.now()); break
-      // ---- self-test effects (Task 8) ----
+      case "selftestExpired": case "selftestFailed": root.onSelftestEnded(); break
       default: console.log("omaremote: unhandled effect " + e.type + " from " + src)
     }
   }
@@ -120,8 +129,8 @@ Item {
   // ---- one Timer for every module (host obligations) -------------------------
   Timer { id: tick; repeat: false; onTriggered: root.advanceAll() }
   function deadlines() {
-    return [engine ? engine.nextDeadline() : null, voice ? voice.nextDeadline() : null, mic ? mic.nextDeadline() : null, verifier.nextDeadline()]
-    // ---- more deadlines (Tasks 7–8) ----
+    return [engine ? engine.nextDeadline() : null, voice ? voice.nextDeadline() : null, mic ? mic.nextDeadline() : null, verifier.nextDeadline(),
+      selftest ? selftest.nextDeadline() : null]
   }
   function rearm() {
     root.micPending = mic ? mic.pending() : false; verifier.jobPolling = root.micPending
@@ -137,7 +146,7 @@ Item {
     if (voice) root.dispatch(root.guarded("voice.advance", function() { return voice.advance(now) }), "voice")
     if (mic) root.dispatch(root.guarded("mic.advance", function() { return mic.advance(now) }), "mic")
     root.guarded("verifier.advance", function() { verifier.advance(now); return [] })
-    // ---- more advances (Tasks 7–8) ----
+    if (selftest) root.dispatch(root.guarded("selftest.advance", function() { return selftest.advance(now) }), "selftest")
     root.rearm()
   }
 
@@ -161,6 +170,7 @@ Item {
     if (kind !== "voice") {                                         // §4.3 reset without emitting
       root.dispatch(root.guarded("engine.reload", function() { return engine.reload(configStore.config) }), "engine")
       root.heldKeys = engine.heldKeys()
+      if (!selftestActive) root.rebuildSelftest()
     }
     if (voice) {
       if (kind === "external") root.dispatch(root.guarded("voice.abort", function() { return voice.abort(now) }), "voice")     // §5.2: config reload aborts
@@ -178,7 +188,8 @@ Item {
     mic = MicApply.createMicApply({ voice: voice })
     stats = Stats.createStats(statsStore.loaded ? statsStore.entries : [])
     root.statsSummary = stats.summary(now)
-    // ---- module start (Task 8) ----
+    root.rebuildSelftest()
+    root.refreshDoctor()
   }
 
   // ---- key input (§4.1): GlobalShortcut per logical key ---------------------
@@ -195,7 +206,11 @@ Item {
   function onKeyEdge(name, edge, source) {
     if (!engine || Defaults.KEY_NAMES.indexOf(name) < 0 || (edge !== "down" && edge !== "up")) return false
     var now = Date.now()
-    // ---- self-test recorder (Task 8) ----
+    if (selftest && selftest.active()) {                                   // §7 step 6: raw counts before the engine; IPC tracked separately
+      root.guarded("selftest.record", function() { selftest.record(source === "ipc" ? "ipc" : "shortcut", name, edge, now); return [] })
+      root.rearm()
+      return true
+    }
     if (name === "mic" && root.config.keys.mic.ptt) {                          // §5.1 HID mic key
       root.dispatch(root.guarded("voice.hid" + edge, function() { return edge === "down" ? voice.hidPress(now) : voice.hidRelease(now) }), "voice")
       root.rearm()
@@ -209,6 +224,7 @@ Item {
 
   // ---- actions (§4.4) ----------------------------------------------------------
   function runAction(e) {
+    if (selftest && selftest.active()) return   // §7 step 6: no real actions under a lease
     var r = Actions.toArgv(e.action)
     if (r.kind === "dispatch") {
       if (root.dispatchViaHyprctl) Quickshell.execDetached(["hyprctl", "dispatch"].concat(r.cmd.split(" ")))
@@ -247,7 +263,8 @@ Item {
       if (cur && (cur.state === "applying" || cur.state === "verifying" || cur.state === "rollingBack"))
         root.dispatch(root.guarded("mic.externalRecording", function() { return mic.externalRecording(Date.now()) }), "mic")   // §3: observed interference
     }
-    // ---- external recording → self-test (Task 8) ----
+    if (e.state === "recording" && e.owner === "keyboard" && selftest && selftest.active())
+      root.dispatch(root.guarded("selftest.externalRecording", function() { return selftest.externalRecording(Date.now()) }), "selftest")     // §7 step 6: fail the test, keep observing
   }
   function updateRemoteWarning() {                                              // §5.4
     var mode = root.config ? root.config.voice.mic : "remote"
@@ -265,7 +282,6 @@ Item {
     } }
   }
   function refreshAudioDevice() { if (!audioDeviceProbe.running) audioDeviceProbe.running = true }
-  function refreshDoctor() {}   // stub; Task 8 replaces this with the real self-test/doctor refresh
 
   CommandRunner {
     id: runner
@@ -395,6 +411,79 @@ Item {
     return JSON.stringify({ ok: false, reason: "unknown-verb" })
   }
 
+  // ---- self-test (§7 step 6) ---------------------------------------------------
+  function rebuildSelftest() {
+    var keys = Defaults.KEY_NAMES.filter(function(k) { return root.config.keys[k].supported !== false })
+    selftest = SelfTest.createSelfTest({ supportedKeys: keys, gate: voice.gate })
+  }
+  function selftestArm() {
+    var now = Date.now()
+    if (!selftest || !voice) return { ok: false, reason: "not-ready" }
+    if (mic && mic.pending()) return { ok: false, reason: "busy", detail: "mic operation pending" }
+    var s = voice.snapshot()
+    var fresh = s.backend === "idle" && s.backendFresh && now - s.backendAt <= 500
+    if (!fresh) { vox.poll(); return { ok: false, reason: "busy", detail: "backend not fresh; retry" } }
+    // DEVIATION (Task 5 review ruling, applied here as it was to Task 7's mic.* call sites): selftest.arm() returns a
+    // plain result object, not an effects array, so `guarded` is used with a fallback instead of dispatch().
+    var r = root.guarded("selftest.arm", function() {
+      return selftest.arm(now, { voiceIdle: s.state === "idle", backendIdleFresh: fresh, heldKeys: engine.heldKeys(), pendingCmds: s.pendingCmds + runner.pending("voice") })
+    }, { ok: false, reason: "error" })
+    if (r.ok) { root.selftestActive = true; root.hudText = "self-test" }
+    root.rearm()
+    return r
+  }
+  function onSelftestEnded() {
+    root.selftestActive = false
+    if (root.hudText === "self-test") root.hudText = ""
+    if (engine) engine.reset()                                             // quarantine: no queued action can fire after the lease
+    root.heldKeys = []
+  }
+  function selftestReport(id) {
+    var r = selftest ? root.guarded("selftest.report", function() { return selftest.report(id, Date.now()) }, { ok: false, reason: "error" }) : { ok: false, reason: "not-ready" }
+    if (!selftest || !selftest.active()) root.onSelftestEnded()
+    root.rearm()
+    return r
+  }
+  function selftestDisarm(id) {
+    var ok = selftest ? root.guarded("selftest.disarm", function() { return selftest.disarm(id, Date.now()) }, false) : false
+    if (ok) root.onSelftestEnded()
+    root.rearm()
+    return ok
+  }
+
+  // ---- doctor (§6.2 item 4; same rules as host/omaremote-setup --doctor) --------
+  Process {
+    id: factsProc
+    command: [root.pluginDir + "/host/omaremote-facts"]
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: {
+      try { root.doctorFacts = JSON.parse(text) } catch (e) { console.log("omaremote: facts parse failed: " + e); root.doctorFacts = null }
+      root.evaluateDoctor()
+    } }
+  }
+  function refreshDoctor() { if (!factsProc.running) factsProc.running = true }
+  function evaluateDoctor() {
+    if (!root.config) return
+    var facts = ({})
+    if (root.doctorFacts) for (var k in root.doctorFacts) facts[k] = root.doctorFacts[k]
+    facts.lastCapture = root.lastCapture                                      // null = not yet verified
+    facts.configProblems = root.configProblems
+    facts.now = Date.now()
+    root.doctorRows = Doctor.evaluate(facts, root.config)
+    root.doctorSummary = Doctor.summarize(root.doctorRows, root.config)
+    root.doctorAt = Date.now()
+  }
+  onLastCaptureChanged: evaluateDoctor()
+  onConfigProblemsChanged: evaluateDoctor()
+
+  // ---- mic test (§6.1 middle click) ----------------------------------------------
+  function micToggle() {
+    if (!voice || (mic && mic.pending()) || root.voiceState === "recovering" || root.selftestActive) return "busy"
+    if (!root.atvBusName) return "no-atvvoice"
+    atv.micToggle()
+    if (root.remoteState === "streaming") voice.micClosed(); else voice.micOpened()   // §5.1: plugin-owned only after our own toggle
+    return "ok"
+  }
+
   // ---- IPC (§2 hardware-free testability) ---------------------------------------
   function statusJson() {
     return JSON.stringify({
@@ -410,7 +499,9 @@ Item {
       , stats: root.statsSummary
       , lastCapture: root.lastCapture
       , unconfiguredReason: root.unconfiguredReason
-      // ---- more status (Task 8) ----
+      , selftest: { active: root.selftestActive }
+      , doctorSummary: root.doctorSummary
+      , unconfigured: root.unconfigured
     })
   }
   IpcHandler {
@@ -422,6 +513,15 @@ Item {
     function voice(verb: string, arg: string): string { return root.ipcVoice(verb, arg) }
     function mic(mode: string): string { return root.ipcMic(mode) }
     function micStatus(id: string): string { return root.ipcMicStatus(id) }
-    // ---- more verbs (Task 8) ----
+    function selftestPing(): string { return "ok" }
+    function selftestArm(): string { return JSON.stringify(root.selftestArm()) }
+    function selftestStatus(id: string): string {
+      var s = root.selftest ? root.selftest.status(id, Date.now()) : null
+      return JSON.stringify(s ? { ok: true, id: id, active: s.active, remainingMs: s.remainingMs, failed: s.failed } : { ok: false, reason: "unknown" })
+    }
+    function selftestReport(id: string): string { return JSON.stringify(root.selftestReport(id)) }
+    function selftestDisarm(id: string): string { return root.selftestDisarm(id) ? "ok" : "unknown" }
+    function doctor(): string { root.refreshDoctor(); return JSON.stringify({ rows: root.doctorRows, summary: root.doctorSummary, facts: root.doctorFacts, at: root.doctorAt }) }
+    function micToggle(): string { return root.micToggle() }
   }
 }

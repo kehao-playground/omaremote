@@ -4,16 +4,23 @@
 #   sysd.log          every invocation                        sysd.restart-count
 #   knobs: sysd.restart-fails (exit 1), sysd.restart-fails-once (first restart exits 1 and removes the knob),
 #          sysd.restart-hangs (leaves a job pending, no restart), vox.stopped (voxtype inactive)
+#   `show --property=ExecStart --value` (host/omaremote-facts) always answers as an on-demand ExecStart line,
+#   independent of the Job/ActiveState/InvocationID triple the mic-apply verifier reads via the same subcommand.
 set -u
 d=${OMAREMOTE_FAKE_DIR:?}
 printf '%s\n' "systemctl $*" >> "$d/sysd.log"
 args=("$@"); [[ ${args[0]:-} == --user ]] && args=("${args[@]:1}")
 unit=""; for a in "${args[@]:1}"; do case $a in --*) ;; *) unit=$a; break ;; esac; done
+prop=""; for a in "${args[@]:1}"; do case $a in --property=*) prop=${a#--property=} ;; esac; done
 case "${args[0]:-}" in
   show)
-    printf '%s\n' "$(cat "$d/sysd.job" 2>/dev/null)"
-    if [[ $unit == voxtype && -e $d/vox.stopped ]]; then echo inactive; else echo active; fi
-    printf '%s\n' "$(cat "$d/sysd.invocation" 2>/dev/null || echo inv-0)" ;;
+    if [[ $prop == ExecStart ]]; then
+      echo "/usr/bin/atvvoice --mic-on-demand"
+    else
+      printf '%s\n' "$(cat "$d/sysd.job" 2>/dev/null)"
+      if [[ $unit == voxtype && -e $d/vox.stopped ]]; then echo inactive; else echo active; fi
+      printf '%s\n' "$(cat "$d/sysd.invocation" 2>/dev/null || echo inv-0)"
+    fi ;;
   restart)
     [[ -e $d/sysd.restart-fails ]] && exit 1
     if [[ -e $d/sysd.restart-fails-once ]]; then rm -f "$d/sysd.restart-fails-once"; exit 1; fi
