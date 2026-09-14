@@ -58,7 +58,7 @@ Item {
 
   Process {
     id: showProc
-    command: ["systemctl", "--user", "show", "voxtype", "--property=Job,ActiveState,InvocationID", "--value"]
+    command: ["systemctl", "--user", "show", "voxtype", "--property=Job,ActiveState,InvocationID"]
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: {
       var info = Systemd.parseShow(text)
       var now = Date.now()

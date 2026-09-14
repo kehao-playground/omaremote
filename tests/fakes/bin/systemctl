@@ -6,6 +6,8 @@
 #          sysd.restart-hangs (leaves a job pending, no restart), vox.stopped (voxtype inactive)
 #   `show --property=ExecStart --value` (host/omaremote-facts) always answers as an on-demand ExecStart line,
 #   independent of the Job/ActiveState/InvocationID triple the mic-apply verifier reads via the same subcommand.
+#   That triple is requested without --value and printed as Key=Value lines in systemd's own order
+#   (ActiveState, Job, InvocationID — not the requested order), matching real `systemctl --user show` output.
 set -u
 d=${OMAREMOTE_FAKE_DIR:?}
 printf '%s\n' "systemctl $*" >> "$d/sysd.log"
@@ -17,9 +19,9 @@ case "${args[0]:-}" in
     if [[ $prop == ExecStart ]]; then
       echo '{ path=/usr/bin/atvvoice ; argv[]=/usr/bin/atvvoice --mic-on-demand ; ignore_errors=no }'
     else
-      printf '%s\n' "$(cat "$d/sysd.job" 2>/dev/null)"
-      if [[ $unit == voxtype && -e $d/vox.stopped ]]; then echo inactive; else echo active; fi
-      printf '%s\n' "$(cat "$d/sysd.invocation" 2>/dev/null || echo inv-0)"
+      if [[ $unit == voxtype && -e $d/vox.stopped ]]; then echo 'ActiveState=inactive'; else echo 'ActiveState=active'; fi
+      printf 'Job=%s\n' "$(cat "$d/sysd.job" 2>/dev/null)"
+      printf 'InvocationID=%s\n' "$(cat "$d/sysd.invocation" 2>/dev/null || echo inv-0)"
     fi ;;
   restart)
     [[ -e $d/sysd.restart-fails ]] && exit 1

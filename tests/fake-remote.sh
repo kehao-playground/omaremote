@@ -272,7 +272,7 @@ s_mic_apply_system() {
   has_line "$F/vox.log" "voxtype config get audio.device --json" || return 1
   has_line "$F/vox.log" "voxtype config set audio.device default" || return 1
   has_line "$F/sysd.log" "systemctl --user restart voxtype" || return 1
-  has_line "$F/sysd.log" "systemctl --user show voxtype --property=Job,ActiveState,InvocationID --value" || return 1
+  has_line "$F/sysd.log" "systemctl --user show voxtype --property=Job,ActiveState,InvocationID" || return 1
   [[ $(jq -r .voice.mic "$XDG_CONFIG_HOME/omaremote/config.json") == system ]] || return 1     # commit only after verification
   [[ $(jget '.voice.state') == idle && $(jget '.mic.pending') == false ]] || return 1
   [[ $(jget '.audioDevice') == default ]]                                                         # re-read after commit

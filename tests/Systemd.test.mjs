@@ -3,9 +3,17 @@ import assert from "node:assert/strict";
 import { parseShow, backoffMs, createRestartVerifier } from "../lib/Systemd.mjs";
 import { byType, last } from "./helpers.mjs";
 
-test("parseShow reads job/active/invocation lines; empty job means no pending job", () => {
-  assert.deepEqual(parseShow("\nactive\n9ca6e278\n"), { job: "", activeState: "active", invocationId: "9ca6e278", jobPending: false });
-  assert.deepEqual(parseShow("1234 restart\nactivating\nabc"), { job: "1234 restart", activeState: "activating", invocationId: "abc", jobPending: true });
+test("parseShow reads Key=Value lines regardless of order; empty Job means no pending job", () => {
+  // Captured live: `systemctl --user show voxtype --property=Job,ActiveState,InvocationID` (no --value) prints
+  // its own order (ActiveState, Job, InvocationID), not the requested order.
+  assert.deepEqual(parseShow("ActiveState=active\nJob=\nInvocationID=9ca6e27825dd4684bd9ad1133d62c912\n"),
+    { job: "", activeState: "active", invocationId: "9ca6e27825dd4684bd9ad1133d62c912", jobPending: false });
+  // A pending job is systemd's "<id> <type>" format, e.g. "55 start".
+  assert.deepEqual(parseShow("ActiveState=activating\nJob=55 start\nInvocationID=abc\n"),
+    { job: "55 start", activeState: "activating", invocationId: "abc", jobPending: true });
+  // Order-independence: same fields, shuffled.
+  assert.deepEqual(parseShow("InvocationID=abc\nJob=55 start\nActiveState=activating\n"),
+    { job: "55 start", activeState: "activating", invocationId: "abc", jobPending: true });
   assert.deepEqual(parseShow(""), { job: "", activeState: "", invocationId: "", jobPending: false });
   assert.equal(parseShow(null).jobPending, false);
 });
