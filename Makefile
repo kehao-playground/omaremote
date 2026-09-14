@@ -11,9 +11,9 @@ test:
 
 # qmllint and omarchy are only present on an Omarchy host; skip gracefully elsewhere.
 # qmllint warnings about "qs.Ui" being unresolvable outside a live Quickshell/Omarchy host are
-# expected and must not fail this target, hence the trailing `|| true`.
+# expected and will not affect the exit code (qmllint exits 0 on warnings-only).
 lint:
-	@if [ -n "$(QMLLINT)" ]; then "$(QMLLINT)" -I "$(OMARCHY_SHELL)" $(LINT_QML_FILES) || true; else echo "qmllint not found - skipped"; fi
+	@if [ -n "$(QMLLINT)" ]; then "$(QMLLINT)" -I "$(OMARCHY_SHELL)" $(LINT_QML_FILES); else echo "qmllint not found - skipped"; fi
 	@if [ -n "$(QML)" ]; then QT_QPA_PLATFORM=offscreen QT_FORCE_STDERR_LOGGING=1 "$(QML)" tests/harness/ModuleLoad.qml 2>&1 | grep -q '^.*module-load: ok$$' && echo "module-load: ok"; else echo "qml tool not found - module load check skipped"; fi
 	@if command -v omarchy >/dev/null 2>&1; then omarchy plugin validate .; else echo "omarchy CLI not found - skipped"; fi
 
