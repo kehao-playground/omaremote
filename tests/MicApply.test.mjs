@@ -322,10 +322,11 @@ test("a stale command from a reset operation cannot be misdispatched as the next
   assert.deepEqual(kinds(e2), []);
   assert.equal(mic.statusOf(r2.operationId).state, "queued");
   const stale = mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 3);         // the first op's get finally exits
-  assert.deepEqual(kinds(stale), []);                                      // drained only: no set spawned for either operation
-  const go = mic.advance(4);                                               // now the new op can issue its own get
-  assert.deepEqual(kinds(go), ["get"]);
-  const set = mic.cmdExit(cmdId(go, "get"), 0, GET_OUT, 5);
+  assert.deepEqual(kinds(stale), ["get"]);                                 // draining kicks the new op's own get immediately, never a `set`
+  assert.equal(mic.statusOf(r2.operationId).state, "applying");
+  assert.equal(mic.statusOf(r2.operationId).phase, "get");
+  assert.deepEqual(kinds(mic.advance(4)), []);                             // nothing further until that get exits
+  const set = mic.cmdExit(cmdId(stale, "get"), 0, GET_OUT, 5);
   assert.deepEqual(byType(set, "cmd")[0].argv, ["voxtype", "config", "set", "audio.device", "default"]);
   assert.equal(mic.statusOf(r2.operationId).state, "applying");
 });
@@ -436,4 +437,38 @@ test("a verify report is correlated to the outstanding verify only", () => {
   const done = mic.verifyResult(true, 20001, secondVerifyId);
   assert.equal(byType(done, "done")[0].rollback, "verified");
   assert.equal(mic.statusOf(result.operationId).state, "failed");
+});
+
+// ---- Ruling 17: tryReserve/tryDeferred re-request backend freshness while otherwise unblocked ----
+
+test("a request blocked by a systemd job re-polls for backend freshness once the job clears", () => {
+  const { mic } = ready();
+  mic.systemdJob(true, 0);
+  const { effects, result } = mic.request("remote", 0, { nodeName: "N" });
+  assert.deepEqual(kinds(effects), []);
+  const stillBlocked = mic.advance(3000);                    // job still pending: no poll yet
+  assert.deepEqual(kinds(stillBlocked), []);
+  assert.equal(byType(stillBlocked, "poll").length, 0);
+  const cleared = mic.systemdJob(false, 3000);               // job clears, but the ready() backend view (t=0) is now stale
+  assert.deepEqual(kinds(cleared), []);
+  assert.equal(byType(cleared, "poll").length, 1);
+  const go = mic.backend("idle", 3010, { fresh: true });     // fresh answer -> reservation proceeds, no wait-timeout
+  assert.deepEqual(kinds(go), ["get"]);
+  assert.equal(mic.statusOf(result.operationId).state, "applying");
+});
+
+test("a deferred rollback blocked only on backend freshness re-polls, then proceeds once fresh, rate-limited to one poll per window", () => {
+  const { mic } = ready();
+  const { effects, result } = mic.request("remote", 0, { nodeName: "N" });
+  const set = mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 1);           // set issued, not yet exited
+  mic.reset(2);                                                            // op mutated -> deferred, gate released
+  const resumed = mic.cmdExit(cmdId(set, "set"), 0, "", 900);              // set exits 0, well past the ready() fresh window
+  assert.deepEqual(kinds(resumed), []);                                    // blocked on freshness alone: no get yet
+  assert.equal(byType(resumed, "poll").length, 1);                         // ...but the block is no longer silent
+  const stillWaiting = mic.advance(1000);                                  // 100ms later: rate-limited, no second poll
+  assert.deepEqual(kinds(stillWaiting), []);
+  assert.equal(byType(stillWaiting, "poll").length, 0);
+  const go = mic.backend("idle", 1000, { fresh: true });                   // fresh answer -> deferred rollback starts
+  assert.deepEqual(kinds(go), ["get"]);
+  assert.equal(mic.statusOf(result.operationId).state, "rollingBack");
 });
