@@ -294,3 +294,156 @@ test("external transcribing observed from idle gets a stop deadline and finalize
   assert.equal(stateOf(done), "idle");
   assert.equal(byType(done, "stat").length, 0);
 });
+
+// ---- recovery (§5.3) ----
+test("abort from recording cancels (never stops), closes no mic unless plugin-owned, enters recovering", () => {
+  const vs = hidRecording();
+  const fx = vs.abort(300);
+  assert.deepEqual(kinds(fx), ["cancel"]);
+  assert.equal(byType(fx, "micClose").length, 0);
+  assert.equal(stateOf(fx), "recovering");
+  assert.ok(byType(fx, "hud").some(h => h.text === "Reset"));
+  const vs2 = hidRecording();
+  vs2.micOpened();
+  assert.equal(byType(vs2.abort(300), "micClose").length, 1);
+});
+
+test("abort from idle only closes a plugin-owned mic", () => {
+  const vs = idleSession();
+  assert.deepEqual(vs.abort(0), []);
+  vs.micOpened();
+  assert.deepEqual(vs.abort(1), [{ type: "micClose" }]);
+});
+
+test("recovery settles after fresh idle + reaped cancel + quiet settle window", () => {
+  const vs = hidRecording();
+  const fx = vs.abort(300);
+  const cancel = cmdId(fx, "cancel");
+  const idle = vs.status("idle", 320, { fresh: true });        // answer to poll
+  assert.equal(stateOf(idle), undefined);                        // still recovering, no state change
+  assert.equal(vs.nextDeadline(), 15300);                        // recovery budget only; cancel not reaped yet
+  vs.cmdExit(cancel, 0, 330);
+  assert.equal(vs.nextDeadline(), 330 + 1500);                   // settle window armed
+  const done = vs.advance(1830);
+  assert.equal(stateOf(done), "idle");
+});
+
+test("a non-fresh idle with no transition does not settle; a fresh poll does", () => {
+  const vs = createVoiceSession(cfg());
+  vs.status("idle", 0, { fresh: true });
+  vs.hidPress(10);
+  const fx = vs.advance(1510);                                   // start-timeout -> recovering, cancel issued
+  vs.cmdExit(cmdId(fx, "cancel"), 0, 1515);
+  vs.status("idle", 1520, { fresh: false });                     // stream line, backend was already idle: no evidence
+  assert.equal(vs.nextDeadline(), 16510);                        // only the recovery budget is armed
+  vs.status("idle", 1530, { fresh: true });                      // poll answer newer than the cancel
+  assert.equal(vs.nextDeadline(), 1530 + 1500);
+  assert.equal(stateOf(vs.advance(3030)), "idle");
+});
+
+test("a recording->idle transition observed after the cancel counts as fresh evidence", () => {
+  const vs = hidRecording();
+  const fx = vs.abort(300);
+  vs.cmdExit(cmdId(fx, "cancel"), 0, 310);
+  vs.status("idle", 320, { fresh: false });
+  assert.equal(vs.nextDeadline(), 320 + 1500);
+});
+
+test("phantom recording after an unconfirmed start is re-cancelled up to three times, then escalates to a restart once quiet", () => {
+  const vs = createVoiceSession(cfg());
+  vs.status("idle", 0, { fresh: true });
+  vs.hidPress(10);
+  const fx = vs.advance(1510);                                    // start-timeout: cancel #1, recovering from `starting`
+  vs.cmdExit(cmdId(fx, "cancel"), 0, 1520);
+  vs.status("idle", 1530, { fresh: true });                       // accepted; settle armed
+  assert.equal(vs.nextDeadline(), 3030);
+  const c2 = vs.status("recording", 1600);  assert.deepEqual(kinds(c2), ["cancel"]);   // late SIGUSR1 -> phantom
+  vs.cmdExit(cmdId(c2, "cancel"), 0, 1610);
+  vs.status("idle", 1620);
+  const c3 = vs.status("recording", 1700);  assert.deepEqual(kinds(c3), ["cancel"]);
+  vs.cmdExit(cmdId(c3, "cancel"), 0, 1710);
+  vs.status("idle", 1720);
+  const c4 = vs.status("recording", 1800);  assert.deepEqual(kinds(c4), []);          // budget exhausted, escalate
+  assert.equal(byType(c4, "restart").length, 0);                                      // never while recording
+  const quiet = vs.status("idle", 1900);
+  assert.equal(byType(quiet, "restart").length, 1);
+  assert.equal(vs.nextDeadline(), 1900 + 10000);
+  assert.deepEqual(vs.status("stopped", 2000), []);                                   // ignored while restart pending
+  const rr = vs.restartResult(true, 3000);
+  assert.equal(byType(rr, "poll").length, 1);
+  vs.status("idle", 3100, { fresh: true });
+  assert.equal(vs.nextDeadline(), 3100 + 1500);
+  assert.equal(stateOf(vs.advance(4600)), "idle");
+  assert.equal(vs.snapshot().owner, null);
+});
+
+test("from a confirmed session, a recording after an accepted idle is external: observed, never cancelled, pauses the settle window", () => {
+  const vs = hidRecording();                                       // confirmed entry: nothing of ours can be pending
+  const fx = vs.abort(300);
+  vs.cmdExit(cmdId(fx, "cancel"), 0, 310);
+  vs.status("idle", 320, { fresh: true });                       // accepted -> settle armed at 1820
+  assert.equal(vs.nextDeadline(), 1820);
+  const ext = vs.status("recording", 900);                        // F9 pressed by the user
+  assert.deepEqual(kinds(ext), []);                               // no cancel
+  assert.equal(vs.snapshot().cancels, 1);
+  assert.equal(vs.snapshot().state, "recovering");
+  assert.equal(vs.nextDeadline(), 15300);                         // settle paused; only the budget remains
+  vs.status("transcribing", 1500);
+  assert.deepEqual(kinds(vs.advance(1820)), []);
+  const back = vs.status("idle", 2000);                           // transition after cancelAt -> re-armed
+  assert.equal(vs.nextDeadline(), 3500);
+  assert.equal(stateOf(vs.advance(3500)), "idle");
+  void back;
+});
+
+test("late recording during recovering is never adopted as a keyboard session", () => {
+  const vs = hidRecording();
+  vs.abort(300);
+  vs.status("recording", 400);
+  assert.equal(vs.snapshot().state, "recovering");
+  assert.equal(vs.snapshot().owner, null);
+});
+
+test("failed restart or restart timeout ends unconfigured", () => {
+  const vs = hidRecording();
+  const fx = vs.abort(300);
+  vs.cmdExit(cmdId(fx, "cancel"), 0, 310);
+  const b = vs.advance(15300);                                    // recovery budget expires, backend idle-unknown -> restart
+  assert.equal(byType(b, "restart").length, 1);
+  assert.equal(stateOf(vs.restartResult(false, 15400)), "unconfigured");
+  const vs2 = hidRecording();
+  const f2 = vs2.abort(300);
+  vs2.cmdExit(cmdId(f2, "cancel"), 0, 310);
+  vs2.advance(15300);
+  assert.equal(stateOf(vs2.advance(25300)), "unconfigured");
+});
+
+test("stop timeout: backend stays recording after stop -> recovering; after restart budget -> unconfigured", () => {
+  const vs = hidRecording();
+  vs.hidRelease(500);
+  const fx = vs.advance(15500);
+  assert.deepEqual(kinds(fx), ["cancel"]);
+  assert.equal(stateOf(fx), "recovering");
+  vs.status("recording", 15600);                                  // still recording: cancel #2
+  vs.status("recording", 15700);                                  // #3
+  assert.equal(vs.snapshot().cancels, 3);
+  const r = vs.advance(15500 + 15000);                            // budget: escalate, but backend busy -> no restart yet
+  assert.equal(byType(r, "restart").length, 0);
+  assert.equal(byType(vs.status("idle", 31000), "restart").length, 1);
+});
+
+test("stale command callbacks from before recovery are ignored", () => {
+  const vs = createVoiceSession(cfg());
+  const fx = vs.hidPress(0);
+  const startId = cmdId(fx, "start");
+  vs.abort(100);
+  assert.deepEqual(vs.cmdExit(startId, 1, 120), []);
+  assert.equal(vs.snapshot().cancels, 1);
+});
+
+test("stopped during recovery (not restart-pending) is unconfigured; healthy idle restores idle", () => {
+  const vs = hidRecording();
+  vs.abort(300);
+  assert.equal(stateOf(vs.status("stopped", 400)), "unconfigured");
+  assert.equal(stateOf(vs.status("idle", 500, { fresh: true })), "idle");
+});
