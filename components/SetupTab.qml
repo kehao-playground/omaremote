@@ -14,6 +14,7 @@ Item {
   property int cursor: -1
   readonly property var rows: service ? service.doctorRows : []
   readonly property int rowCount: rows.length + 1                  // + header button
+  onRowsChanged: root.cursor = Math.min(root.cursor, root.rowCount - 1)   // finding #13: clamp when a facts timeout shrinks rows to []
   property bool editing: false
   property string copied: ""
   function onShown() { cursor = -1; if (service) service.refreshDoctor() }
