@@ -24,15 +24,21 @@ Item {
   function activate() {
     if (cursor < 0) return
     if (cursor === Defaults.KEY_NAMES.length) { if (service) service.resetKeys(); return }
-    if (cursor === Defaults.KEY_NAMES.length + 1) { timing.open(service.config.timing); return }
+    if (cursor === Defaults.KEY_NAMES.length + 1) { if (root.service && root.service.config) timing.open(root.service.config.timing); return }
     var name = Defaults.KEY_NAMES[cursor]
     if (name === "mic") return
     if (column === 3) root.toggleRepeat(name)
     else root.edit(name, ["tap", "hold", "double"][column])
   }
-  function edit(name, trigger) { if (!service || keys[name].supported === false) return; editor.open(name, trigger, keys[name][trigger] || null) }
+  function edit(name, trigger) {
+    if (!root.service || !root.service.config || !root.keys[name]) return
+    if (keys[name].supported === false) return
+    if (keys[name].panic && trigger === "hold") return       // §4.3: the panic hold is hard-coded, never editable
+    editor.open(name, trigger, keys[name][trigger] || null)
+  }
   function toggleRepeat(name) {
-    if (!service || keys[name].panic) return
+    if (!root.service || !root.service.config || !root.keys[name]) return
+    if (keys[name].panic) return
     service.setKeyField(name, { repeat: !keys[name].repeat })
   }
 
@@ -70,14 +76,14 @@ Item {
     Row {
       spacing: Style.space(6)
       Button { text: "Reset to defaults"; foreground: root.fg; hasCursor: root.cursor === Defaults.KEY_NAMES.length; onClicked: if (root.service) root.service.resetKeys() }
-      Button { text: "Timing…"; foreground: root.fg; hasCursor: root.cursor === Defaults.KEY_NAMES.length + 1; onClicked: timing.open(root.service.config.timing) }
+      Button { text: "Timing…"; foreground: root.fg; hasCursor: root.cursor === Defaults.KEY_NAMES.length + 1; onClicked: if (root.service && root.service.config) timing.open(root.service.config.timing) }
     }
     ActionEditor {
       id: editor
       width: parent.width
       fg: root.fg
       fontFamily: root.fontFamily
-      onSaved: function(keyName, trigger, action) { var f = ({}); f[trigger] = action === null ? undefined : action; root.service.setKeyField(keyName, f) }
+      onSaved: function(keyName, trigger, action) { var f = ({}); f[trigger] = action === null ? undefined : action; if (root.service) root.service.setKeyField(keyName, f) }
     }
     TimingEditor {
       id: timing
