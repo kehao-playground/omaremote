@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.kehao-chen.omaremote",
+  "name": "OmaRemote",
+  "version": "0.1.0",
+  "author": "Kehao Chen",
+  "license": "GPL-3.0-only",
+  "homepage": "https://github.com/kehao-playground/omaremote",
+  "category": "Input",
+  "description": "ATVV Bluetooth voice remote as couch controller: push-to-talk via Voxtype and a 13-key mapping engine.",
+  "kinds": ["bar-widget", "service"],
+  "keepLoaded": true,
+  "entryPoints": {
+    "barWidget": "BarWidget.qml",
+    "service": "Service.qml"
+  },
+  "barWidget": {
+    "displayName": "OmaRemote",
+    "category": "Input",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
