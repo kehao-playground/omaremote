@@ -15,6 +15,7 @@ OMAREMOTE_FAKE_DIR=$(mktemp -d /tmp/omaremote-fake.XXXXXX); export OMAREMOTE_FAK
 export XDG_CONFIG_HOME=$OMAREMOTE_FAKE_DIR/config XDG_DATA_HOME=$OMAREMOTE_FAKE_DIR/data
 export OMAREMOTE_IPC_TARGET=omaremote-test OMAREMOTE_APPID=omaremote-test
 export OMAREMOTE_DISPATCH=hyprctl            # dispatch actions go to the fake hyprctl, never to the live compositor
+SYS_PATH=$PATH                                # captured before the fakes are prefixed: HARNESS_PATH scenarios build from this
 export PATH=$ROOT/tests/fakes/bin:$PATH
 ONLY=${1:-}
 pass=0; fail=0; failed=(); HPID=""
@@ -36,10 +37,13 @@ reset_fakes() {
   : > "$F/atv.present"; echo connected > "$F/atv.state"; printf 'atvvoice_mic' > "$F/vox.config"
   cp "$ROOT/tests/fixtures/pw-dump.json" "$F/pw-dump.json"
 }
-start_harness() {
+start_harness() {   # HARNESS_PATH, if set, is used verbatim (a complete, self-contained PATH — see
+                     # s_voxtype_missing_command_is_bounded); it never falls back to $SYS_PATH, so a binary
+                     # deliberately left out of it (voxtype) cannot resolve to the real one there instead.
   mkdir -p "$HARNESS"; cp "$ROOT/tests/harness/shell.qml" "$HARNESS/shell.qml"
   for e in Service.qml lib components host; do [[ -e $ROOT/$e ]] && ln -sfn "$ROOT/$e" "$HARNESS/$e"; done
-  setsid qs -p "$HARNESS" --no-duplicate > "$F/harness.log" 2>&1 & HPID=$!   # own process group: stop_harness reaps every fake it spawned
+  local hpath=${HARNESS_PATH:-"$ROOT/tests/fakes/bin:$SYS_PATH"}
+  PATH="$hpath" setsid qs -p "$HARNESS" --no-duplicate > "$F/harness.log" 2>&1 & HPID=$!   # own process group: stop_harness reaps every fake it spawned
   for _ in $(seq 1 100); do [[ $(ipc ping 2>/dev/null) == ok ]] && return 0; sleep 0.1; done
   echo "    harness did not answer ping:"; sed 's/^/      /' "$F/harness.log"; return 1
 }
@@ -444,6 +448,84 @@ scenario selftest_blocks_voice_starts s_selftest_blocks_voice_starts
 scenario doctor_rows s_doctor_rows
 scenario mic_toggle_owned_mic_closed_on_reset s_mic_toggle_owned_mic_closed_on_reset
 scenario selftest_arm_cold_retry s_selftest_arm_cold_retry
+
+# ---- Final fix wave (final-review.md): findings #2 and #3 ----
+doctor_at() { ipc doctor | jq -r .at; }   # `.doctorAt`/`.doctorSummary` aren't in the `status` snapshot; the `doctor` verb carries them
+
+s_voxtype_missing_command_is_bounded() {   # finding #2: a Process whose binary fails to start never emits
+  ready || return 1                        # `exited`; nothing bounded it before the CommandRunner/VoxtypeMonitor fix
+  local i=0 at0="0"
+  while (( i < 100 )); do at0=$(doctor_at); [[ $at0 != "0" && $at0 != "null" ]] && break; sleep 0.05; i=$((i + 1)); done
+  [[ $at0 != "0" && $at0 != "null" ]] || { echo "    startup doctor run never completed"; return 1; }
+
+  # --- CommandRunner: make the "doctor" job's own binary unexecutable (a private copy of host/, never the
+  # real repo file) and confirm the job still finishes (synthesized exit 127) instead of wedging that job
+  # slot forever — runner.pending("doctor") would otherwise never return to 0 and every future refresh would
+  # silently no-op (Ruling 16's own recovery path never gets a chance to run).
+  rm -f "$HARNESS/host"; cp -r "$ROOT/host" "$HARNESS/host"; chmod -x "$HARNESS/host/omaremote-facts"
+  local i1=0 at1="$at0"   # the `doctor` IPC call itself triggers refreshDoctor() and returns the (still stale) current state
+  while (( i1 < 30 )); do at1=$(doctor_at); [[ $at1 != "$at0" ]] && break; sleep 0.1; i1=$((i1 + 1)); done
+  [[ $at1 != "$at0" ]] || { echo "    doctorAt never advanced after the facts script became unexecutable"; return 1; }
+  [[ $(ipc doctor | jq -r .summary) == facts-timeout ]] || { echo "    doctorSummary=$(ipc doctor | jq -r .summary)"; return 1; }
+  chmod +x "$HARNESS/host/omaremote-facts"                        # the same job slot must be reusable, not permanently wedged
+  ipc doctor > /dev/null
+  local i2=0 at2="$at1"
+  while (( i2 < 30 )); do at2=$(doctor_at); [[ $at2 != "$at1" ]] && break; sleep 0.1; i2=$((i2 + 1)); done
+  [[ $at2 != "$at1" ]] || { echo "    doctor job slot stayed wedged after the script was restored"; return 1; }
+  rm -rf "$HARNESS/host"                                          # restore the normal symlink before the restart below
+
+  # --- VoxtypeMonitor: voxtype entirely absent from PATH (§5.4: plugin installed before setup ran). Build a
+  # PATH mirroring every real binary on this host except voxtype, so the fake tools still work and the
+  # request can never silently fall through to the REAL /usr/bin/voxtype (confirmed present on this host).
+  mkdir -p "$F/nobin"
+  for bp in /usr/bin/*; do b=${bp##*/}; [[ $b == voxtype ]] && continue; ln -sf "$bp" "$F/nobin/$b" 2>/dev/null; done
+  for t in systemctl hyprctl busctl wpctl pw-dump wtype playerctl omarchy-lock-screen; do ln -sf "$ROOT/tests/fakes/bin/$t" "$F/nobin/$t"; done
+  rm -f "$F/nobin/voxtype"
+  stop_harness
+  HARNESS_PATH=$F/nobin start_harness || return 1
+  wait_for '.config' true 5 || return 1
+  ipc voice poll - > /dev/null
+  wait_for '.backend' stopped 5 || return 1                       # pollProc fix: a synthesized "stopped", never stuck "unknown"
+  local r; r=$(ipc mic system)
+  [[ $(jq -r .ok <<<"$r") == true ]] || { echo "    $r"; return 1; }
+  local id; id=$(jq -r .operationId <<<"$r")
+  sleep 1
+  local st; st=$(ipc micStatus "$id" | jq -r .state)
+  [[ $st == queued || $st == failed ]] || { echo "    mic state=$st (must never reach 'applying' with no bound)"; return 1; }
+  local sr; sr=$(ipc selftestArm)
+  [[ $(jq -r 'has("ok")' <<<"$sr") == true ]] || { echo "    selftestArm did not answer: $sr"; return 1; }   # bounded: answers, never hangs
+  [[ $(mic_wait "$id" 65) == failed ]] || { echo "    $(ipc micStatus "$id")"; return 1; }   # MicApply's own WAIT_MS eventually fires; no permanent wedge
+  [[ $(jget '.mic.pending') == false ]] || return 1
+  r=$(ipc mic system)
+  [[ $(jq -r .ok <<<"$r") == true ]] || { echo "    second request after resolution: $r"; return 1; }   # the gate/slot is free again
+}
+scenario voxtype_missing_command_is_bounded s_voxtype_missing_command_is_bounded
+
+s_config_slow_external_write() {   # finding #3: a slow in-place external edit (truncate, then write later —
+  ready || return 1                # what `cat new > config.json` really does) must not be misread as "file
+  local f=$XDG_CONFIG_HOME/omaremote/config.json     # missing -> defaults", nor abort an (absent, here) session
+  jq '.timing.holdMs = 900' "$f" > "$F/c.json" && cat "$F/c.json" > "$f"   # a non-default value the transient-defaults
+  wait_for '.timing.holdMs' 900 5 || return 1                              # dip (holdMs back to its default) is distinguishable from
+  jq '.timing.holdMs = 850' "$f" > "$F/c.json"
+  local errs0; errs0=$(jget '.errorCount')
+  local lines0; lines0=$(wc -l < "$F/actions.log")    # actions.log already carries the startup doctor run's read-only probes
+  : > "$f"                                            # truncate now
+  local i=0 badholdms="" badstate=""
+  while (( i < 8 )); do                               # sample across the empty-file gap (~320 ms) before the real write lands
+    local hm; hm=$(jget '.timing.holdMs'); [[ $hm == 900 ]] || badholdms=$hm
+    local vs; vs=$(jget '.voice.state'); [[ $vs == idle ]] || badstate=$vs
+    sleep 0.04; i=$((i + 1))
+  done
+  cat "$F/c.json" > "$f"                              # ... then write later — the deliberate gap a debounce/retry must survive
+  wait_for '.timing.holdMs' 850 5 || return 1          # the real content must still win, not get stuck on defaults
+  [[ -z $badholdms ]] || { echo "    holdMs dipped to $badholdms (defaults) during the transient empty read"; return 1; }
+  [[ -z $badstate ]] || { echo "    voice.state left idle during the transient empty read: $badstate"; return 1; }
+  [[ $(jget '.configInvalid') == false ]] || return 1
+  [[ $(jget '.errorCount') == "$errs0" ]] || { echo "    errorCount $errs0 -> $(jget '.errorCount')"; return 1; }
+  local lines1; lines1=$(wc -l < "$F/actions.log")
+  [[ $lines1 == "$lines0" ]] || { echo "    unexpected dispatch during a transient empty read:"; tail -n +$((lines0 + 1)) "$F/actions.log"; return 1; }
+}
+scenario config_slow_external_write s_config_slow_external_write
 
 # ---- summary ---------------------------------------------------------------------
 echo "integration: $pass passed, $fail failed"
