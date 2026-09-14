@@ -4,7 +4,7 @@
 
 **Goal:** Build and fully test the pure-JavaScript core of the OmaRemote Omarchy plugin — key-mapping engine, voice-session state machine, mic-apply transaction, parsers, doctor rules, self-test recorder — with no Omarchy, Hyprland or hardware required.
 
-**Architecture:** Every piece of logic lives in `lib/*.mjs` ES modules that take explicit time (`now` in ms) and return **effects** (plain objects) instead of spawning processes or touching QML. Qt 6 QML imports `.mjs` modules directly, so the same files run under `node --test` here and inside `omarchy-shell` later. Plan 2 wires these modules to Quickshell `Process`/`GlobalShortcut`/`IpcHandler` adapters; Plan 3 writes the host setup script. Nothing in this plan spawns a process.
+**Architecture:** Every piece of logic lives in `lib/*.mjs` ES modules that take explicit time (`now` in ms) and return **effects** (plain objects) instead of spawning processes or touching QML. Qt 6 QML imports `.mjs` modules directly, so the same files run under `node --test` here and inside `omarchy-shell` later. Plan 2 wires these modules to Quickshell `Process`/`GlobalShortcut`/`IpcHandler` adapters; Plan 3 writes the host setup script. No module under `lib/` spawns a process or reads the environment; the only external commands in this plan are repository housekeeping in Task 1 (license download) and `node --test`.
 
 **Tech Stack:** Node.js ≥ 20 (`node --test`, `node:assert/strict`), ES modules (`.mjs`, no npm dependencies), GNU Make. Target runtime later: Qt 6 QML JavaScript (ES7-level: no `??=`, no top-level await, no Node APIs inside `lib/`).
 
@@ -20,10 +20,10 @@
 - Neutral key pool: `up→f13 down→f14 left→f15 right→f16 ok→f17 back→f18 home→f19 menu→f20 app→f21 volup→f22 voldown→f23 power→f24 mic→prog1` (keyd names) with Hyprland keysyms `F13…F24`, `XF86Tools` (§3).
 - Action types are a closed union: `key | dispatch | volume | media | screen | none` (§4.4). No free-form shell.
 - Voice commands are exactly `voxtype record start|stop|cancel`; panic/abort never issues `stop` (§4.3, §5.2).
-- Voxtype status classes: `idle | recording | transcribing | stopped`; unknown classes are "not idle", never idle (§3 Voxtype).
+- Voxtype status classes: `idle | recording | transcribing | stopped`; a `streaming` class (streaming-transcription builds) is normalized to `recording`; unknown classes are "not idle", never idle (§3 Voxtype).
 - `lib/` files must not import Node built-ins (`fs`, `child_process`, …) — QML cannot load them. Tests may.
 - Every code file starts with a one-line comment naming the spec section it implements.
-- Commit after every task with the message shown; commit messages end with `Claude-Session: https://claude.ai/code/session_01YGqBRt1AeLviLXVYn9D2xR` on its own line.
+- Commit after every task with the message shown; append whatever attribution trailer your harness requires, if any.
 
 ## File Structure
 
@@ -205,7 +205,7 @@ export function last(effects, type) {
 }
 ```
 
-Download the license: `curl -sSL https://www.gnu.org/licenses/gpl-3.0.txt -o LICENSE` and confirm the first line reads `GNU GENERAL PUBLIC LICENSE`.
+Repository action (network): `curl -sSL https://www.gnu.org/licenses/gpl-3.0.txt -o LICENSE` and confirm the first line reads `GNU GENERAL PUBLIC LICENSE`. Offline fallback: copy an existing GPL-3.0 text (`/usr/share/licenses/common/GPL3/license.txt` on Arch) or leave `LICENSE` out of this commit and add it in a later one — do not block the task on it.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -216,9 +216,7 @@ Expected: `# pass 2`, `# fail 0`
 
 ```bash
 git add package.json manifest.json Makefile .gitignore README.md LICENSE tests/helpers.mjs tests/helpers.test.mjs
-git commit -m "chore: scaffold plugin repo and node test harness
-
-Claude-Session: https://claude.ai/code/session_01YGqBRt1AeLviLXVYn9D2xR"
+git commit -m "chore: scaffold plugin repo and node test harness"
 ```
 
 ---
@@ -482,9 +480,7 @@ Expected: `# pass 9`, `# fail 0`
 
 ```bash
 git add lib/Defaults.mjs lib/Config.mjs lib/Actions.mjs tests/Config.test.mjs
-git commit -m "feat(core): defaults and config normalization with panic exclusivity
-
-Claude-Session: https://claude.ai/code/session_01YGqBRt1AeLviLXVYn9D2xR"
+git commit -m "feat(core): defaults and config normalization with panic exclusivity"
 ```
 
 ---
@@ -734,9 +730,7 @@ Expected: `# pass 9`, `# fail 0`
 
 ```bash
 git add lib/KeyEngine.mjs tests/KeyEngine.test.mjs
-git commit -m "feat(core): key engine with simple, long and panic key semantics
-
-Claude-Session: https://claude.ai/code/session_01YGqBRt1AeLviLXVYn9D2xR"
+git commit -m "feat(core): key engine with simple, long and panic key semantics"
 ```
 
 ---
@@ -803,9 +797,7 @@ Expected: `# pass 14`, `# fail 0`. If any of the five fail, fix `fire()`/`press(
 
 ```bash
 git add tests/KeyEngine.test.mjs lib/KeyEngine.mjs
-git commit -m "test(core): key engine repeat and reload coverage
-
-Claude-Session: https://claude.ai/code/session_01YGqBRt1AeLviLXVYn9D2xR"
+git commit -m "test(core): key engine repeat and reload coverage"
 ```
 
 ---
@@ -871,9 +863,7 @@ Expected: `# pass 19`, `# fail 0`. Fix `press()`/`fire()` if any fail.
 
 ```bash
 git add tests/KeyEngine.test.mjs lib/KeyEngine.mjs
-git commit -m "feat(core): key engine double-tap semantics
-
-Claude-Session: https://claude.ai/code/session_01YGqBRt1AeLviLXVYn9D2xR"
+git commit -m "feat(core): key engine double-tap semantics"
 ```
 
 ---
@@ -1026,9 +1016,7 @@ Expected: all pass (Config tests still green because `validateAction` semantics 
 
 ```bash
 git add lib/Actions.mjs tests/Actions.test.mjs
-git commit -m "feat(core): action argv/dispatch mapping and labels
-
-Claude-Session: https://claude.ai/code/session_01YGqBRt1AeLviLXVYn9D2xR"
+git commit -m "feat(core): action argv/dispatch mapping and labels"
 ```
 
 ---
@@ -1173,9 +1161,7 @@ Expected: `# pass 6`, `# fail 0`
 
 ```bash
 git add lib/Dbus.mjs tests/Dbus.test.mjs
-git commit -m "feat(core): busctl signal/property parsers with sender filtering and generations
-
-Claude-Session: https://claude.ai/code/session_01YGqBRt1AeLviLXVYn9D2xR"
+git commit -m "feat(core): busctl signal/property parsers with sender filtering and generations"
 ```
 
 ---
@@ -1201,6 +1187,11 @@ import { parseStatusLine, isHealthy, isIdle, createStatusStream } from "../lib/V
 test("class field is the state; alt is a fallback", () => {
   assert.equal(parseStatusLine('{"text":"","alt":"recording","class":"recording","tooltip":"Recording..."}').cls, "recording");
   assert.equal(parseStatusLine('{"alt":"idle"}').cls, "idle");
+});
+
+test("streaming is normalized to recording", () => {
+  assert.equal(parseStatusLine('{"class":"streaming"}').cls, "recording");
+  assert.equal(parseStatusLine('{"alt":"streaming"}').cls, "recording");
 });
 
 test("stopped and unknown classes are unhealthy and never idle", () => {
@@ -1234,8 +1225,10 @@ Run: `node --test tests/VoxStatus.test.mjs` — Expected: module not found.
 
 `lib/VoxStatus.mjs`:
 ```js
-// Spec §3 Voxtype: status classes idle|recording|transcribing|stopped; anything else is unknown (never idle).
+// Spec §3 Voxtype: status classes idle|recording|transcribing|stopped; `streaming` normalizes to recording;
+// anything else is unknown (never idle).
 const KNOWN = ["idle", "recording", "transcribing", "stopped"];
+const ALIAS = { streaming: "recording" };
 
 export function parseStatusLine(line) {
   const l = String(line || "").trim();
@@ -1243,7 +1236,8 @@ export function parseStatusLine(line) {
   let j;
   try { j = JSON.parse(l); } catch { return null; }
   if (!j || typeof j !== "object") return null;
-  const c = typeof j.class === "string" ? j.class : (typeof j.alt === "string" ? j.alt : "");
+  const c0 = typeof j.class === "string" ? j.class : (typeof j.alt === "string" ? j.alt : "");
+  const c = ALIAS[c0] || c0;
   return { cls: KNOWN.includes(c) ? c : "unknown", raw: j };
 }
 
@@ -1268,15 +1262,13 @@ export function createStatusStream() {
 }
 ```
 
-- [ ] **Step 4: Run tests** — `node --test tests/VoxStatus.test.mjs` → `# pass 4`.
+- [ ] **Step 4: Run tests** — `node --test tests/VoxStatus.test.mjs` → `# pass 5`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add lib/VoxStatus.mjs tests/VoxStatus.test.mjs
-git commit -m "feat(core): voxtype status parser
-
-Claude-Session: https://claude.ai/code/session_01YGqBRt1AeLviLXVYn9D2xR"
+git commit -m "feat(core): voxtype status parser"
 ```
 
 ---
@@ -1290,7 +1282,8 @@ Claude-Session: https://claude.ai/code/session_01YGqBRt1AeLviLXVYn9D2xR"
 **Interfaces:**
 - Produces `createVoiceSession(config)` → object with inputs (each returns an effects array):
   - `hidPress(now)`, `hidRelease(now)` — HID mic key (only when `config.keys.mic.ptt`)
-  - `dbus(state, now)` — a `MicStateChanged` value or property read from the monitor path; `atvRead(state, now)` — answer to a `readAtv` effect
+  - `dbus(event, now)` — a parsed monitor event `{ state, sender, generation }` (from `Dbus.mjs`); dropped unless `sender` equals the selected sender and `generation` equals the current monitor generation. `setDbusSource({ sender, generation })` — host calls it after resolving the `org.atvvoice.*` owner and after every monitor (re)start.
+  - `atvRead(reading, now)` — answer to a `readAtv` effect: `{ state, requestId, generation }`; dropped unless `requestId` is the outstanding request and `generation` is current, so a late property reply from a retired daemon cannot decide arbitration or a stop
   - `status(cls, now, { fresh })` — a Voxtype status class; `fresh: true` for answers to a `poll` effect, `false` for follow-stream lines
   - `cmdExit(id, code, now)` — a `cmd` effect's process exited
   - `restartResult(ok, now)` — host finished the recovery restart + verification (§5.3)
@@ -1298,8 +1291,8 @@ Claude-Session: https://claude.ai/code/session_01YGqBRt1AeLviLXVYn9D2xR"
   - `advance(now)`, `nextDeadline()`
   - `micOpened()` / `micClosed()` — plugin-owned mic bookkeeping (§5.1); `setDbusEnabled(bool)` — remoteWarning switch (§5.4); `setConfig(config)`
   - `gate.acquire(name)` → boolean (only from `idle` with no other holder), `gate.release(name)`, `gate.busy()`
-  - `snapshot()` → `{ state, owner, remote, backend, backendAt, backendFresh, pluginMic, cancels, pendingCmds, sessionSource, inferred, gates }`
-- Effects emitted: `cmd` (`{ id, kind: "start"|"stop"|"cancel", argv }`), `state`, `hud`, `error` (`{ reason }`), `poll`, `readAtv`, `micClose`, `restart`, `stat` (`{ session: { startedAt, durationSec, source, inferred } }`).
+  - `snapshot()` → `{ state, owner, remote, backend, backendAt, backendFresh, pluginMic, cancels, pendingCmds, sessionSource, inferred, gates, dbusSender, dbusGeneration, atvRequestId, idleAccepted }`
+- Effects emitted: `cmd` (`{ id, kind: "start"|"stop"|"cancel", argv }`), `state`, `hud`, `error` (`{ reason }`), `poll`, `readAtv` (`{ requestId }`), `micClose`, `restart`, `stat` (`{ session: { startedAt, durationSec, source, inferred } }`).
 - States: `idle | arbitrating | starting | recording | stopping | transcribing | recovering | unconfigured`. Owners: `dbus | hid | keyboard | null`.
 
 - [ ] **Step 1: Write the failing tests (HID path)**
@@ -1317,8 +1310,11 @@ const cfg = (over = {}) => normalizeConfig({ ...DEFAULT_CONFIG, ...over }).confi
 const kinds = (fx) => byType(fx, "cmd").map(c => c.kind);
 const stateOf = (fx) => (last(fx, "state") || {}).state;
 const cmdId = (fx, kind) => byType(fx, "cmd").find(c => c.kind === kind).id;
+// D-Bus event from the selected sender in the current generation; A = answer to the outstanding readAtv.
+const D = (state, extra = {}) => ({ state, sender: ":1.42", generation: 0, ...extra });
+const A = (vs, state, extra = {}) => ({ state, requestId: vs.snapshot().atvRequestId, generation: 0, ...extra });
 
-// Bring a session to confirmed recording via the HID key. Returns { vs, startId }.
+// Bring a session to confirmed recording via the HID key.
 function hidRecording() {
   const vs = createVoiceSession(cfg());
   vs.status("idle", 0, { fresh: true });
@@ -1458,8 +1454,11 @@ export function createVoiceSession(config) {
   let dl = {};                                              // named deadlines (ms)
   let stopLatched = false, stopOnConfirm = false, ourStart = false, pendingDbusEnd = false;
   let arb = null;                                           // { atv, backend } answers after arbitration timer
-  let cancels = 0, cancelAt = -Infinity, escalate = false, restartPending = false, restarted = false, idleAccepted = false;
+  let cancels = 0, cancelAt = -Infinity, escalate = false, restartPending = false, restarted = false, idleAccepted = false, external = false;
+  let unconfirmedEntry = false;                             // §5.3: recovery began from `starting` (our SIGUSR1 may land late)
   let pluginMic = false, dbusEnabled = true;
+  let dbusSender = null, dbusGeneration = 0;                // §5.1 selected sender / monitor generation
+  let atvRequestId = null, atvSeq = 0;                      // outstanding readAtv request
   let sessionStart = 0, sessionSource = null, recordEnd = 0;
   const gates = new Set();
 
@@ -1479,6 +1478,13 @@ export function createVoiceSession(config) {
   }
   const clearDeadlines = () => { dl = {}; };
   const inferred = (src) => src === "dbus" || src === "keyboard";
+  function readAtv(out) { atvRequestId = `atv-${++atvSeq}`; out.push({ type: "readAtv", requestId: atvRequestId }); }
+  function currentSource(ev) {
+    if (!ev || typeof ev !== "object") return false;
+    if (dbusSender !== null && ev.sender !== dbusSender) return false;
+    if (ev.generation !== undefined && ev.generation !== dbusGeneration) return false;
+    return true;
+  }
 
   function startSession(out, now, source) {
     ourStart = true; stopLatched = false; stopOnConfirm = false;
@@ -1542,11 +1548,12 @@ export function createVoiceSession(config) {
   }
 
   function enterRecovering(out, now, reason) {
+    unconfirmedEntry = st === "starting";
     gen++; cmds.clear();                                    // §5.3 invalidate stale callbacks
     ourStart = false; stopLatched = false; stopOnConfirm = false; arb = null; pendingDbusEnd = false;
     sessionStart = 0; sessionSource = null; recordEnd = 0;
     clearDeadlines();
-    cancels = 1; cancelAt = now; escalate = false; restartPending = false; restarted = false; idleAccepted = false;
+    cancels = 1; cancelAt = now; escalate = false; restartPending = false; restarted = false; idleAccepted = false; external = false;
     cmd(out, "cancel");
     if (pluginMic) { pluginMic = false; out.push({ type: "micClose" }); }
     out.push({ type: "error", reason });
@@ -1566,7 +1573,7 @@ export function createVoiceSession(config) {
   }
 
   function recovered(out) {
-    cancels = 0; cancelAt = -Infinity; escalate = false; restarted = false; idleAccepted = false;
+    cancels = 0; cancelAt = -Infinity; escalate = false; restarted = false; idleAccepted = false; external = false; unconfirmedEntry = false;
     clearDeadlines();
     hud(out, "");
     setState(out, "idle", null);
@@ -1604,7 +1611,12 @@ export function createVoiceSession(config) {
   function recoveringStatus(out, prev, now) {
     const cls = backend.cls;
     if (cls === "recording" || cls === "transcribing") {
-      idleAccepted = false; delete dl.settle;
+      delete dl.settle;
+      if ((idleAccepted || external) && !unconfirmedEntry) { // §5.3: after an accepted idle, from a confirmed session -> external
+        if (!external) hud(out, "external dictation in progress");
+        external = true; idleAccepted = false; return;
+      }
+      idleAccepted = false;
       if (cancels < MAX_CANCELS) { cancels++; cancelAt = now; cmd(out, "cancel"); }
       else escalate = true;                                  // restart once the backend is quiet
       return;
@@ -1612,7 +1624,7 @@ export function createVoiceSession(config) {
     const transition = prev.cls === "recording" || prev.cls === "transcribing";
     const freshEnough = backend.fresh && now - backend.at <= FRESH_MS;
     if (now >= cancelAt && (freshEnough || transition)) {
-      idleAccepted = true;
+      idleAccepted = true; external = false;
       if (escalate) maybeRestart(out, now); else trySettle(now);
     }
   }
@@ -1656,9 +1668,11 @@ export function createVoiceSession(config) {
     return out;
   }
 
-  function dbus(state, now) {
-    const prev = remote; remote = state;
+  function dbus(event, now) {
     const out = [];
+    if (!currentSource(event)) return out;
+    const state = event.state;
+    const prev = remote; remote = state;
     const was = prev === "streaming", is = state === "streaming";
     if (is && !was) {
       if (st === "idle" && dbusEnabled && gates.size === 0) {
@@ -1671,7 +1685,7 @@ export function createVoiceSession(config) {
       if (st === "arbitrating") { abandonArb(out, null); return out; }
       if (owner === "dbus") {
         if (st === "starting") stopOnConfirm = true;
-        else if (st === "recording") { pendingDbusEnd = true; out.push({ type: "readAtv" }); }
+        else if (st === "recording") { pendingDbusEnd = true; readAtv(out); }
       } else if ((st === "recording" || st === "starting") && v().mic === "remote") {
         hud(out, "remote audio dropped");
       }
@@ -1679,9 +1693,12 @@ export function createVoiceSession(config) {
     return out;
   }
 
-  function atvRead(state, now) {
-    remote = state;
+  function atvRead(reading, now) {
     const out = [];
+    if (!reading || reading.requestId !== atvRequestId || !currentSource({ sender: dbusSender, generation: reading.generation })) return out;
+    atvRequestId = null;
+    const state = reading.state;
+    remote = state;
     if (arb && st === "arbitrating") { arb.atv = state; decideArb(out, now); return out; }
     if (pendingDbusEnd && st === "recording" && owner === "dbus") {
       pendingDbusEnd = false;
@@ -1742,7 +1759,7 @@ export function createVoiceSession(config) {
     const out = [];
     const due = (k) => dl[k] !== undefined && dl[k] <= now;
     if (st === "starting" && due("start")) { delete dl.start; hud(out, "no audio from Voxtype"); enterRecovering(out, now, "start-timeout"); }
-    if (st === "arbitrating" && due("arb")) { delete dl.arb; arb = { atv: null, backend: null }; out.push({ type: "readAtv" }, { type: "poll" }); dl.arbCheck = now + ARB_CHECK_MS; }
+    if (st === "arbitrating" && due("arb")) { delete dl.arb; arb = { atv: null, backend: null }; readAtv(out); out.push({ type: "poll" }); dl.arbCheck = now + ARB_CHECK_MS; }
     if (st === "arbitrating" && due("arbCheck")) { delete dl.arbCheck; abandonArb(out, "unresponsive"); }
     if (st === "recording" && due("maxSession")) { delete dl.maxSession; hud(out, "max session reached"); requestStop(out, now); }
     if ((st === "stopping" || st === "transcribing") && due("stop")) { delete dl.stop; enterRecovering(out, now, "stop-timeout"); }
@@ -1766,6 +1783,7 @@ export function createVoiceSession(config) {
     hidPress, hidRelease, dbus, atvRead, status, cmdExit, restartResult, abort, advance, nextDeadline,
     micOpened() { pluginMic = true; }, micClosed() { pluginMic = false; },
     setDbusEnabled(b) { dbusEnabled = !!b; },
+    setDbusSource({ sender, generation }) { dbusSender = sender === undefined ? null : sender; dbusGeneration = generation || 0; atvRequestId = null; },
     setConfig(c) { cfg = c; },
     gate: {
       acquire(name) { if (st !== "idle" || gates.size > 0) return false; gates.add(name); return true; },
@@ -1773,7 +1791,7 @@ export function createVoiceSession(config) {
       busy() { return gates.size > 0; },
     },
     snapshot() {
-      return { state: st, owner, remote, backend: backend.cls, backendAt: backend.at, backendFresh: backend.fresh, pluginMic, cancels, pendingCmds: cmds.size, sessionSource, inferred: inferred(owner), gates: [...gates] };
+      return { state: st, owner, remote, backend: backend.cls, backendAt: backend.at, backendFresh: backend.fresh, pluginMic, cancels, pendingCmds: cmds.size, sessionSource, inferred: inferred(owner), gates: [...gates], dbusSender, dbusGeneration, atvRequestId, idleAccepted };
     },
   };
 }
@@ -1788,9 +1806,7 @@ Expected: `# pass 10`, `# fail 0`. If a test fails, fix the module — the tests
 
 ```bash
 git add lib/VoiceSession.mjs tests/VoiceSession.test.mjs
-git commit -m "feat(core): voice session state machine with HID sessions, stop latch and health
-
-Claude-Session: https://claude.ai/code/session_01YGqBRt1AeLviLXVYn9D2xR"
+git commit -m "feat(core): voice session state machine with HID sessions, stop latch and health"
 ```
 
 ---
@@ -1807,16 +1823,17 @@ Claude-Session: https://claude.ai/code/session_01YGqBRt1AeLviLXVYn9D2xR"
 // ---- D-Bus arbitration (§5.2) ----
 function idleSession() {
   const vs = createVoiceSession(cfg());
+  vs.setDbusSource({ sender: ":1.42", generation: 0 });
   vs.status("idle", 0, { fresh: true });
   return vs;
 }
 
 test("streaming from idle enters arbitrating; release before 250ms sends nothing and returns to idle", () => {
   const vs = idleSession();
-  const fx = vs.dbus("streaming", 0);
+  const fx = vs.dbus(D("streaming"), 0);
   assert.equal(stateOf(fx), "arbitrating");
   assert.equal(vs.nextDeadline(), 250);
-  const rel = vs.dbus("connected", 100);
+  const rel = vs.dbus(D("connected"), 100);
   assert.deepEqual(kinds(rel), []);
   assert.equal(stateOf(rel), "idle");
   assert.deepEqual(kinds(vs.advance(1000)), []);
@@ -1824,11 +1841,11 @@ test("streaming from idle enters arbitrating; release before 250ms sends nothing
 
 test("keyboard recording at 100ms is adopted as keyboard owner; later remote drop only warns", () => {
   const vs = idleSession();
-  vs.dbus("streaming", 0);
+  vs.dbus(D("streaming"), 0);
   const fx = vs.status("recording", 100);
   assert.equal(stateOf(fx), "recording");
   assert.equal(vs.snapshot().owner, "keyboard");
-  const drop = vs.dbus("connected", 500);
+  const drop = vs.dbus(D("connected"), 500);
   assert.deepEqual(kinds(drop), []);
   assert.ok(byType(drop, "hud").some(h => h.text === "remote audio dropped"));
   assert.equal(vs.snapshot().state, "recording");
@@ -1838,17 +1855,17 @@ test("reverse order: keyboard recording observed first, then on-demand streaming
   const vs = idleSession();
   const fx = vs.status("recording", 0);
   assert.equal(vs.snapshot().owner, "keyboard");
-  assert.deepEqual(vs.dbus("streaming", 30), []);
+  assert.deepEqual(vs.dbus(D("streaming"), 30), []);
   assert.equal(vs.snapshot().state, "recording");
 });
 
 test("arbitration timer: re-read; streaming + fresh idle backend -> record start owned by dbus", () => {
   const vs = idleSession();
-  vs.dbus("streaming", 0);
+  vs.dbus(D("streaming"), 0);
   const t = vs.advance(250);
   assert.equal(byType(t, "readAtv").length, 1);
   assert.equal(byType(t, "poll").length, 1);
-  assert.deepEqual(kinds(vs.atvRead("streaming", 260)), []);          // waits for both answers
+  assert.deepEqual(kinds(vs.atvRead(A(vs, "streaming"), 260)), []);          // waits for both answers
   const fx = vs.status("idle", 270, { fresh: true });
   assert.deepEqual(kinds(fx), ["start"]);
   assert.equal(stateOf(fx), "starting");
@@ -1856,10 +1873,10 @@ test("arbitration timer: re-read; streaming + fresh idle backend -> record start
   vs.status("recording", 400);
   assert.equal(vs.snapshot().state, "recording");
   // remote button released: verify before stopping
-  const end = vs.dbus("connected", 900);
+  const end = vs.dbus(D("connected"), 900);
   assert.deepEqual(kinds(end), []);
   assert.equal(byType(end, "readAtv").length, 1);
-  const stop = vs.atvRead("connected", 910);
+  const stop = vs.atvRead(A(vs, "connected"), 910);
   assert.deepEqual(kinds(stop), ["stop"]);
   const done = vs.status("idle", 1200);
   const stat = byType(done, "stat")[0].session;
@@ -1869,19 +1886,19 @@ test("arbitration timer: re-read; streaming + fresh idle backend -> record start
 
 test("arbitration timer: remote no longer streaming -> abandon without start", () => {
   const vs = idleSession();
-  vs.dbus("streaming", 0);
+  vs.dbus(D("streaming"), 0);
   vs.advance(250);
   vs.status("idle", 255, { fresh: true });
-  const fx = vs.atvRead("connected", 260);
+  const fx = vs.atvRead(A(vs, "connected"), 260);
   assert.deepEqual(kinds(fx), []);
   assert.equal(stateOf(fx), "idle");
 });
 
 test("arbitration timer: backend transcribing -> observe, no start", () => {
   const vs = idleSession();
-  vs.dbus("streaming", 0);
+  vs.dbus(D("streaming"), 0);
   vs.advance(250);
-  vs.atvRead("streaming", 255);
+  vs.atvRead(A(vs, "streaming"), 255);
   const fx = vs.status("transcribing", 260, { fresh: true });
   assert.deepEqual(kinds(fx), []);
   assert.equal(stateOf(fx), "transcribing");
@@ -1889,7 +1906,7 @@ test("arbitration timer: backend transcribing -> observe, no start", () => {
 
 test("arbitration answers never arrive: abandoned after 500ms", () => {
   const vs = idleSession();
-  vs.dbus("streaming", 0);
+  vs.dbus(D("streaming"), 0);
   vs.advance(250);
   const fx = vs.advance(750);
   assert.equal(stateOf(fx), "idle");
@@ -1898,9 +1915,9 @@ test("arbitration answers never arrive: abandoned after 500ms", () => {
 
 test("delayed keyboard status at 300ms is misattributed to dbus (documented, bounded)", () => {
   const vs = idleSession();
-  vs.dbus("streaming", 0);
+  vs.dbus(D("streaming"), 0);
   vs.advance(250);
-  vs.atvRead("streaming", 255);
+  vs.atvRead(A(vs, "streaming"), 255);
   const started = vs.status("idle", 260, { fresh: true });     // stale idle poll -> we start
   assert.deepEqual(kinds(started), ["start"]);
   vs.status("recording", 300);                                  // actually the keyboard session
@@ -1908,27 +1925,52 @@ test("delayed keyboard status at 300ms is misattributed to dbus (documented, bou
   assert.equal(snap.owner, "dbus");
   assert.equal(snap.inferred, true);
   // premature stop when the on-demand stream closes (documented consequence, §5.2)
-  vs.dbus("connected", 800);
-  assert.deepEqual(kinds(vs.atvRead("connected", 810)), ["stop"]);
+  vs.dbus(D("connected"), 800);
+  assert.deepEqual(kinds(vs.atvRead(A(vs, "connected"), 810)), ["stop"]);
 });
 
 test("stale D-Bus end is discarded when the remote is still streaming on re-read", () => {
   const vs = idleSession();
-  vs.dbus("streaming", 0); vs.advance(250); vs.atvRead("streaming", 255); vs.status("idle", 260, { fresh: true });
+  vs.dbus(D("streaming"), 0); vs.advance(250); vs.atvRead(A(vs, "streaming"), 255); vs.status("idle", 260, { fresh: true });
   vs.status("recording", 400);
-  vs.dbus("connected", 500);
-  assert.deepEqual(kinds(vs.atvRead("streaming", 510)), []);
+  vs.dbus(D("connected"), 500);
+  assert.deepEqual(kinds(vs.atvRead(A(vs, "streaming"), 510)), []);
   assert.equal(vs.snapshot().state, "recording");
 });
 
 test("D-Bus start path disabled by remoteWarning; gate holders also block it", () => {
   const vs = idleSession();
   vs.setDbusEnabled(false);
-  assert.deepEqual(vs.dbus("streaming", 0), []);
+  assert.deepEqual(vs.dbus(D("streaming"), 0), []);
   vs.setDbusEnabled(true);
-  vs.dbus("connected", 1);
+  vs.dbus(D("connected"), 1);
   assert.equal(vs.gate.acquire("mic-apply"), true);
-  assert.deepEqual(vs.dbus("streaming", 2), []);
+  assert.deepEqual(vs.dbus(D("streaming"), 2), []);
+});
+
+test("signals from another sender or an older monitor generation are dropped", () => {
+  const vs = idleSession();
+  assert.deepEqual(vs.dbus(D("streaming", { sender: ":1.99" }), 0), []);
+  assert.equal(vs.snapshot().state, "idle");
+  vs.setDbusSource({ sender: ":1.42", generation: 1 });
+  assert.deepEqual(vs.dbus(D("streaming", { generation: 0 }), 1), []);      // buffered from the old monitor
+  assert.equal(vs.snapshot().state, "idle");
+  assert.equal(stateOf(vs.dbus(D("streaming", { generation: 1 }), 2)), "arbitrating");
+});
+
+test("a property reply for a retired request or generation cannot decide arbitration or a stop", () => {
+  const vs = idleSession();
+  vs.dbus(D("streaming"), 0);
+  vs.advance(250);
+  const rid = vs.snapshot().atvRequestId;
+  assert.ok(rid);
+  assert.deepEqual(vs.atvRead({ state: "connected", requestId: "stale", generation: 0 }, 255), []);
+  assert.equal(vs.snapshot().state, "arbitrating");
+  assert.deepEqual(vs.atvRead({ state: "connected", requestId: rid, generation: -1 }, 256), []);
+  assert.equal(vs.snapshot().state, "arbitrating");
+  vs.status("idle", 257, { fresh: true });
+  assert.deepEqual(kinds(vs.atvRead({ state: "streaming", requestId: rid, generation: 0 }, 258)), ["start"]);
+  assert.equal(vs.snapshot().atvRequestId, null);
 });
 
 test("HID release during a keyboard-owned session does nothing", () => {
@@ -1951,15 +1993,13 @@ test("external transcribing observed from idle gets a stop deadline and finalize
 - [ ] **Step 2: Run tests**
 
 Run: `node --test tests/VoiceSession.test.mjs`
-Expected: `# pass 22`, `# fail 0`. Fix the module if needed.
+Expected: `# pass 24`, `# fail 0`. Fix the module if needed.
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add tests/VoiceSession.test.mjs lib/VoiceSession.mjs
-git commit -m "test(core): voice session D-Bus arbitration and ownership coverage
-
-Claude-Session: https://claude.ai/code/session_01YGqBRt1AeLviLXVYn9D2xR"
+git commit -m "test(core): voice session D-Bus arbitration and ownership coverage"
 ```
 
 ---
@@ -2027,29 +2067,51 @@ test("a recording->idle transition observed after the cancel counts as fresh evi
   assert.equal(vs.nextDeadline(), 320 + 1500);
 });
 
-test("phantom recording is re-cancelled up to three times, then escalates to a restart once quiet", () => {
-  const vs = hidRecording();
+test("phantom recording after an unconfirmed start is re-cancelled up to three times, then escalates to a restart once quiet", () => {
+  const vs = createVoiceSession(cfg());
+  vs.status("idle", 0, { fresh: true });
+  vs.hidPress(10);
+  const fx = vs.advance(1510);                                    // start-timeout: cancel #1, recovering from `starting`
+  vs.cmdExit(cmdId(fx, "cancel"), 0, 1520);
+  vs.status("idle", 1530, { fresh: true });                       // accepted; settle armed
+  assert.equal(vs.nextDeadline(), 3030);
+  const c2 = vs.status("recording", 1600);  assert.deepEqual(kinds(c2), ["cancel"]);   // late SIGUSR1 -> phantom
+  vs.cmdExit(cmdId(c2, "cancel"), 0, 1610);
+  vs.status("idle", 1620);
+  const c3 = vs.status("recording", 1700);  assert.deepEqual(kinds(c3), ["cancel"]);
+  vs.cmdExit(cmdId(c3, "cancel"), 0, 1710);
+  vs.status("idle", 1720);
+  const c4 = vs.status("recording", 1800);  assert.deepEqual(kinds(c4), []);          // budget exhausted, escalate
+  assert.equal(byType(c4, "restart").length, 0);                                      // never while recording
+  const quiet = vs.status("idle", 1900);
+  assert.equal(byType(quiet, "restart").length, 1);
+  assert.equal(vs.nextDeadline(), 1900 + 10000);
+  assert.deepEqual(vs.status("stopped", 2000), []);                                   // ignored while restart pending
+  const rr = vs.restartResult(true, 3000);
+  assert.equal(byType(rr, "poll").length, 1);
+  vs.status("idle", 3100, { fresh: true });
+  assert.equal(vs.nextDeadline(), 3100 + 1500);
+  assert.equal(stateOf(vs.advance(4600)), "idle");
+  assert.equal(vs.snapshot().owner, null);
+});
+
+test("from a confirmed session, a recording after an accepted idle is external: observed, never cancelled, pauses the settle window", () => {
+  const vs = hidRecording();                                       // confirmed entry: nothing of ours can be pending
   const fx = vs.abort(300);
   vs.cmdExit(cmdId(fx, "cancel"), 0, 310);
-  const c2 = vs.status("recording", 400);  assert.deepEqual(kinds(c2), ["cancel"]);
-  vs.cmdExit(cmdId(c2, "cancel"), 0, 410);
-  vs.status("idle", 420);
-  const c3 = vs.status("recording", 500);  assert.deepEqual(kinds(c3), ["cancel"]);
-  vs.cmdExit(cmdId(c3, "cancel"), 0, 510);
-  vs.status("idle", 520);
-  const c4 = vs.status("recording", 600);  assert.deepEqual(kinds(c4), []);       // budget exhausted, escalate
-  assert.equal(byType(c4, "restart").length, 0);                                   // never while recording
-  const quiet = vs.status("idle", 700);
-  assert.equal(byType(quiet, "restart").length, 1);
-  assert.equal(vs.nextDeadline(), 700 + 10000);
-  assert.deepEqual(vs.status("stopped", 800), []);                                 // ignored while restart pending
-  const rr = vs.restartResult(true, 2000);
-  assert.equal(byType(rr, "poll").length, 1);
-  vs.status("idle", 2100, { fresh: true });
-  assert.equal(vs.nextDeadline(), 2100 + 1500);
-  assert.equal(stateOf(vs.advance(3600)), "idle");
-  assert.equal(vs.snapshot().state, "idle");
-  assert.equal(vs.snapshot().owner, null);
+  vs.status("idle", 320, { fresh: true });                       // accepted -> settle armed at 1820
+  assert.equal(vs.nextDeadline(), 1820);
+  const ext = vs.status("recording", 900);                        // F9 pressed by the user
+  assert.deepEqual(kinds(ext), []);                               // no cancel
+  assert.equal(vs.snapshot().cancels, 1);
+  assert.equal(vs.snapshot().state, "recovering");
+  assert.equal(vs.nextDeadline(), 15300);                         // settle paused; only the budget remains
+  vs.status("transcribing", 1500);
+  assert.deepEqual(kinds(vs.advance(1820)), []);
+  const back = vs.status("idle", 2000);                           // transition after cancelAt -> re-armed
+  assert.equal(vs.nextDeadline(), 3500);
+  assert.equal(stateOf(vs.advance(3500)), "idle");
+  void back;
 });
 
 test("late recording during recovering is never adopted as a keyboard session", () => {
@@ -2108,15 +2170,13 @@ test("stopped during recovery (not restart-pending) is unconfigured; healthy idl
 - [ ] **Step 2: Run tests**
 
 Run: `node --test tests/VoiceSession.test.mjs`
-Expected: `# pass 33`, `# fail 0`. Fix the module if needed; keep tests as the spec's executable form.
+Expected: `# pass 36`, `# fail 0`. Fix the module if needed; keep tests as the spec's executable form.
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add tests/VoiceSession.test.mjs lib/VoiceSession.mjs
-git commit -m "test(core): voice session recovery, settle window and escalation coverage
-
-Claude-Session: https://claude.ai/code/session_01YGqBRt1AeLviLXVYn9D2xR"
+git commit -m "test(core): voice session recovery, settle window and escalation coverage"
 ```
 
 ---
@@ -2132,8 +2192,9 @@ Claude-Session: https://claude.ai/code/session_01YGqBRt1AeLviLXVYn9D2xR"
   - `request(mode, now, { nodeName })` → `{ effects, result }` with `result` = `{ ok: true, operationId }` or `{ ok: false, reason: "busy" | "invalid-mode" | "no-node" }`
   - `statusOf(operationId)` → `{ state: "queued"|"applying"|"verifying"|"rollingBack"|"succeeded"|"failed", mode, error?, rollback? }` or `null` for an unknown id (never assume success)
   - `backend(cls, now, { fresh })` — same feed as VoiceSession gets; MicApply keeps its own freshness view
-  - `cmdExit(id, code, stdout, now)`, `verifyResult(ok, now)`, `externalRecording(now)`, `reset(now)`, `advance(now)`, `nextDeadline()`, `pending()` → boolean
-- Effects: `cmd` (`kind: "get"|"set"|"unset"|"restart"`, `argv`), `poll`, `verify` (host: `systemctl --user is-active voxtype` = active **and** a new `InvocationID` **and** a fresh `idle` within 10 s), `commit` (`{ mode }` — host writes `voice.mic`), `done` (`{ operationId, state, error?, rollback? }`), `unconfigured` (`{ reason }`), `hud`.
+  - `cmdExit(id, code, stdout, now)`, `verifyResult(ok, now)`, `externalRecording(now)`, `reset(now)`, `systemdJob(pending, now)` (host reports `systemctl --user show voxtype --property=Job --value` non-empty = a job is still running), `advance(now)`, `nextDeadline()`, `pending()` → boolean
+  - **Reset priority and rollback rules (§3):** `reset` while `queued` → `failed` with no mutation. `reset` after the `set` command was issued (mutated) → the operation is `failed` immediately, no further apply step runs, and rollback is **deferred** until the voice session is idle, the backend reports a fresh idle, every outstanding plugin command has exited, and no systemd job is pending; the deferred rollback is bounded by 60 s, after which the outcome is `unresolved` and the host is told `unconfigured`. Every rollback (immediate or deferred) starts by re-reading `audio.device`; if the literal no longer equals the value this operation wrote, someone else edited the file: no mutation, `rollback: "conflict"`, a `conflict` effect, and Doctor's `voxtype-device` row shows the mismatch until an explicit apply reconciles it.
+- Effects: `cmd` (`kind: "get"|"set"|"unset"|"restart"`, `argv`), `poll`, `verify` (host: `systemctl --user is-active voxtype` = active **and** a new `InvocationID` **and** a fresh `idle` within 10 s), `commit` (`{ mode }` — host writes `voice.mic`), `done` (`{ operationId, state, error?, rollback? }` with `rollback ∈ verified | failed | conflict | deferred | unresolved`), `conflict` (`{ expected, found }`), `unconfigured` (`{ reason }`), `hud`.
 - Also exports `parseConfigGet(stdout)` → `{ effective, literal, literalKnown }` where `literal === null` means the key is absent from the file. Voxtype's `--json` field names are confirmed in Plan 2 task 0 from a real `voxtype config get audio.device --json`; the parser accepts `value`/`effective` for the effective value and `file_value`/`file`/`literal` for the literal, and `literalKnown` is false when none of those keys exists.
 
 - [ ] **Step 1: Write the failing tests**
@@ -2231,9 +2292,11 @@ test("verify failure rolls back with unset when the old literal was absent, then
   const set = mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 1);
   const restart = mic.cmdExit(cmdId(set, "set"), 0, "", 2);
   mic.cmdExit(cmdId(restart, "restart"), 0, "", 3);
-  const rb = mic.verifyResult(false, 5000);
-  assert.deepEqual(byType(rb, "cmd")[0].argv, ["voxtype", "config", "unset", "audio.device"]);
+  const chk = mic.verifyResult(false, 5000);
+  assert.deepEqual(kinds(chk), ["get"]);                         // re-read before touching the file
   assert.equal(mic.statusOf(result.operationId).state, "rollingBack");
+  const rb = mic.cmdExit(cmdId(chk, "get"), 0, JSON.stringify({ value: "N", file_value: "N" }), 5000);
+  assert.deepEqual(byType(rb, "cmd")[0].argv, ["voxtype", "config", "unset", "audio.device"]);
   const r2 = mic.cmdExit(cmdId(rb, "unset"), 0, "", 5001);
   const v2 = mic.cmdExit(cmdId(r2, "restart"), 0, "", 5002);
   assert.equal(byType(v2, "verify").length, 1);
@@ -2252,7 +2315,8 @@ test("rollback restores a previous literal with set; rollback verify failure is 
   assert.deepEqual(byType(set, "cmd")[0].argv, ["voxtype", "config", "set", "audio.device", "default"]);
   const restart = mic.cmdExit(cmdId(set, "set"), 0, "", 2);
   mic.cmdExit(cmdId(restart, "restart"), 0, "", 3);
-  const rb = mic.verifyResult(false, 100);
+  const chk = mic.verifyResult(false, 100);
+  const rb = mic.cmdExit(cmdId(chk, "get"), 0, JSON.stringify({ value: "default", file_value: "default" }), 100);
   assert.deepEqual(byType(rb, "cmd")[0].argv, ["voxtype", "config", "set", "audio.device", "G20S PRO"]);
   const r2 = mic.cmdExit(cmdId(rb, "set"), 0, "", 101);
   mic.cmdExit(cmdId(r2, "restart"), 0, "", 102);
@@ -2268,7 +2332,23 @@ test("verify timeout behaves like a failed verify", () => {
   const restart = mic.cmdExit(cmdId(set, "set"), 0, "", 2);
   mic.cmdExit(cmdId(restart, "restart"), 0, "", 3);
   const fx = mic.advance(3 + 10000);
-  assert.deepEqual(kinds(fx), ["unset"]);
+  assert.deepEqual(kinds(fx), ["get"]);                           // rollback begins with the conflict check
+});
+
+test("rollback refuses to overwrite an external edit: conflict, no mutation, Doctor reconciles", () => {
+  const { mic, voice } = ready();
+  const { effects, result } = mic.request("remote", 0, { nodeName: "N" });
+  const set = mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 1);
+  const restart = mic.cmdExit(cmdId(set, "set"), 0, "", 2);
+  mic.cmdExit(cmdId(restart, "restart"), 0, "", 3);
+  const chk = mic.verifyResult(false, 100);
+  const fx = mic.cmdExit(cmdId(chk, "get"), 0, JSON.stringify({ value: "other", file_value: "other" }), 101);
+  assert.deepEqual(kinds(fx), []);
+  assert.deepEqual(byType(fx, "conflict"), [{ type: "conflict", expected: "N", found: "other" }]);
+  const d = byType(fx, "done")[0];
+  assert.equal(d.state, "failed"); assert.equal(d.rollback, "conflict");
+  assert.equal(mic.statusOf(result.operationId).rollback, "conflict");
+  assert.equal(voice.gate.busy(), false);
 });
 
 test("get failure or unparsable output fails before any mutation", () => {
@@ -2280,35 +2360,80 @@ test("get failure or unparsable output fails before any mutation", () => {
   assert.equal(voice.gate.busy(), false);
 });
 
-test("reset while queued fails without mutation; reset after mutation defers rollback until idle", () => {
+test("reset while queued fails without mutation", () => {
   const { voice, mic } = ready();
-  voice.hidPress(0); voice.status("recording", 50);
+  const st = voice.hidPress(0); voice.cmdExit(cmdId(st, "start"), 0, 5); voice.status("recording", 50);
   const { result } = mic.request("system", 100, {});
   const fx = mic.reset(150);
   assert.equal(byType(fx, "done")[0].error, "reset");
   assert.deepEqual(kinds(fx), []);
   assert.equal(mic.statusOf(result.operationId).state, "failed");
-
-  const { mic: m2 } = ready();
-  const { effects, result: r2 } = m2.request("remote", 0, { nodeName: "N" });
-  const set = m2.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 1);
-  m2.cmdExit(cmdId(set, "set"), 0, "", 2);                      // mutated, restart in flight
-  const rs = m2.reset(3);
-  assert.deepEqual(kinds(rs), []);                                // nothing while the restart is outstanding
-  assert.equal(m2.statusOf(r2.operationId).state, "failed");
-  const later = m2.backend("idle", 500, { fresh: true });          // idle observed -> deferred rollback runs
-  assert.deepEqual(kinds(later), ["unset"]);
+  assert.equal(mic.pending(), false);
 });
 
-test("external recording during apply interrupts; 60s without idle ends unconfigured", () => {
+test("reset while the set command is in flight: failed now, rollback deferred until set exits and backend is idle", () => {
+  const { mic } = ready();
+  const { effects, result } = mic.request("remote", 0, { nodeName: "N" });
+  const set = mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 1);          // set issued, not yet exited
+  const rs = mic.reset(2);
+  assert.equal(byType(rs, "done")[0].rollback, "deferred");
+  assert.equal(mic.statusOf(result.operationId).state, "failed");
+  assert.deepEqual(kinds(mic.backend("idle", 10, { fresh: true })), []);  // set still outstanding
+  const after = mic.cmdExit(cmdId(set, "set"), 0, "", 20);
+  assert.deepEqual(kinds(after), ["get"]);                                  // no apply step continues; deferred rollback starts with the conflict check
+  assert.equal(mic.statusOf(result.operationId).state, "rollingBack");      // status reflects the live rollback of the failed operation
+  assert.equal(mic.pending(), true);
+});
+
+test("reset while the restart is in flight never launches a second restart", () => {
+  const { mic } = ready();
+  const { effects } = mic.request("remote", 0, { nodeName: "N" });
+  const set = mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 1);
+  const restart = mic.cmdExit(cmdId(set, "set"), 0, "", 2);                // restart issued
+  mic.reset(3);
+  assert.deepEqual(kinds(mic.backend("idle", 100, { fresh: true })), []);  // restart still running
+  const rb = mic.cmdExit(cmdId(restart, "restart"), 0, "", 200);          // restart exited, backend fresh -> rollback may begin
+  assert.deepEqual(kinds(rb), ["get"]);
+  const r2 = mic.cmdExit(cmdId(rb, "get"), 0, JSON.stringify({ value: "N", file_value: "N" }), 211);
+  assert.deepEqual(kinds(r2), ["unset"]);
+  const r3 = mic.cmdExit(cmdId(r2, "unset"), 0, "", 212);
+  assert.deepEqual(kinds(r3), ["restart"]);                                 // exactly one rollback restart
+});
+
+test("a live systemd job blocks the deferred rollback until it clears; the 60s bound ends unresolved", () => {
+  const { mic } = ready();
+  const { effects, result } = mic.request("remote", 0, { nodeName: "N" });
+  const set = mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 1);
+  const restart = mic.cmdExit(cmdId(set, "set"), 0, "", 2);
+  mic.cmdExit(cmdId(restart, "restart"), 0, "", 3);                          // client exited; job may still be live
+  mic.systemdJob(true, 4);
+  mic.reset(5);
+  assert.deepEqual(kinds(mic.backend("idle", 100, { fresh: true })), []);
+  assert.deepEqual(kinds(mic.systemdJob(false, 700)), []);                  // job cleared, but the idle view is stale now
+  assert.deepEqual(kinds(mic.backend("idle", 710, { fresh: true })), ["get"]);
+
+  const { mic: m2 } = ready();
+  const { effects: e2, result: r2 } = m2.request("remote", 0, { nodeName: "N" });
+  const s2 = m2.cmdExit(cmdId(e2, "get"), 0, GET_OUT, 1);
+  m2.cmdExit(cmdId(s2, "set"), 0, "", 2);
+  m2.systemdJob(true, 3);
+  m2.reset(4);
+  const u = m2.advance(4 + 60000);
+  assert.equal(byType(u, "unconfigured")[0].reason, "mic change unresolved");
+  assert.equal(m2.statusOf(r2.operationId).rollback, "unresolved");
+  void result;
+});
+
+test("external recording during apply interrupts; 60s without a quiet system ends unresolved", () => {
   const { mic } = ready();
   const { effects } = mic.request("remote", 0, { nodeName: "N" });
   const set = mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 1);
   mic.cmdExit(cmdId(set, "set"), 0, "", 2);
   const fx = mic.externalRecording(10);
   assert.equal(byType(fx, "done")[0].error, "interrupted");
+  assert.equal(byType(fx, "done")[0].rollback, "deferred");
   const u = mic.advance(10 + 60000);
-  assert.equal(byType(u, "unconfigured")[0].reason, "mic change interrupted");
+  assert.equal(byType(u, "unconfigured")[0].reason, "mic change unresolved");
 });
 ```
 
@@ -2320,7 +2445,8 @@ Run: `node --test tests/MicApply.test.mjs` — Expected: module not found.
 
 `lib/MicApply.mjs`:
 ```js
-// Spec §3 "Mic apply contract": wait → reserve+snapshot → apply+restart → verify → commit, with rollback.
+// Spec §3 "Mic apply contract": wait → reserve+snapshot → apply+restart → verify → commit, with rollback,
+// reset priority, deferred rollback, systemd-job serialization and external-edit conflict detection.
 const WAIT_MS = 60000, VERIFY_MS = 10000, DEFER_MS = 60000, FRESH_MS = 500;
 const MODES = ["remote", "system"];
 
@@ -2342,31 +2468,31 @@ export function createMicApply({ voice }) {
   const cmds = new Map();                         // id -> kind
   let backend = { cls: "unknown", at: -Infinity, fresh: false };
   let dl = {};
-  let deferred = null;                            // { prev } rollback waiting for idle
+  let deferred = null;                            // { id, mode, prev, setValue, error } rollback waiting for a quiet system
+  let jobPending = false;
 
   const hud = (out, text) => out.push({ type: "hud", text });
   const cmd = (out, kind, argv) => { const id = ++cmdSeq; cmds.set(id, kind); out.push({ type: "cmd", id, kind, argv }); return id; };
   const restartArgv = ["systemctl", "--user", "restart", "voxtype"];
+  const getArgv = ["voxtype", "config", "get", "audio.device", "--json"];
   const targetValue = (o) => (o.mode === "remote" ? o.nodeName : "default");
   const fresh = (now) => backend.cls === "idle" && backend.fresh && now - backend.at <= FRESH_MS;
 
-  function finish(out, state, extra = {}) {
-    op.state = state; Object.assign(op, extra);
-    history.set(op.id, { state, mode: op.mode, error: op.error, rollback: op.rollback });
+  function record(id, state, extra) { history.set(id, { state, ...extra }); }
+
+  function finish(out, state) {
+    record(op.id, state, { mode: op.mode, error: op.error, rollback: op.rollback });
     out.push({ type: "done", operationId: op.id, state, error: op.error, rollback: op.rollback });
     voice.gate.release("mic-apply");
     dl = {};
     op = null;
   }
 
-  function beginRollback(out, now) {
-    op.state = "rollingBack";
+  function beginRollback(out) {                   // every rollback starts with the external-edit check
+    op.state = "rollingBack"; op.phase = "rollback-get";
     hud(out, "restoring previous microphone");
-    if (op.prev.literal === null) cmd(out, "unset", ["voxtype", "config", "unset", "audio.device"]);
-    else cmd(out, "set", ["voxtype", "config", "set", "audio.device", String(op.prev.literal)]);
-    op.phase = "rollback-set";
     delete dl.verify;
-    void now;
+    cmd(out, "get", getArgv);
   }
 
   function tryReserve(out, now) {
@@ -2378,16 +2504,24 @@ export function createMicApply({ voice }) {
     delete dl.wait;
     op.state = "applying"; op.phase = "get";
     hud(out, "changing microphone…");
-    cmd(out, "get", ["voxtype", "config", "get", "audio.device", "--json"]);
+    cmd(out, "get", getArgv);
+  }
+
+  function tryDeferred(out, now) {
+    if (!deferred || op) return;
+    if (cmds.size > 0 || jobPending || !fresh(now) || voice.snapshot().state !== "idle") return;
+    const d = deferred; deferred = null; delete dl.defer;
+    op = { id: d.id, mode: d.mode, state: "rollingBack", phase: null, prev: d.prev, setValue: d.setValue, mutated: true, error: d.error, rollback: undefined };
+    beginRollback(out);
   }
 
   return {
     request(mode, now, opts = {}) {
       const out = [];
-      if (op) return { effects: out, result: { ok: false, reason: "busy" } };
+      if (op || deferred) return { effects: out, result: { ok: false, reason: "busy" } };
       if (!MODES.includes(mode)) return { effects: out, result: { ok: false, reason: "invalid-mode" } };
       if (mode === "remote" && !opts.nodeName) return { effects: out, result: { ok: false, reason: "no-node" } };
-      op = { id: `mic-${++seq}`, mode, nodeName: opts.nodeName || null, state: "queued", phase: null, prev: null, mutated: false, error: undefined, rollback: undefined, polled: false };
+      op = { id: `mic-${++seq}`, mode, nodeName: opts.nodeName || null, state: "queued", phase: null, prev: null, setValue: null, mutated: false, error: undefined, rollback: undefined, polled: false };
       dl.wait = now + WAIT_MS;
       if (voice.snapshot().state !== "idle") hud(out, "mic change applies after this dictation");
       tryReserve(out, now);
@@ -2399,49 +2533,65 @@ export function createMicApply({ voice }) {
       return history.get(id) || null;
     },
 
-    pending() { return op !== null; },
+    pending() { return op !== null || deferred !== null; },
 
     backend(cls, now, opts = {}) {
       backend = { cls, at: now, fresh: !!opts.fresh };
       const out = [];
-      if (deferred && cls === "idle" && voice.snapshot().state === "idle") {
-        const d = deferred; deferred = null; delete dl.defer;
-        if (d.prev.literal === null) cmd(out, "unset", ["voxtype", "config", "unset", "audio.device"]);
-        else cmd(out, "set", ["voxtype", "config", "set", "audio.device", String(d.prev.literal)]);
-        op = { id: d.id, mode: d.mode, state: "rollingBack", phase: "rollback-set", prev: d.prev, mutated: true, error: d.error, rollback: undefined };
-        return out;
-      }
+      tryDeferred(out, now);
       tryReserve(out, now);
+      return out;
+    },
+
+    systemdJob(pending, now) {
+      jobPending = !!pending;
+      const out = [];
+      tryDeferred(out, now);
       return out;
     },
 
     cmdExit(id, code, stdout, now) {
       const kind = cmds.get(id);
       const out = [];
-      if (!kind || !op) { cmds.delete(id); return out; }
       cmds.delete(id);
-      const rolling = op.state === "rollingBack";
+      if (!kind) return out;
+      if (!op) { tryDeferred(out, now); return out; }          // a command from a reset operation drained
       switch (op.phase) {
         case "get": {
           const parsed = parseConfigGet(stdout);
           if (code !== 0 || !parsed.literalKnown) { op.error = "preflight-failed"; finish(out, "failed"); return out; }
           op.prev = parsed;
-          op.phase = "set"; op.mutated = true;
-          cmd(out, "set", ["voxtype", "config", "set", "audio.device", String(targetValue(op))]);
+          op.phase = "set"; op.mutated = true; op.setValue = String(targetValue(op));
+          cmd(out, "set", ["voxtype", "config", "set", "audio.device", op.setValue]);
           return out;
         }
         case "set":
-          if (code !== 0) { op.error = "set-failed"; beginRollback(out, now); return out; }
+          if (code !== 0) { op.error = "set-failed"; beginRollback(out); return out; }
           op.phase = "restart"; cmd(out, "restart", restartArgv); return out;
         case "restart":
           op.phase = "verify"; op.state = "verifying"; out.push({ type: "verify" }); dl.verify = now + VERIFY_MS; return out;
+        case "rollback-get": {
+          const parsed = parseConfigGet(stdout);
+          const found = parsed.literalKnown ? parsed.literal : undefined;
+          if (code !== 0 || !parsed.literalKnown || String(found) !== op.setValue) {
+            op.rollback = "conflict";
+            out.push({ type: "conflict", expected: op.setValue, found: found === undefined ? null : found });
+            hud(out, "microphone config changed externally");
+            finish(out, "failed");
+            return out;
+          }
+          op.phase = "rollback-set";
+          if (op.prev.literal === null) cmd(out, "unset", ["voxtype", "config", "unset", "audio.device"]);
+          else cmd(out, "set", ["voxtype", "config", "set", "audio.device", String(op.prev.literal)]);
+          return out;
+        }
         case "rollback-set":
           if (code !== 0) { op.rollback = "failed"; out.push({ type: "unconfigured", reason: "voxtype restart failed" }); finish(out, "failed"); return out; }
           op.phase = "rollback-restart"; cmd(out, "restart", restartArgv); return out;
         case "rollback-restart":
           op.phase = "rollback-verify"; out.push({ type: "verify" }); dl.verify = now + VERIFY_MS; return out;
         default:
-          void rolling; return out;
+          return out;
       }
     },
 
@@ -2449,9 +2599,10 @@ export function createMicApply({ voice }) {
       const out = [];
       if (!op) return out;
       delete dl.verify;
+      void now;
       if (op.phase === "verify") {
         if (ok) { out.push({ type: "commit", mode: op.mode }); hud(out, ""); finish(out, "succeeded"); return out; }
-        op.error = "verify-failed"; beginRollback(out, now); return out;
+        op.error = "verify-failed"; beginRollback(out); return out;
       }
       if (op.phase === "rollback-verify") {
         if (ok) { op.rollback = "verified"; hud(out, ""); finish(out, "failed"); return out; }
@@ -2467,10 +2618,10 @@ export function createMicApply({ voice }) {
       if (!op) return out;
       op.error = reason;
       if (!op.mutated) { finish(out, "failed"); return out; }
-      // mutated: rollback must wait for the backend to settle (§3 "serialize cancellation/recovery before any rollback")
-      deferred = { id: op.id, mode: op.mode, prev: op.prev, error: reason };
+      // Mutated: stop here; rollback runs only once the system is quiet (§3 reset priority / no competing restarts).
+      deferred = { id: op.id, mode: op.mode, prev: op.prev, setValue: op.setValue, error: reason };
       dl = { defer: now + DEFER_MS };
-      history.set(op.id, { state: "failed", mode: op.mode, error: reason, rollback: "deferred" });
+      record(op.id, "failed", { mode: op.mode, error: reason, rollback: "deferred" });
       out.push({ type: "done", operationId: op.id, state: "failed", error: reason, rollback: "deferred" });
       hud(out, "mic change interrupted");
       voice.gate.release("mic-apply");
@@ -2482,8 +2633,15 @@ export function createMicApply({ voice }) {
       const out = [];
       if (dl.wait !== undefined && dl.wait <= now && op && op.state === "queued") { delete dl.wait; op.error = "wait-timeout"; finish(out, "failed"); return out; }
       if (dl.verify !== undefined && dl.verify <= now && op) { delete dl.verify; return this.verifyResult(false, now); }
-      if (dl.defer !== undefined && dl.defer <= now && deferred) { delete dl.defer; deferred = null; out.push({ type: "unconfigured", reason: "mic change interrupted" }); return out; }
+      if (dl.defer !== undefined && dl.defer <= now && deferred) {
+        delete dl.defer;
+        record(deferred.id, "failed", { mode: deferred.mode, error: deferred.error, rollback: "unresolved" });
+        deferred = null;
+        out.push({ type: "unconfigured", reason: "mic change unresolved" });
+        return out;
+      }
       if (op && op.state === "queued") tryReserve(out, now);
+      tryDeferred(out, now);
       return out;
     },
 
@@ -2499,15 +2657,13 @@ export function createMicApply({ voice }) {
 - [ ] **Step 4: Run tests**
 
 Run: `node --test tests/MicApply.test.mjs`
-Expected: `# pass 11`, `# fail 0`. Fix the module if needed.
+Expected: `# pass 15`, `# fail 0`. Fix the module if needed.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add lib/MicApply.mjs tests/MicApply.test.mjs
-git commit -m "feat(core): mic apply transaction with verify, commit and rollback
-
-Claude-Session: https://claude.ai/code/session_01YGqBRt1AeLviLXVYn9D2xR"
+git commit -m "feat(core): mic apply transaction with verify, commit and rollback"
 ```
 
 ---
@@ -2524,7 +2680,7 @@ Claude-Session: https://claude.ai/code/session_01YGqBRt1AeLviLXVYn9D2xR"
   - `record(source, key, edge, now)` → boolean; `source` ∈ `"shortcut" | "ipc"`, `edge` ∈ `"down" | "up"`. Only counted while active; `ipc` events are tracked separately and never satisfy the transport check.
   - `active()`, `status(id, now)` → `{ active, remainingMs, failed? }` or `null`.
   - `report(id, now)` → `{ ok, missing, extras, held, counts, failed? }` and ends the lease. Unknown/expired id → `{ ok: false, reason: "unknown" | "expired" }`.
-  - `disarm(id, now)` → boolean. `externalRecording(now)` → marks the lease failed (`"external-recording"`), keeps it active until report/disarm/expiry. `advance(now)` → `[{ type: "selftestExpired", id }]` on expiry; `nextDeadline()`.
+  - `disarm(id, now)` → boolean. `externalRecording(now)` → **ends the lease immediately** (gate released, normal dispatch and observation resume, the external session is not touched); `record()` returns `false` from then on, `status(id)` reports `{ active: false, failed: "external-recording" }`, and `report(id)` still returns the full failure (`ok: false`, `failed`, counts so far) exactly once. `advance(now)` → `[{ type: "selftestExpired", id }]` on expiry; `nextDeadline()`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2607,13 +2763,20 @@ test("expiry emits selftestExpired, releases the gate, and report afterwards is 
   assert.deepEqual(st.report("nope", 1), { ok: false, reason: "unknown" });
 });
 
-test("external recording marks the lease failed; status shows it; disarm ends it", () => {
+test("external recording ends the lease at once: gate released, no more injections, failure still reportable once", () => {
   const { g, st } = mk();
   const { id } = st.arm(0, okCtx);
-  st.externalRecording(100);
-  assert.deepEqual(st.status(id, 200), { active: true, remainingMs: 29800, failed: "external-recording" });
+  st.record("shortcut", "up", "down", 10); st.record("shortcut", "up", "up", 20);
+  assert.deepEqual(st.externalRecording(100), [{ type: "selftestFailed", id, reason: "external-recording" }]);
+  assert.equal(st.active(), false);
+  assert.equal(g.busy(), false);
+  assert.equal(st.record("shortcut", "ok", "down", 110), false);
+  assert.deepEqual(st.status(id, 200), { active: false, remainingMs: 0, failed: "external-recording" });
   const r = st.report(id, 300);
   assert.equal(r.ok, false); assert.equal(r.failed, "external-recording");
+  assert.deepEqual(r.missing, ["ok"]);
+  assert.equal(r.counts.shortcut.up.down, 1);
+  assert.deepEqual(st.report(id, 301), { ok: false, reason: "expired" });   // reported exactly once
   const { id: id2 } = st.arm(400, okCtx);
   assert.equal(st.disarm(id2, 401), true);
   assert.equal(g.busy(), false);
@@ -2627,23 +2790,28 @@ test("external recording marks the lease failed; status shows it; disarm ends it
 
 `lib/SelfTest.mjs`:
 ```js
-// Spec §7 step 6: exclusive self-test lease; raw transport counts kept apart from IPC injections.
+// Spec §7 step 6: exclusive self-test lease; raw transport counts kept apart from IPC injections;
+// an external recording ends the lease immediately and the failure stays reportable once.
 export function createSelfTest({ supportedKeys, gate, leaseMs = 30000 }) {
-  let lease = null;          // { id, until, counts: {shortcut:{}, ipc:{}}, down: Set, failed }
+  let lease = null;          // { id, until, counts: {shortcut:{}, ipc:{}}, down: Set }
   let seq = 0;
+  const failed = new Map();  // id -> report of a lease that ended in failure, retrievable once
   const empty = () => ({ down: 0, up: 0 });
 
-  function end() {
-    if (!lease) return;
-    gate.release("selftest");
-    lease = null;
+  function compute(l) {
+    const sc = l.counts.shortcut;
+    const missing = supportedKeys.filter(k => !sc[k] || sc[k].down < 1 || sc[k].up < 1);
+    const extras = Object.keys(sc).filter(k => !supportedKeys.includes(k) || sc[k].down > 1 || sc[k].up > 1);
+    const held = [...l.down];
+    return { missing, extras, held, counts: l.counts };
   }
+  function end() { if (!lease) return; gate.release("selftest"); lease = null; }
 
   return {
     arm(now, ctx) {
       if (lease || !ctx || !ctx.voiceIdle || !ctx.backendIdleFresh || (ctx.heldKeys && ctx.heldKeys.length) || (ctx.pendingCmds || 0) > 0) return { ok: false, reason: "busy" };
       if (!gate.acquire("selftest")) return { ok: false, reason: "busy" };
-      lease = { id: `st-${++seq}`, until: now + leaseMs, counts: { shortcut: {}, ipc: {} }, down: new Set(), failed: undefined };
+      lease = { id: `st-${++seq}`, until: now + leaseMs, counts: { shortcut: {}, ipc: {} }, down: new Set() };
       return { ok: true, id: lease.id };
     },
     active() { return lease !== null; },
@@ -2656,21 +2824,20 @@ export function createSelfTest({ supportedKeys, gate, leaseMs = 30000 }) {
       return true;
     },
     status(id, now) {
-      if (!lease || lease.id !== id) return null;
-      return { active: true, remainingMs: Math.max(0, lease.until - now), failed: lease.failed };
+      if (lease && lease.id === id) return { active: true, remainingMs: Math.max(0, lease.until - now), failed: undefined };
+      if (failed.has(id)) return { active: false, remainingMs: 0, failed: failed.get(id).failed };
+      return null;
     },
     report(id, now) {
-      if (!lease) return { ok: false, reason: /^st-\d+$/.test(String(id)) && Number(String(id).slice(3)) <= seq ? "expired" : "unknown" };
-      if (lease.id !== id) return { ok: false, reason: "unknown" };
+      if (failed.has(id)) { const r = failed.get(id); failed.delete(id); return r; }
+      if (!lease || lease.id !== id) {
+        const known = /^st-\d+$/.test(String(id)) && Number(String(id).slice(3)) <= seq;
+        return { ok: false, reason: known ? "expired" : "unknown" };
+      }
       if (now >= lease.until) { end(); return { ok: false, reason: "expired" }; }
-      const sc = lease.counts.shortcut;
-      const missing = supportedKeys.filter(k => !sc[k] || sc[k].down < 1 || sc[k].up < 1);
-      const extras = Object.keys(sc).filter(k => !supportedKeys.includes(k) || sc[k].down > 1 || sc[k].up > 1);
-      const held = [...lease.down];
-      const failed = lease.failed;
-      const counts = lease.counts;
+      const r = compute(lease);
       end();
-      return { ok: !failed && missing.length === 0 && extras.length === 0 && held.length === 0, missing, extras, held, counts, failed };
+      return { ok: r.missing.length === 0 && r.extras.length === 0 && r.held.length === 0, ...r, failed: undefined };
     },
     disarm(id, now) {
       void now;
@@ -2680,8 +2847,11 @@ export function createSelfTest({ supportedKeys, gate, leaseMs = 30000 }) {
     },
     externalRecording(now) {
       void now;
-      if (lease) lease.failed = "external-recording";
-      return [];
+      if (!lease) return [];
+      const id = lease.id;
+      failed.set(id, { ok: false, ...compute(lease), failed: "external-recording" });
+      end();
+      return [{ type: "selftestFailed", id, reason: "external-recording" }];
     },
     advance(now) {
       if (lease && now >= lease.until) { const id = lease.id; end(); return [{ type: "selftestExpired", id }]; }
@@ -2698,9 +2868,7 @@ export function createSelfTest({ supportedKeys, gate, leaseMs = 30000 }) {
 
 ```bash
 git add lib/SelfTest.mjs tests/SelfTest.test.mjs
-git commit -m "feat(core): transport self-test lease and recorder
-
-Claude-Session: https://claude.ai/code/session_01YGqBRt1AeLviLXVYn9D2xR"
+git commit -m "feat(core): transport self-test lease and recorder"
 ```
 
 ---
@@ -2787,9 +2955,7 @@ export function createStats(initial = []) {
 
 ```bash
 git add lib/Stats.mjs tests/Stats.test.mjs
-git commit -m "feat(core): session stats aggregation
-
-Claude-Session: https://claude.ai/code/session_01YGqBRt1AeLviLXVYn9D2xR"
+git commit -m "feat(core): session stats aggregation"
 ```
 
 ---
@@ -3034,9 +3200,7 @@ export function summarize(rows, config) {
 
 ```bash
 git add lib/Doctor.mjs tests/Doctor.test.mjs
-git commit -m "feat(core): shared doctor rules and state summary
-
-Claude-Session: https://claude.ai/code/session_01YGqBRt1AeLviLXVYn9D2xR"
+git commit -m "feat(core): shared doctor rules and state summary"
 ```
 
 ---
@@ -3044,7 +3208,11 @@ Claude-Session: https://claude.ai/code/session_01YGqBRt1AeLviLXVYn9D2xR"
 ## Done criteria for Plan 1
 
 - `make test` passes: Config, KeyEngine, Actions, Dbus, VoxStatus, VoiceSession, MicApply, SelfTest, Stats, Doctor suites.
-- `lib/` imports nothing from Node (`grep -L "from \"node:" lib/*.mjs` lists every file; `grep -l "node:" lib/` lists none).
+- `lib/` imports nothing from Node: `grep -l 'from "node:' lib/*.mjs` prints nothing.
+- Every `lib/*.mjs` opens with its spec reference: `for f in lib/*.mjs; do head -1 "$f" | grep -q '^// Spec §' || echo "missing spec header: $f"; done` prints nothing.
+- Recovery never touches an external session: the VoiceSession tests "an external recording after an accepted idle is observed, never cancelled…" and "failed restart or restart timeout…" (restart only when the backend is quiet) pass; no `cancel`/`restart` effect is emitted while an external `recording`/`transcribing` is observed after an accepted idle.
+- Stale inputs are inert: D-Bus events from another sender or an older monitor generation, and ATVVoice property replies for a retired `requestId`/generation, produce no effects (tests in Task 10).
+- Mic apply never overwrites an external edit: the "rollback refuses to overwrite an external edit" test passes; deferred rollback waits for exited commands, no systemd job, fresh idle (Task 12 tests).
 - Every spec §9 "required lifecycle case" that does not need a compositor or a real backend has a test: HID release while starting; start fails/never confirms; panic in arbitration/recording/transcribing; stop fails / backend stays recording; arbitration release before 250 ms; delayed keyboard status at 300 ms; stale D-Bus end; system default resolving to ATVVoice (arbitration runs in both modes); mic request busy > 60 s; apply succeeds / restart fails / commit; reset during apply; self-test arm busy, normal, expiry, external F9; learning-related checks live in Plan 3.
 
 ## What Plans 2 and 3 pick up (not in this plan)
