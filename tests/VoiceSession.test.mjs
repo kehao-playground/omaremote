@@ -295,6 +295,37 @@ test("external transcribing observed from idle gets a stop deadline and finalize
   assert.equal(byType(done, "stat").length, 0);
 });
 
+test("abort from arbitrating cancels without any start/stop/micClose and returns to recovering", () => {
+  const vs = idleSession();
+  const fx = vs.dbus(D("streaming"), 0);
+  assert.equal(stateOf(fx), "arbitrating");
+  const ab = vs.abort(50);
+  assert.deepEqual(kinds(ab), ["cancel"]);
+  assert.equal(byType(ab, "micClose").length, 0);
+  assert.equal(stateOf(ab), "recovering");
+});
+
+test("abort from transcribing (HID session, released) cancels without a stop and returns to recovering", () => {
+  const vs = hidRecording();
+  vs.hidRelease(500);
+  vs.status("transcribing", 600);
+  assert.equal(vs.snapshot().state, "transcribing");
+  const ab = vs.abort(700);
+  assert.deepEqual(kinds(ab), ["cancel"]);
+  assert.equal(stateOf(ab), "recovering");
+});
+
+test("arbitration still runs in system mode: streaming, then recording at 100ms adopts keyboard owner", () => {
+  const vs = createVoiceSession(cfg({ voice: { ...DEFAULT_CONFIG.voice, mic: "system" } }));
+  vs.setDbusSource({ sender: ":1.42", generation: 0 });
+  vs.status("idle", 0, { fresh: true });
+  const fx = vs.dbus(D("streaming"), 0);
+  assert.equal(stateOf(fx), "arbitrating");
+  const rec = vs.status("recording", 100);
+  assert.equal(stateOf(rec), "recording");
+  assert.equal(vs.snapshot().owner, "keyboard");
+});
+
 // ---- recovery (§5.3) ----
 test("abort from recording cancels (never stops), closes no mic unless plugin-owned, enters recovering", () => {
   const vs = hidRecording();
