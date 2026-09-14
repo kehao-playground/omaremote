@@ -252,16 +252,67 @@ test("[ruling 1] a deferred rollback holds the shared gate for its whole run, no
   const set = mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 1);          // set issued, not yet exited
   mic.reset(2);
   assert.equal(voice.gate.busy(), false);                                  // failed op released the gate; nothing runs yet
-  const after = mic.cmdExit(cmdId(set, "set"), 0, "", 20);                // set drains -> deferred rollback resumes
+  const after = mic.cmdExit(cmdId(set, "set"), 0, "", 20);                // set exits 0 -> deferred rollback resumes, expecting "N" on disk
   assert.deepEqual(kinds(after), ["get"]);
-  assert.equal(voice.gate.busy(), true);                                   // the rollback itself now holds the gate
+  assert.equal(voice.gate.busy(), true);                                   // the rollback holds the gate from here on
   assert.equal(voice.gate.acquire("someone-else"), false);
-  const done = mic.cmdExit(cmdId(after, "get"), 0, GET_OUT, 21);          // file still holds the original: nothing to write
-  assert.deepEqual(kinds(done), []);
+  const rb = mic.cmdExit(cmdId(after, "get"), 0, JSON.stringify({ value: "N", file_value: "N" }), 21);  // the write really landed
+  assert.deepEqual(byType(rb, "cmd")[0].argv, ["voxtype", "config", "unset", "audio.device"]);
+  assert.equal(voice.gate.busy(), true);
+  const restart = mic.cmdExit(cmdId(rb, "unset"), 0, "", 22);
+  assert.deepEqual(kinds(restart), ["restart"]);
+  assert.equal(voice.gate.busy(), true);
+  const verify = mic.cmdExit(cmdId(restart, "restart"), 0, "", 23);
+  assert.equal(byType(verify, "verify").length, 1);
+  assert.equal(voice.gate.busy(), true);
+  const done = mic.verifyResult(true, 24);
   assert.equal(byType(done, "done")[0].rollback, "verified");
   assert.equal(voice.gate.busy(), false);
   assert.equal(mic.pending(), false);
   void result;
+});
+
+test("[ruling 3c] reset while the rollback unset is in flight also corrects the deferred expected literal", () => {
+  const { mic } = ready();
+  const { effects, result } = mic.request("remote", 0, { nodeName: "N" });
+  const set = mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 1);
+  const restart = mic.cmdExit(cmdId(set, "set"), 0, "", 2);
+  mic.cmdExit(cmdId(restart, "restart"), 0, "", 3);
+  const chk = mic.verifyResult(false, 5000);                               // verify fails -> rollback entry
+  const rb = mic.cmdExit(cmdId(chk, "get"), 0, JSON.stringify({ value: "N", file_value: "N" }), 5001);
+  assert.deepEqual(byType(rb, "cmd")[0].argv, ["voxtype", "config", "unset", "audio.device"]);
+  mic.reset(5002);                                                          // reset while the rollback unset is in flight
+  assert.equal(mic.statusOf(result.operationId).rollback, "deferred");
+  assert.deepEqual(kinds(mic.backend("idle", 5100, { fresh: true })), []); // unset still outstanding
+  const resumed = mic.cmdExit(cmdId(rb, "unset"), 0, "", 5200);            // unset exits 0: deferred.expected corrected to null
+  assert.deepEqual(kinds(resumed), ["get"]);                                 // deferred rollback re-checks for external edits
+  const again = mic.cmdExit(cmdId(resumed, "get"), 0, JSON.stringify({ value: null, file_value: null }), 5201);
+  assert.deepEqual(byType(again, "conflict"), []);                           // no false conflict
+  assert.deepEqual(kinds(again), ["restart"]);                                // already at target; service still needs restoring
+  const v = mic.cmdExit(cmdId(again, "restart"), 0, "", 5202);
+  assert.equal(byType(v, "verify").length, 1);
+  const done = mic.verifyResult(true, 6000);
+  const d = byType(done, "done")[0];
+  assert.equal(d.error, "verify-failed");                                  // original failure reason survives the deferred rollback
+  assert.equal(d.rollback, "verified");
+});
+
+test("[ruling minor] the 60s defer bound does not restart on a re-deferral", () => {
+  const { mic } = ready();
+  const { effects, result } = mic.request("remote", 0, { nodeName: "N" });
+  const set = mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 1);
+  mic.reset(5);                                                             // first defer: deadline fixed at 5 + 60000 = 60005
+  const resumed = mic.cmdExit(cmdId(set, "set"), 0, "", 20);                // set exits 0 -> deferred rollback resumes
+  assert.deepEqual(kinds(resumed), ["get"]);
+  const rb = mic.cmdExit(cmdId(resumed, "get"), 0, JSON.stringify({ value: "N", file_value: "N" }), 21);
+  assert.deepEqual(byType(rb, "cmd")[0].argv, ["voxtype", "config", "unset", "audio.device"]);
+  mic.systemdJob(true, 22);                                                 // a job appears right before the rollback restart
+  const redeferred = mic.cmdExit(cmdId(rb, "unset"), 0, "", 23);            // re-deferred: must keep the original deadline
+  assert.equal(byType(redeferred, "done")[0].rollback, "deferred");
+  assert.equal(mic.nextDeadline(), 60005);
+  const u = mic.advance(60005);
+  assert.equal(byType(u, "unconfigured")[0].reason, "mic change unresolved");
+  assert.equal(mic.statusOf(result.operationId).rollback, "unresolved");
 });
 
 test("[ruling 2] a stale command from a reset operation cannot be misdispatched as the next operation's phase", () => {
