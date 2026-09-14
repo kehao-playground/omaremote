@@ -10,6 +10,8 @@ import "lib/Actions.mjs" as Actions
 import "lib/Presentation.mjs" as Presentation
 import "lib/VoiceSession.mjs" as VoiceSession
 import "lib/MicApply.mjs" as MicApply
+import "lib/Stats.mjs" as Stats
+import "lib/Pipewire.mjs" as Pipewire
 import "components"
 
 Item {
@@ -56,14 +58,26 @@ Item {
   property string voxAudioDevice: ""
   property double recordingSince: 0
   property int elapsedMs: 0
+  property var mic: null
+  property var stats: null
+  property bool micPending: false
+  property string micCurrentId: ""
+  property var micLast: null                      // last terminal `done` effect
+  property var micConflict: null                  // { expected, found } from a `conflict` effect
+  property string unconfiguredReason: ""
+  property var lastCapture: null                  // null = not yet verified (§3); { node, at, mode }
+  property var statsSummary: ({ today: { count: 0, seconds: 0 }, week: { count: 0, seconds: 0 }, all: { count: 0, seconds: 0 }, longest: null })
   readonly property string hudLine: Presentation.hudLine({ voiceState: root.voiceState, hudText: root.hudText, elapsedMs: root.elapsedMs, flash: root.flash })
   Timer { interval: 250; repeat: true; running: root.voiceState === "recording"; onTriggered: root.elapsedMs = Date.now() - root.recordingSince }
 
   // ---- exception containment (Controller Ruling 13): every call into a lib engine/session that can
   // create a deadline must not skip rearm() if it throws — this is the only such entry point. --------
-  function guarded(label, fn) {
+  // DEVIATION (Task 5 review ruling, applied to Task 7's mic.* call sites): `fallback` lets a caller whose
+  // module function does not return a plain effects array (mic.request() returns { effects, result }) still
+  // route through guarded() instead of duplicating its try/catch/rearm shape. Every other caller is unaffected.
+  function guarded(label, fn, fallback) {
     try { return fn() }
-    catch (err) { root.errorCount++; root.lastError = label + ": " + err; console.log("omaremote: " + label + " threw: " + err); return [] }
+    catch (err) { root.errorCount++; root.lastError = label + ": " + err; console.log("omaremote: " + label + " threw: " + err); return fallback !== undefined ? fallback : [] }
     finally { root.rearm() }
   }
 
@@ -82,12 +96,21 @@ Item {
       case "hud": root.hudText = e.text; break
       case "error": root.errorCount++; root.lastError = e.reason; console.log("omaremote: " + src + " error " + e.reason); break
       // ---- voice effects (Task 6) ----
-      case "cmd": runner.run(src, e.id, e.argv, e.kind === "restart" ? root.restartCmdMs : root.shortCmdMs); break
+      case "cmd":
+        if (src === "mic" && e.kind === "restart") { verifier.markRestart(); vox.restart() }
+        runner.run(src, e.id, e.argv, e.kind === "restart" ? root.restartCmdMs : root.shortCmdMs)
+        break
       case "state": root.onVoiceState(e); break
       case "poll": vox.poll(); break
       case "readAtv": atv.readState(e.requestId); break
       case "micClose": atv.micClose(); voice.micClosed(); break
-      // ---- mic/stat effects (Task 7) ----
+      case "restart": runner.cancelAll("voice"); vox.restart(); verifier.beginRecovery(Date.now()); break   // §5.3: reap, then bounded restart
+      case "verify": verifier.beginVerify("mic", e.id, Date.now()); break
+      case "commit": configStore.setVoiceMic(e.mode); root.refreshAudioDevice(); break                 // §3 step 4
+      case "done": root.micLast = e; root.micPending = mic.pending(); if (e.state !== "queued") root.refreshDoctor(); break
+      case "conflict": root.micConflict = { expected: e.expected, found: e.found }; break
+      case "unconfigured": root.unconfiguredReason = e.reason; break
+      case "stat": stats.add(e.session); statsStore.save(stats.entries()); root.statsSummary = stats.summary(Date.now()); break
       // ---- self-test effects (Task 8) ----
       default: console.log("omaremote: unhandled effect " + e.type + " from " + src)
     }
@@ -96,10 +119,11 @@ Item {
   // ---- one Timer for every module (host obligations) -------------------------
   Timer { id: tick; repeat: false; onTriggered: root.advanceAll() }
   function deadlines() {
-    return [engine ? engine.nextDeadline() : null, voice ? voice.nextDeadline() : null]
+    return [engine ? engine.nextDeadline() : null, voice ? voice.nextDeadline() : null, mic ? mic.nextDeadline() : null, verifier.nextDeadline()]
     // ---- more deadlines (Tasks 7–8) ----
   }
   function rearm() {
+    root.micPending = mic ? mic.pending() : false; verifier.jobPolling = root.micPending
     var ds = root.deadlines(), d = null
     for (var i = 0; i < ds.length; i++) if (ds[i] !== null && ds[i] !== undefined && (d === null || ds[i] < d)) d = ds[i]
     if (d === null) { tick.stop(); return }
@@ -110,6 +134,8 @@ Item {
     var now = Date.now()
     if (engine) root.dispatch(root.guarded("engine.advance", function() { return engine.advance(now) }), "engine")
     if (voice) root.dispatch(root.guarded("voice.advance", function() { return voice.advance(now) }), "voice")
+    if (mic) root.dispatch(root.guarded("mic.advance", function() { return mic.advance(now) }), "mic")
+    root.guarded("verifier.advance", function() { verifier.advance(now); return [] })
     // ---- more advances (Tasks 7–8) ----
     root.rearm()
   }
@@ -148,7 +174,10 @@ Item {
     vox.start()
     atv.start()
     root.refreshAudioDevice()
-    // ---- module start (Tasks 7–8) ----
+    mic = MicApply.createMicApply({ voice: voice })
+    stats = Stats.createStats(statsStore.loaded ? statsStore.entries : [])
+    root.statsSummary = stats.summary(now)
+    // ---- module start (Task 8) ----
   }
 
   // ---- key input (§4.1): GlobalShortcut per logical key ---------------------
@@ -210,7 +239,14 @@ Item {
     root.voiceOwner = e.owner || ""
     root.voiceInferred = e.owner === "dbus" || e.owner === "keyboard"
     if (e.state === "recording" && prev !== "recording") { root.recordingSince = Date.now(); root.elapsedMs = 0 }
-    // ---- external recording → mic apply / self-test (Tasks 7–8) ----
+    if (e.state === "unconfigured") root.unconfiguredReason = root.lastError
+    if (e.state === "recording" && prev !== "recording") captureDelay.restart()                 // §3 capture verification
+    if (e.state === "recording" && e.owner === "keyboard" && mic && root.micCurrentId) {
+      var cur = mic.statusOf(root.micCurrentId)
+      if (cur && (cur.state === "applying" || cur.state === "verifying" || cur.state === "rollingBack"))
+        root.dispatch(root.guarded("mic.externalRecording", function() { return mic.externalRecording(Date.now()) }), "mic")   // §3: observed interference
+    }
+    // ---- external recording → self-test (Task 8) ----
   }
   function updateRemoteWarning() {                                              // §5.4
     var mode = root.config ? root.config.voice.mic : "remote"
@@ -228,13 +264,14 @@ Item {
     } }
   }
   function refreshAudioDevice() { if (!audioDeviceProbe.running) audioDeviceProbe.running = true }
+  function refreshDoctor() {}   // stub; Task 8 replaces this with the real self-test/doctor refresh
 
   CommandRunner {
     id: runner
     onFinished: function(src, id, code, stdout, timedOut) {
       var now = Date.now()
       if (src === "voice" && root.voice) root.dispatch(root.guarded("voice.cmdExit", function() { return root.voice.cmdExit(id, code, now) }), "voice")
-      // ---- mic command exits (Task 7) ----
+      if (src === "mic" && root.mic) root.dispatch(root.guarded("mic.cmdExit", function() { return root.mic.cmdExit(id, code, stdout, now) }), "mic")
       root.rearm()
     }
   }
@@ -244,7 +281,8 @@ Item {
       var now = Date.now()
       root.backendClass = cls
       if (root.voice) root.dispatch(root.guarded("voice.status", function() { return root.voice.status(cls, now, { fresh: fresh }) }), "voice")
-      // ---- fresh polls → mic apply / verifier (Task 7) ----
+      if (root.mic) root.dispatch(root.guarded("mic.backend", function() { return root.mic.backend(cls, now, { fresh: fresh }) }), "mic")
+      root.guarded("verifier.status", function() { verifier.status(cls, fresh, now); return [] })
       root.rearm()
     }
   }
@@ -267,6 +305,56 @@ Item {
       root.rearm()
     }
     onNodeName: function(name) { root.remoteNode = name; root.updateRemoteWarning() }
+  }
+  SystemdVerifier {
+    id: verifier
+    onJobInfo: function(info) {
+      if (root.mic && root.mic.pending()) {
+        root.dispatch(root.guarded("mic.systemdJob", function() { return root.mic.systemdJob(info.jobPending, Date.now()) }), "mic")
+        root.rearm()
+      }
+    }
+    onPollRequested: vox.poll()
+    onRecoveryRestarting: root.hudText = "restarting Voxtype"
+    onVerified: function(kind, id, ok) {
+      var now = Date.now()
+      if (kind === "mic" && root.mic) root.dispatch(root.guarded("mic.verifyResult", function() { return root.mic.verifyResult(ok, now, id) }), "mic")
+      else if (kind === "recovery" && root.voice) { if (ok) vox.restart(); root.dispatch(root.guarded("voice.restartResult", function() { return root.voice.restartResult(ok, now) }), "voice") }   // discard the old monitor before restartResult(true)
+      root.rearm()
+    }
+  }
+  StatsStore {
+    id: statsStore
+    path: root.dataHome + "/omaremote/stats.json"
+    ready: configStore.ready
+    onStatsLoaded: { if (root.stats) { root.stats = Stats.createStats(statsStore.entries); root.statsSummary = root.stats.summary(Date.now()) } }
+  }
+  Timer { id: captureDelay; interval: 400; repeat: false; onTriggered: if (!captureProbe.running) captureProbe.running = true }
+  Process {
+    id: captureProbe
+    command: ["pw-dump"]
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: {
+      try {
+        var r = Pipewire.captureSourceOf(JSON.parse(text))
+        if (r.streamFound) root.lastCapture = { node: r.node, at: Date.now(), mode: root.config.voice.mic }
+      } catch (e) { console.log("omaremote: pw-dump parse failed: " + e) }
+    } }
+  }
+  function ipcMic(mode) {
+    if (!mic) return JSON.stringify({ ok: false, reason: "not-ready" })
+    var now = Date.now()
+    var r = root.guarded("mic.request", function() { return mic.request(mode, now, { nodeName: root.remoteNode }) },
+                          { effects: [], result: { ok: false, reason: "error" } })
+    root.dispatch(r.effects, "mic")
+    if (r.result.ok) { root.micCurrentId = r.result.operationId; root.micConflict = null }
+    root.rearm()
+    return JSON.stringify(r.result.ok ? { ok: true, operationId: r.result.operationId, state: "queued" } : { ok: false, reason: r.result.reason })
+  }
+  function micStatusOf(id) { return mic ? mic.statusOf(id) : null }
+  function ipcMicStatus(id) {
+    var s = root.micStatusOf(id)
+    return JSON.stringify(s ? { ok: true, operationId: id, state: s.state, phase: s.phase, mode: s.mode, error: s.error, rollback: s.rollback }
+                            : { ok: false, reason: "unknown-operation" })                         // §3: unknown ID is a failure, never success
   }
   Loader {
     id: hudLoader
@@ -317,7 +405,11 @@ Item {
       , backend: root.backendClass
       , remote: { state: root.remoteState, node: root.remoteNode, bus: root.atvBusName, sender: atv.sender, warning: root.remoteWarning }
       , audioDevice: root.voxAudioDevice
-      // ---- more status (Tasks 7–8) ----
+      , mic: { pending: root.micPending, current: root.micCurrentId ? root.micStatusOf(root.micCurrentId) : null, last: root.micLast, conflict: root.micConflict }
+      , stats: root.statsSummary
+      , lastCapture: root.lastCapture
+      , unconfiguredReason: root.unconfiguredReason
+      // ---- more status (Task 8) ----
     })
   }
   IpcHandler {
@@ -327,6 +419,8 @@ Item {
     function reset(): string { root.doReset("ipc"); return "ok" }
     function status(): string { return root.statusJson() }
     function voice(verb: string, arg: string): string { return root.ipcVoice(verb, arg) }
-    // ---- more verbs (Tasks 7–8) ----
+    function mic(mode: string): string { return root.ipcMic(mode) }
+    function micStatus(id: string): string { return root.ipcMicStatus(id) }
+    // ---- more verbs (Task 8) ----
   }
 }

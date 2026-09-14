@@ -250,6 +250,100 @@ scenario config_reload_aborts_session s_config_reload_aborts_session
 scenario voxtype_absent_is_unconfigured s_voxtype_absent_is_unconfigured
 scenario remote_warning_disables_dbus_path s_remote_warning_disables_dbus_path
 
+# ---- Task 7: mic apply, recovery restart, stats, capture ----
+mic_wait() {   # mic_wait <id> [timeout-s] → prints terminal state
+  local id=$1 t=${2:-15} i=0 st=""
+  while (( i < t * 10 )); do st=$(ipc micStatus "$id" | jq -r .state); [[ $st == succeeded || $st == failed ]] && { echo "$st"; return 0; }; sleep 0.1; i=$((i + 1)); done
+  echo "$st"; return 1
+}
+s_mic_apply_system() {
+  ready || return 1
+  local r; r=$(ipc mic system)
+  [[ $(jq -r .ok <<<"$r") == true && $(jq -r .state <<<"$r") == queued ]] || { echo "    $r"; return 1; }
+  local id; id=$(jq -r .operationId <<<"$r")
+  [[ $(mic_wait "$id") == succeeded ]] || { ipc micStatus "$id"; return 1; }
+  has_line "$F/vox.log" "voxtype config get audio.device --json" || return 1
+  has_line "$F/vox.log" "voxtype config set audio.device default" || return 1
+  has_line "$F/sysd.log" "systemctl --user restart voxtype" || return 1
+  has_line "$F/sysd.log" "systemctl --user show voxtype --property=Job,ActiveState,InvocationID --value" || return 1
+  [[ $(jq -r .voice.mic "$XDG_CONFIG_HOME/omaremote/config.json") == system ]] || return 1     # commit only after verification
+  [[ $(jget '.voice.state') == idle && $(jget '.mic.pending') == false ]] || return 1
+  [[ $(jget '.audioDevice') == default ]]                                                         # re-read after commit
+}
+s_mic_apply_second_request_is_busy() {
+  ready || return 1
+  local id; id=$(ipc mic system | jq -r .operationId)
+  [[ $(ipc mic remote | jq -r .reason) == busy ]] || return 1
+  [[ $(mic_wait "$id") == succeeded ]]
+}
+s_mic_apply_unknown_id_is_failure() { ready || return 1; [[ $(ipc micStatus mic-99 | jq -r .ok) == false ]]; }
+s_mic_apply_waits_for_session() {         # §3 step 1: no mutation while a session runs; HUD explains; applies afterwards
+  ready || return 1
+  ipc key mic down > /dev/null; wait_for '.voice.state' recording 3 || return 1
+  local id; id=$(ipc mic system | jq -r .operationId)
+  sleep 0.6
+  no_line "$F/vox.log" "voxtype config set audio.device default" || return 1
+  [[ $(jget '.hud') == *"mic change applies after this dictation"* ]] || { echo "    hud=$(jget '.hud')"; return 1; }
+  ipc key mic up > /dev/null
+  [[ $(mic_wait "$id") == succeeded ]]
+}
+s_mic_apply_restart_fails_rolls_back() {  # §9: verification fails → rollback restores the old literal; mode not committed
+  ready || return 1
+  : > "$F/sysd.restart-fails-once"
+  local id; id=$(ipc mic system | jq -r .operationId)
+  [[ $(mic_wait "$id" 25) == failed ]] || return 1
+  local s; s=$(ipc micStatus "$id")
+  [[ $(jq -r .rollback <<<"$s") == verified ]] || { echo "    $s"; return 1; }
+  [[ $(cat "$F/vox.config") == atvvoice_mic ]] || return 1
+  [[ $(jq -r .voice.mic "$XDG_CONFIG_HOME/omaremote/config.json") == remote ]] || return 1
+  [[ $(jget '.voice.state') == idle ]]
+}
+s_mic_apply_job_pending_blocks() {         # §3: a live systemd job (any origin) blocks the initial mutation
+  ready || return 1
+  printf '55 start\n' > "$F/sysd.job"
+  local id; id=$(ipc mic system | jq -r .operationId)
+  [[ $(mic_wait "$id" 8) == failed ]] || return 1
+  no_line "$F/vox.log" "voxtype config set audio.device default" || return 1
+  no_line "$F/sysd.log" "systemctl --user restart voxtype" || return 1
+  : > "$F/sysd.job"
+  id=$(ipc mic system | jq -r .operationId)
+  [[ $(mic_wait "$id") == succeeded ]]
+}
+s_recovery_restart_bounded() {             # §5.3/§9: daemon hangs after abort (cancel ignored, polls unanswered) → one bounded restart → verified → idle
+  ready || return 1
+  ipc key mic down > /dev/null; wait_for '.voice.state' recording 3 || return 1
+  : > "$F/vox.cancel-ignored"; : > "$F/vox.hang"
+  ipc reset > /dev/null
+  wait_for '.voice.state' recovering 2 || return 1
+  has_line "$F/vox.log" "voxtype record cancel" || return 1
+  sleep 5; [[ $(jget '.voice.state') == recovering ]] || return 1          # no premature restart or unconfigured
+  no_line "$F/sysd.log" "systemctl --user restart voxtype" || return 1
+  for _ in $(seq 1 200); do grep -qxF "systemctl --user restart voxtype" "$F/sysd.log" && break; sleep 0.1; done   # ≈15 s budget
+  has_line "$F/sysd.log" "systemctl --user restart voxtype" || return 1
+  [[ $(jget '.hud') == "restarting Voxtype" || $(jget '.voice.state') == idle ]] || return 1
+  ipc key mic up > /dev/null
+  wait_for '.voice.state' idle 15 || return 1                              # verified restart → fresh idle → settle
+  (( $(grep -cxF "systemctl --user restart voxtype" "$F/sysd.log") == 1 ))
+}
+s_stats_and_capture() {                    # §5.5 + §3 capture verification
+  ready || return 1
+  ipc key mic down > /dev/null; wait_for '.voice.state' recording 3 || return 1
+  sleep 0.6
+  ipc key mic up > /dev/null; wait_for '.voice.state' idle 5 || return 1
+  wait_for '.stats.all.count' 1 3 || return 1
+  jq -e 'length == 1 and .[0].source == "hid" and .[0].inferred == false' "$XDG_DATA_HOME/omaremote/stats.json" > /dev/null || return 1
+  [[ $(jget '.lastCapture.node') == atvvoice_mic ]] || { echo "    lastCapture=$(jget '.lastCapture')"; return 1; }
+  has_line "$F/actions.log" "pw-dump "   # fake-log quirk: a zero-arg invocation logs "basename " with a trailing space
+}
+scenario mic_apply_system s_mic_apply_system
+scenario mic_apply_second_request_is_busy s_mic_apply_second_request_is_busy
+scenario mic_apply_unknown_id_is_failure s_mic_apply_unknown_id_is_failure
+scenario mic_apply_waits_for_session s_mic_apply_waits_for_session
+scenario mic_apply_restart_fails_rolls_back s_mic_apply_restart_fails_rolls_back
+scenario mic_apply_job_pending_blocks s_mic_apply_job_pending_blocks
+scenario recovery_restart_bounded s_recovery_restart_bounded
+scenario stats_and_capture s_stats_and_capture
+
 # ---- summary ---------------------------------------------------------------------
 echo "integration: $pass passed, $fail failed"
 (( fail == 0 )) || { printf '  %s\n' "${failed[@]}"; exit 1; }
