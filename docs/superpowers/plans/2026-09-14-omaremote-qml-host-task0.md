@@ -11,7 +11,7 @@ were run with the user's pre-granted go-ahead.
 | ES modules (`.mjs` named exports, Map/Set/spread/template/default params/includes) | **FAIL** (object spread) / pass (everything else) | see "ES-modules / object-spread finding" below; `es` output after work-around: `{"keys":13,"map":1,"set":2,"spread":3,"tpl":"t2","includes":true,"defaults":5,"engineAction":"action"}` |
 | (1) bar-widget + service kinds; widget reaches service via `bar.shell.serviceFor` | pass | `counts` → `"widget":true` |
 | (2) service-owned PanelWindow | pass | `counts` → `"hudVisible":true` after a press |
-| (3) one `global` bind delivers press and release | **FAIL / BLOCKED** | see "GlobalShortcut press+release finding" below |
+| (3) one `global` bind delivers press and release | **PASS with two binds** (2026-09-15, real keypress) | see "GlobalShortcut press+release finding" and the "Resolution" note below |
 | (4) Voxtype capture stream only while recording | pass | idle `0`, recording `1`, after cancel `0` |
 
 Versions: Hyprland 0.56.2 (commit `efb50993`), Quickshell 0.3.1 (Arch package), voxtype 1.0.1,
@@ -170,3 +170,24 @@ Per the brief: **this stops here and is reported BLOCKED** rather than guessed a
   the spikes, since it cannot load with the real (unpatched) `lib/*.mjs` — leaving it enabled
   would just sit on the bar as a permanently-broken icon. `omarchy-restart-shell` run once more
   so the live shell matches the committed repo state exactly.
+
+## Resolution (2026-09-15, user at the machine)
+
+Verified with a real key. Under Omarchy's Lua config every bind runs as Hyprland's `__lua`
+dispatcher, so Hyprland's native press/release pairing for the `global` dispatcher does **not**
+apply: a single `hl.bind(KEY, hl.dsp.global("omaremote:<name>"))` delivers the press only, and a
+repeating key (`up`) ran away until `omarchy-shell omaremote reset` (the §4.3 panic path worked as
+designed). Binding **both edges** delivers both:
+
+```lua
+hl.bind("Pause", hl.dsp.global("omaremote:back"))
+hl.bind("Pause", hl.dsp.global("omaremote:back"), { release = true })
+```
+
+Observed: tap → `lastAction: "back:tap:Escape"`, hold ≈1 s → `"back:hold:BackSpace"`, `heldKeys: []`
+after each release. Two caveats for Plan 3's setup script: (a) use unmodified keys (keyd emits plain
+F13–F25) — a `SUPER + F12` test bind failed on the release edge because Omarchy's SUPER-release binds
+(menu / workspaces) and modifier release ordering interfere; (b) emit two `hl.bind` lines per key,
+the second with `release = true`. The temporary bind and `require("hypr.omaremote")` were removed
+afterwards (`hyprctl binds -j` shows zero omaremote entries).
+
