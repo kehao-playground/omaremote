@@ -82,6 +82,12 @@ back by the kernel — the engine's tap/hold/repeat discrimination has real edge
 
   keyd's own key names are assumed to be the lowercased `KEY_*` stems; `keyd check` must validate the
   file before it replaces anything (spec §7 step 2 already requires this).
-- Each logical key needs **two** `hl.bind` lines under Omarchy's Lua config — one for the press and
-  one with `{ release = true }` — see the resolution note in
+- **How many `hl.bind` lines per key is still open.** Measured on this remote via `XF86Back` (keyd
+  absent): one bind delivers both edges for a short press but loses the release on a long press
+  (leaving the key in `heldKeys`); two binds (press + `{ release = true }`) deliver the release but
+  double it on short presses. The engine tolerates the duplicate, not the loss. Settle it in Plan 3
+  against the real keyd F-keys with the self-test lease — see "Correction (2026-10-02)" in
   `docs/superpowers/plans/2026-09-14-omaremote-qml-host-task0.md`.
+- **End-to-end verified pre-keyd:** remote button → libinput/xkb → Hyprland bind → `GlobalShortcut`
+  → engine → action, with `back:tap:Escape` and `back:hold:BackSpace` observed from the remote's own
+  Back button on 2026-10-02.

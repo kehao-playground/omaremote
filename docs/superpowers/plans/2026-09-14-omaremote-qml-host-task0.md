@@ -11,7 +11,7 @@ were run with the user's pre-granted go-ahead.
 | ES modules (`.mjs` named exports, Map/Set/spread/template/default params/includes) | **FAIL** (object spread) / pass (everything else) | see "ES-modules / object-spread finding" below; `es` output after work-around: `{"keys":13,"map":1,"set":2,"spread":3,"tpl":"t2","includes":true,"defaults":5,"engineAction":"action"}` |
 | (1) bar-widget + service kinds; widget reaches service via `bar.shell.serviceFor` | pass | `counts` → `"widget":true` |
 | (2) service-owned PanelWindow | pass | `counts` → `"hudVisible":true` after a press |
-| (3) one `global` bind delivers press and release | **PASS with two binds** (2026-09-15, real keypress) | see "GlobalShortcut press+release finding" and the "Resolution" note below |
+| (3) one `global` bind delivers press and release | **PASS for short presses; long-press release unresolved** (2026-10-02, real remote) | see "GlobalShortcut press+release finding", "Resolution" and "Correction (2026-10-02)" below |
 | (4) Voxtype capture stream only while recording | pass | idle `0`, recording `1`, after cancel `0` |
 
 Versions: Hyprland 0.56.2 (commit `efb50993`), Quickshell 0.3.1 (Arch package), voxtype 1.0.1,
@@ -190,4 +190,39 @@ F13–F25) — a `SUPER + F12` test bind failed on the release edge because Omar
 (menu / workspaces) and modifier release ordering interfere; (b) emit two `hl.bind` lines per key,
 the second with `release = true`. The temporary bind and `require("hypr.omaremote")` were removed
 afterwards (`hyprctl binds -j` shows zero omaremote entries).
+
+## Correction (2026-10-02, real remote in hand)
+
+The 2026-09-15 conclusion above ("bind both edges") was drawn from a single keyboard key and is
+**not the rule**. Measured against the real Xiaomi remote (`XF86Back`, keyd absent, counts taken
+from the self-test lease, which counts raw `GlobalShortcut` edges before the engine):
+
+| bind configuration | key | short press | long press (~2 s) |
+|---|---|---|---|
+| one bind | `SUPER + F12` (keyboard) | — | press only, no release → `up` ran away |
+| two binds (press + `release = true`) | `Pause` (keyboard) | both edges | both edges, `heldKeys` clean |
+| two binds | `XF86Back` (remote) | both edges | `down: 1, up: 2` — a duplicate release |
+| one bind | `XF86Back` (remote) | both edges (`back:tap:Escape`) | hold fired, **no release** → `heldKeys: ["back"]` stuck |
+
+So: the native `global` press/release pairing does work from a Lua-dispatched bind, but only
+reliably for a short press on an unmodified key; a modifier combination loses the release (the
+modmask stops matching once the modifier is released first), and on this host a long press loses it
+too unless a second `release = true` bind is present — which then double-delivers the release on
+short presses. `lib/KeyEngine.mjs` tolerates a duplicate `up` (verified directly: tap, hold, and
+tap-then-hold with duplicated releases all resolve one action and leave `heldKeys` empty), so the
+duplicate is harmless; a *missing* release is not.
+
+**Unresolved, and deliberately left to Plan 3:** which configuration is correct for the keys the
+product actually uses. Everything above was measured on a pre-keyd workaround key (`XF86Back`, a
+consumer-control key) because the remote's other twelve codes collide with the keyboard. The real
+path is keyd → `F13`–`F24`/`prog1`, plain function keys, and Plan 3 can settle it cheaply: install
+the keyd conf, then arm the self-test lease once per bind configuration and compare
+`counts.shortcut.<key>` for a short and a long press of every key. Do not assume either
+configuration until that measurement exists.
+
+**Robustness finding for the spec:** a lost release leaves the key in `heldKeys` indefinitely, and
+for a `repeat: true` key that means an unbounded action stream (observed: the `up` runaway). Only the
+hard-coded panic reset recovers it, which requires the panic key's own press/release to be working.
+A stuck-key timeout in `lib/KeyEngine.mjs` — release a key held beyond, say, `max(holdMs, panicMs) ×
+N` and stop any repeat — would make this self-healing. §4.1/§4.3 currently say nothing about it.
 
