@@ -90,7 +90,13 @@ BarWidget {
     }
   }
 
+  // Bar.targetTooltipHovered() drops any showTooltip() whose target does not expose `tooltipHovered === true`
+  // (shell/plugins/bar/Bar.qml:400; the first-party widgets provide it via Ui/WidgetButton.qml). Without it the
+  // hover tooltip never appears.
+  readonly property bool tooltipHovered: visible && hoverArea.containsMouse
+
   MouseArea {
+    id: hoverArea
     anchors.fill: parent
     hoverEnabled: true
     acceptedButtons: Qt.LeftButton | Qt.MiddleButton

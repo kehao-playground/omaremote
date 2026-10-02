@@ -10,7 +10,7 @@ Item {
   property string fontFamily: Style.font.family
   property bool hasCursor: false
   signal copyRequested(string text)
-  readonly property string glyph: ({ pass: "", warn: "", fail: "", unknown: "", info: "" })[row.status] || ""
+  readonly property string glyph: ({ pass: "󰄬", warn: "󰀦", fail: "󰅖", unknown: "󰋗", info: "󰋽" })[row.status] || "󰋗"
   readonly property color glyphColor: row.status === "pass" ? root.fg : row.status === "fail" ? Color.urgent : row.status === "warn" ? "#e5c07b" : Qt.darker(root.fg, 1.5)
 
   implicitHeight: body.implicitHeight + Style.space(6)
