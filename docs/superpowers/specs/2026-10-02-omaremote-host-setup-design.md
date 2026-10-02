@@ -82,8 +82,12 @@ engine gains one absolute bound per key, independent of the phase machinery:
 - Entering `waitDouble` clears `stuckAt`: that phase is entered on release, the key is no longer
   physically down, and its `doubleMs` deadline is already bounded.
 - `release()` returning a key to `idle` clears `stuckAt`.
-- `fire()` checks, before anything else, whether `s.stuckAt !== null && now >= s.stuckAt`. If so the key
-  goes to `idle`, both timers clear, no `tap` is emitted, and `{ type: "stuckKey", key: n }` is pushed.
+- `fire()` checks, **before any phase-specific logic**, whether `s.stuckAt !== null && now >= s.stuckAt`.
+  If so the key goes to `idle`, both timers clear, and `{ type: "stuckKey", key: n }` is pushed — and
+  nothing else. The timeout must emit no `tap`, `hold`, `double` or `repeat` action of any kind. This
+  ordering is a contract, not an implementation detail: if the stuck check ran after the phase logic,
+  a timeout in `down` would be indistinguishable from a release and would be reported as a tap, which
+  is exactly the wrong reading of a lost release.
 - `advance()` and `nextDeadline()` operate on an effective due time — the earlier of `deadline` and
   `stuckAt`, ignoring nulls — so a stuck bound schedules the `tick` Timer exactly like any other deadline.
 - `fresh()` and `clearAll()` reset `stuckAt` with the rest of the state.
@@ -97,6 +101,11 @@ panic key still fires its reset first.
 
 Chosen value: 10 s is far longer than any deliberate hold on a remote (10 s of 80 ms repeats is
 already 125 actions) and far shorter than forever. It is a bound, not a UX feature.
+
+This is an accepted tradeoff and must be documented as one rather than filed as a bug later: a user
+who genuinely holds a direction key for more than `stuckMs` will see the repeat stream stop. That is
+the safety boundary doing its job. The remedy is to raise `timing.stuckMs` in `config.json`, not to
+weaken the bound.
 
 ### `stuckKey` is also the measurement instrument
 
@@ -235,9 +244,17 @@ duplicate releases. If only the two-bind configuration delivers releases, take i
 tolerating a duplicate release is verified, a loss it cannot.
 
 **If neither configuration qualifies**, the result is reported rather than worked around: the sweep
-output names which (key, duration) cells lost or duplicated an edge, and the choice becomes the
-configuration with the fewest lost releases — a loss being the failure mode `stuckMs` now bounds, and
-a duplicate being the one `KeyEngine` already tolerates. A per-key mixed configuration is permitted
+output names which (key, duration) cells lost or duplicated an edge, and the least-bad configuration
+is identified as the one with the fewest lost releases — a loss being the failure mode `stuckMs` now
+bounds, and a duplicate being the one `KeyEngine` already tolerates.
+
+**A least-bad configuration is a diagnostic, not a result.** It is explicitly not a pass, and three
+things follow with no discretion: §6 stays blocked, so no official `~/.config/hypr/omaremote.lua` is
+generated or installed from it; `omaremote-setup` must report failure rather than success, and must
+never treat the least-bad outcome as a qualifying one; and the identified configuration may be used
+only for further diagnosis, carried in the sweep output, never written to the generated file. The
+reason for the rule is that this is the single most likely place for a setup script to quietly install
+a known-defective configuration because it was the best of the options it saw. A per-key mixed configuration is permitted
 only if the matrix shows a key class genuinely needs it; it is not adopted pre-emptively, because a
 generated file with inconsistent rules per key is harder to verify than one with a uniform rule. If
 the sweep cannot produce a configuration where every supported key delivers both edges at every
