@@ -73,6 +73,11 @@ test("timing.stuckMs is raised above the longest key timer, with a problem recor
   assert.ok(r.problems.some(p => p.code === "stuck-ms-raised"));
 });
 
+test("the stuckMs floor covers holdMs, not just panicMs", () => {
+  const r = normalizeConfig({ timing: { holdMs: 3000, stuckMs: 2000 } });
+  assert.equal(r.config.timing.stuckMs, 3001);           // holdMs 3000 > panicMs 1500: only the Math.max over all three timers gets this
+});
+
 test("a stuckMs below panicMs cannot disable the panic escape hatch", () => {
   const r = normalizeConfig({ timing: { stuckMs: 1000 } });
   assert.ok(r.config.timing.stuckMs > r.config.timing.panicMs);

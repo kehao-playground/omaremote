@@ -201,7 +201,9 @@ test("consumeRelease phase (double fired, release lost) times out", () => {
   e.release("ok", 100);                                   // -> waitDouble
   assert.deepEqual(acts(e.press("ok", 150)), ["ok:double"]);   // -> consumeRelease, still physically down
   assert.deepEqual(e.heldKeys(), ["ok"]);
-  assert.deepEqual(stuck(e.advance(10150)), ["ok"]);
+  const fx = e.advance(10150);
+  assert.deepEqual(stuck(fx), ["ok"]);
+  assert.deepEqual(acts(fx), []);
   assert.deepEqual(e.heldKeys(), []);
 });
 
@@ -210,7 +212,9 @@ test("down phase with no timer at all (double-only key held) times out", () => {
   e.press("app", 0);
   assert.deepEqual(e.heldKeys(), ["app"]);
   assert.equal(e.nextDeadline(), 10000);                  // the bound is the only timer this phase has
-  assert.deepEqual(stuck(e.advance(10000)), ["app"]);
+  const fx = e.advance(10000);
+  assert.deepEqual(stuck(fx), ["app"]);
+  assert.deepEqual(acts(fx), []);
   assert.deepEqual(e.heldKeys(), []);
 });
 

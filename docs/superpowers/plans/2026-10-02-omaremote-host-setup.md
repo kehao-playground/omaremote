@@ -442,7 +442,7 @@ down-without-up tracking instead."
 
 **Interfaces:**
 - Consumes: `root.selftestArm()` from Task 2's unchanged Service.
-- Produces: `arm(now, ctx, requestedLeaseMs)` returns `{ ok: true, id }` or `{ ok: false, reason: "busy", detail: <string>, retryAfterMs: 300 }` where `detail` is one of `leaseActive`, `voiceBusy`, `backendStale`, `heldKeys:<comma-separated>`, `pendingCmds:<n>`, `gate`. The lease length is a **per-call argument**, clamped into `[1000, 600000]`; `createSelfTest({ supportedKeys, gate, leaseMs })` only supplies the default, itself clamped, defaulting to `120000`. The SelfTest instance is never rebuilt to change a lease length. IPC verb `selftestArmFor(leaseMs: string)`. Task 6 calls `selftestArmFor 120000` and branches on `detail`.
+- Produces: `arm(now, ctx, requestedLeaseMs)` returns `{ ok: true, id }` or `{ ok: false, reason: "busy", detail: <string>, retryAfterMs: 300 }` where `detail` is one of `leaseActive`, `voiceBusy`, `backendStale`, `heldKeys:<comma-separated>`, `pendingCmds:<n>`, `gate`. The lease length is a **per-call argument**, clamped into `[1000, 600000]`; `createSelfTest({ supportedKeys, gate, leaseMs })` only supplies the default, itself clamped, defaulting to `120000`. The SelfTest instance is never rebuilt to change a lease length. IPC verb `selftestArmFor(leaseMs: string)`. Task 6 calls `selftestArmFor 120000` and branches on `detail`. A consumer branches on `reason` first and tolerates `detail === undefined`: `Service.qml`'s own `{ ok: false, reason: "not-ready" }` and `guarded`'s `{ ok: false, reason: "error" }` carry no `detail`.
 
 - [ ] **Step 1: Write the failing tests**
 

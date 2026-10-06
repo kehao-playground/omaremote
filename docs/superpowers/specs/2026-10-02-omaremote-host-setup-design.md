@@ -317,7 +317,8 @@ Two defects found while using the lease as a measurement instrument:
 **No reason on `busy`.** `SelfTest.mjs:20` collapses six distinct conditions into one `busy`, so a
 caller cannot tell "retry in 300 ms" from "a key is stuck and will never clear". `arm` gains a
 `detail` field: `leaseActive`, `voiceBusy`, `backendStale`, `heldKeys:<names>`, `pendingCmds:<n>`, or
-`gate`, alongside the existing `retryAfterMs`.
+`gate`, alongside the existing `retryAfterMs`. A consumer branches on `reason` first and tolerates
+`detail === undefined`: the host's own `not-ready` and `error` results carry no `detail`.
 
 **30 s is too short.** It cannot cover a measurement sweep or any human-in-the-loop check. The lease
 length becomes caller-chosen, and the default rises to 120 s with a 600 s cap.
