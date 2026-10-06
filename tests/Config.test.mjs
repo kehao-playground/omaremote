@@ -66,3 +66,20 @@ test("neutral key table covers all 13 keys with unique keyd names", () => {
   assert.equal(new Set(names).size, 13);
   assert.equal(NEUTRAL_KEYS.mic.keysym, "XF86Tools");
 });
+
+test("timing.stuckMs is raised above the longest key timer, with a problem recorded", () => {
+  const r = normalizeConfig({ timing: { stuckMs: 0 } });
+  assert.equal(r.config.timing.stuckMs, 1501);            // panicMs 1500 is the longest default timer
+  assert.ok(r.problems.some(p => p.code === "stuck-ms-raised"));
+});
+
+test("a stuckMs below panicMs cannot disable the panic escape hatch", () => {
+  const r = normalizeConfig({ timing: { stuckMs: 1000 } });
+  assert.ok(r.config.timing.stuckMs > r.config.timing.panicMs);
+});
+
+test("a stuckMs above every key timer is honoured untouched", () => {
+  const r = normalizeConfig({ timing: { stuckMs: 4000 } });
+  assert.equal(r.config.timing.stuckMs, 4000);
+  assert.ok(!r.problems.some(p => p.code === "stuck-ms-raised"));
+});

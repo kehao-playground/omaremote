@@ -161,3 +161,85 @@ test("pressing another key resolves a pending double as tap first (no cross-key 
   const fx = e.press("home", 100);
   assert.deepEqual(acts(fx), ["ok:tap", "home:tap"]);
 });
+
+const stuck = (fx) => byType(fx, "stuckKey").map(e => e.key);
+
+test("repeat key whose release is lost stops repeating and reports stuckKey once", () => {
+  const e = engine();
+  e.press("up", 0);
+  // holdMs 350 then repeatMs 80: fires at 350, 430, 510, 590, 670, 750, 830, 910, 990
+  assert.equal(acts(e.advance(1000)).length, 9);
+  const fx = e.advance(10000);
+  assert.deepEqual(stuck(fx), ["up"]);
+  assert.deepEqual(e.heldKeys(), []);
+  assert.equal(e.nextDeadline(), null);
+  assert.deepEqual(stuck(e.advance(20000)), []);          // reported once, not every tick
+  assert.deepEqual(acts(e.advance(20000)), []);           // and no action after the bound
+});
+
+test("the stuck timeout emits no action of any kind", () => {
+  const e = engine();
+  e.press("ok", 0);                                       // long key: hold fires at 350
+  assert.deepEqual(acts(e.advance(350)), ["ok:hold"]);
+  const fx = e.advance(10000);
+  assert.deepEqual(stuck(fx), ["ok"]);
+  assert.deepEqual(acts(fx), []);                         // never a tap: a timeout is not a release
+});
+
+test("held phase (long key, release lost) times out", () => {
+  const e = engine();
+  e.press("ok", 0);
+  e.advance(350);
+  assert.deepEqual(e.heldKeys(), ["ok"]);
+  assert.deepEqual(stuck(e.advance(10000)), ["ok"]);
+  assert.deepEqual(e.heldKeys(), []);
+});
+
+test("consumeRelease phase (double fired, release lost) times out", () => {
+  const e = engine({ ok: { tap: { type: "key", keys: "Return" }, double: { type: "key", keys: "ctrl+w" } } });
+  e.press("ok", 0);
+  e.release("ok", 100);                                   // -> waitDouble
+  assert.deepEqual(acts(e.press("ok", 150)), ["ok:double"]);   // -> consumeRelease, still physically down
+  assert.deepEqual(e.heldKeys(), ["ok"]);
+  assert.deepEqual(stuck(e.advance(10150)), ["ok"]);
+  assert.deepEqual(e.heldKeys(), []);
+});
+
+test("down phase with no timer at all (double-only key held) times out", () => {
+  const e = engine({ app: { double: { type: "key", keys: "ctrl+w" } } });
+  e.press("app", 0);
+  assert.deepEqual(e.heldKeys(), ["app"]);
+  assert.equal(e.nextDeadline(), 10000);                  // the bound is the only timer this phase has
+  assert.deepEqual(stuck(e.advance(10000)), ["app"]);
+  assert.deepEqual(e.heldKeys(), []);
+});
+
+test("the bound is measured from the press, not from the last phase transition", () => {
+  const e = engine();
+  e.press("ok", 0);
+  e.advance(9000);                                        // down -> held somewhere in here
+  assert.deepEqual(stuck(e.advance(10000)), ["ok"]);      // 10000, not 9000 + stuckMs
+});
+
+test("waitDouble clears the bound so a double-tap window is never cut short", () => {
+  const e = engine({ ok: { tap: { type: "key", keys: "Return" }, double: { type: "key", keys: "ctrl+w" } } });
+  e.press("ok", 0);
+  e.release("ok", 9999);                                  // -> waitDouble, doubleMs window opens
+  assert.equal(e.nextDeadline(), 9999 + 250);             // the doubleMs deadline, not a stuck bound
+  assert.deepEqual(acts(e.advance(9999 + 250)), ["ok:tap"]);
+});
+
+test("a release arriving after the timeout produces nothing", () => {
+  const e = engine();
+  e.press("up", 0);
+  e.advance(10000);
+  assert.deepEqual(acts(e.release("up", 12000)), []);
+  assert.deepEqual(stuck(e.release("up", 12000)), []);
+});
+
+test("a panic key still resets at panicMs, before any stuck bound", () => {
+  const e = engine();
+  e.press("menu", 0);
+  assert.deepEqual(byType(e.advance(1500), "reset").length, 1);
+  assert.deepEqual(e.heldKeys(), []);
+});
