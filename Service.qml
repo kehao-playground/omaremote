@@ -440,17 +440,18 @@ Item {
     var keys = Defaults.KEY_NAMES.filter(function(k) { return root.config.keys[k].supported !== false })
     selftest = SelfTest.createSelfTest({ supportedKeys: keys, gate: voice.gate })
   }
-  function selftestArm() {
+  function selftestArm(leaseMs) {                     // leaseMs: undefined or "" means the default
     var now = Date.now()
     if (!selftest || !voice) return { ok: false, reason: "not-ready" }
-    if (mic && mic.pending()) return { ok: false, reason: "busy", detail: "mic operation pending" }
+    if (mic && mic.pending()) return { ok: false, reason: "busy", detail: "gate", retryAfterMs: 300 }   // a mic apply holds the shared gate
     var s = voice.snapshot()
     var fresh = s.backend === "idle" && s.backendFresh && now - s.backendAt <= 500
-    if (!fresh) { vox.poll(); return { ok: false, reason: "busy", detail: "backend not fresh; retry", retryAfterMs: 300 } }   // Ruling 17: explicit cold-start retry contract
+    if (!fresh) { vox.poll(); return { ok: false, reason: "busy", detail: "backendStale", retryAfterMs: 300 } }   // Ruling 17: explicit cold-start retry contract
     // DEVIATION (Task 5 review ruling, applied here as it was to Task 7's mic.* call sites): selftest.arm() returns a
     // plain result object, not an effects array, so `guarded` is used with a fallback instead of dispatch().
     var r = root.guarded("selftest.arm", function() {
-      return selftest.arm(now, { voiceIdle: s.state === "idle", backendIdleFresh: fresh, heldKeys: engine.heldKeys(), pendingCmds: s.pendingCmds + runner.pending("voice") })
+      return selftest.arm(now, { voiceIdle: s.state === "idle", backendIdleFresh: fresh, heldKeys: engine.heldKeys(), pendingCmds: s.pendingCmds + runner.pending("voice") },
+                          leaseMs === "" || leaseMs === undefined ? undefined : leaseMs)
     }, { ok: false, reason: "error" })
     if (r.ok) { root.selftestActive = true; root.hudText = "self-test" }
     root.rearm()
@@ -541,7 +542,8 @@ Item {
     function mic(mode: string): string { return root.ipcMic(mode) }
     function micStatus(id: string): string { return root.ipcMicStatus(id) }
     function selftestPing(): string { return "ok" }
-    function selftestArm(): string { return JSON.stringify(root.selftestArm()) }
+    function selftestArm(): string { return JSON.stringify(root.selftestArm(undefined)) }
+    function selftestArmFor(leaseMs: string): string { return JSON.stringify(root.selftestArm(leaseMs)) }
     function selftestStatus(id: string): string {
       var s = root.selftest ? root.selftest.status(id, Date.now()) : null
       return JSON.stringify(s ? { ok: true, id: id, active: s.active, remainingMs: s.remainingMs, failed: s.failed } : { ok: false, reason: "unknown" })

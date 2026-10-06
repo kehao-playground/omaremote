@@ -472,7 +472,36 @@ scenario selftest_unknown_or_used_id s_selftest_unknown_or_used_id
 scenario selftest_blocks_voice_starts s_selftest_blocks_voice_starts
 scenario doctor_rows s_doctor_rows
 scenario mic_toggle_owned_mic_closed_on_reset s_mic_toggle_owned_mic_closed_on_reset
+s_selftest_arm_for_clamps_garbage() {   # Review focus 2: an IPC string from a shell must clamp, never throw
+  ready || return 1
+  local id; id=$(ipc selftestArmFor "abc" | jq -r '.id')
+  [[ $id == st-* ]] || { echo "    arm with 'abc' gave: $(ipc selftestArmFor abc)"; return 1; }
+  local rem; rem=$(ipc selftestStatus "$id" | jq -r '.remainingMs')
+  (( rem > 100000 )) || { echo "    remainingMs=$rem (expected the 120 s default)"; return 1; }
+  [[ $(ipc selftestDisarm "$id") == ok ]]
+}
+s_selftest_arm_busy_names_the_blocker() {
+  ready || return 1
+  ipc key ok down > /dev/null; sleep 0.05
+  [[ $(ipc selftestArm | jq -r '.detail') == heldKeys:ok ]] || { echo "    detail=$(ipc selftestArm | jq -r '.detail')"; return 1; }
+  ipc key ok up > /dev/null
+}
+s_selftest_arm_for_never_replaces_a_live_lease() {   # Blocker: rebuilding the instance would drop the lease and leak the gate
+  ready || return 1
+  local id; id=$(ipc selftestArmFor 120000 | jq -r '.id')
+  [[ $id == st-* ]] || { echo "    first arm failed: $(ipc selftestArmFor 120000)"; return 1; }
+  local second; second=$(ipc selftestArmFor 60000)
+  [[ $(jq -r '.detail' <<< "$second") == leaseActive ]] || { echo "    second arm: $second"; return 1; }
+  [[ $(ipc selftestStatus "$id" | jq -r '.active') == true ]] || { echo "    the first lease was dropped"; return 1; }
+  [[ $(ipc selftestDisarm "$id") == ok ]] || return 1
+  # the gate must be free again: a mic apply would be refused forever if the discarded instance had leaked it
+  [[ $(ipc selftestArmFor 5000 | jq -r '.ok') == true ]] || { echo "    gate still held after disarm"; return 1; }
+}
+
 scenario selftest_arm_cold_retry s_selftest_arm_cold_retry
+scenario selftest_arm_for_clamps_garbage s_selftest_arm_for_clamps_garbage
+scenario selftest_arm_busy_names_the_blocker s_selftest_arm_busy_names_the_blocker
+scenario selftest_arm_for_never_replaces_a_live_lease s_selftest_arm_for_never_replaces_a_live_lease
 
 # ---- Final fix wave (final-review.md): findings #2 and #3 ----
 doctor_at() { ipc doctor | jq -r .at; }   # `.doctorAt`/`.doctorSummary` aren't in the `status` snapshot; the `doctor` verb carries them
