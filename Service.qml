@@ -45,6 +45,7 @@ Item {
   property string lastError: ""
   property string _lastVoiceErrorReason: ""       // finding #16: voice's own error reason, kept apart from the shared lastError slot
   property var heldKeys: []
+  property int stuckKeyCount: 0         // monotonic since process start; never cleared by a reset (lastStuckKey is)
   property var lastStuckKey: null      // { key, at } — set when a key's release never arrived within timing.stuckMs; normal-operation signal only (no edges reach KeyEngine during a self-test lease)
   signal resetHappened()                          // §4.3: BarWidget closes the Panel
 
@@ -73,6 +74,7 @@ Item {
   property var statsSummary: ({ today: { count: 0, seconds: 0 }, week: { count: 0, seconds: 0 }, all: { count: 0, seconds: 0 }, longest: null })
   property var selftest: null
   property bool selftestActive: false
+  property var selftestId: null                   // id of the live lease, published by statusJson so an interrupted caller can disarm it
   property var doctorRows: []
   property string doctorSummary: "unknown"
   property var doctorFacts: null
@@ -107,6 +109,7 @@ Item {
       case "reset": root.onEngineReset(); break
       case "stuckKey":
         root.lastStuckKey = { key: e.key, at: Date.now() }
+        root.stuckKeyCount++
         root.heldKeys = engine ? engine.heldKeys() : []    // advanceAll() never refreshes this; without it the status keeps reporting a key the engine already released
         console.log("omaremote: key " + e.key + " exceeded timing.stuckMs; release presumed lost")
         break
@@ -258,6 +261,8 @@ Item {
     root.resetHappened()
   }
   function doReset(origin) {
+    // A lease swallows every shortcut edge (the panic key included) and holds the shared voice gate, so reset must end it too.
+    if (selftest && selftest.active() && root.selftestId !== null) root.selftestDisarm(root.selftestId)
     if (engine) root.dispatch(root.guarded("engine.reset", function() { return engine.reset() }), "engine")   // emits {type:"reset"} → onEngineReset
     root.rearm()
   }
@@ -447,7 +452,7 @@ Item {
     // nothing refreshes backendAt while a lease idles, so past 500 ms the pre-check would say backendStale
     // ("retry, it will clear") for a lease that never clears on its own.
     if (selftest.active()) return { ok: false, reason: "busy", detail: "leaseActive", retryAfterMs: 300 }
-    if (mic && mic.pending()) return { ok: false, reason: "busy", detail: "gate", retryAfterMs: 300 }   // a mic apply holds the shared gate
+    if (mic && mic.pending()) return { ok: false, reason: "busy", detail: "gate", retryAfterMs: 300 }   // a mic apply is pending (running or merely deferred) and will take the shared gate
     var s = voice.snapshot()
     var fresh = s.backend === "idle" && s.backendFresh && now - s.backendAt <= 500
     if (!fresh) { vox.poll(); return { ok: false, reason: "busy", detail: "backendStale", retryAfterMs: 300 } }   // Ruling 17: explicit cold-start retry contract
@@ -457,12 +462,13 @@ Item {
       return selftest.arm(now, { voiceIdle: s.state === "idle", backendIdleFresh: fresh, heldKeys: engine.heldKeys(), pendingCmds: s.pendingCmds + runner.pending("voice") },
                           leaseMs === "" || leaseMs === undefined ? undefined : leaseMs)
     }, { ok: false, reason: "error" })
-    if (r.ok) { root.selftestActive = true; root.hudText = "self-test" }
+    if (r.ok) { root.selftestActive = true; root.selftestId = r.id; root.hudText = "self-test" }
     root.rearm()
     return r
   }
   function onSelftestEnded() {
     root.selftestActive = false
+    root.selftestId = null
     if (root.hudText === "self-test") root.hudText = ""
     if (engine) engine.reset()                                             // quarantine: no queued action can fire after the lease
     root.heldKeys = []
@@ -521,7 +527,7 @@ Item {
     return JSON.stringify({
       config: !!engine, configInvalid: root.configInvalid, configProblems: root.configProblems,
       timing: root.config ? root.config.timing : null,
-      heldKeys: root.heldKeys, lastStuckKey: root.lastStuckKey, lastAction: root.lastAction, hud: root.hudLine, flash: root.flash,
+      heldKeys: root.heldKeys, lastStuckKey: root.lastStuckKey, stuckKeyCount: root.stuckKeyCount, lastAction: root.lastAction, hud: root.hudLine, flash: root.flash,
       errorCount: root.errorCount, lastError: root.lastError
       , voice: voice ? (function(s) { return { state: s.state, owner: s.owner, inferred: s.inferred, pendingCmds: s.pendingCmds, gates: s.gates, backendFresh: s.backendFresh } })(voice.snapshot()) : null
       , backend: root.backendClass
@@ -531,7 +537,8 @@ Item {
       , stats: root.statsSummary
       , lastCapture: root.lastCapture
       , unconfiguredReason: root.unconfiguredReason
-      , selftest: { active: root.selftestActive }
+      , selftest: { active: root.selftestActive, id: root.selftestActive ? root.selftestId : null,
+                    remainingMs: root.selftestActive && root.selftest && root.selftestId !== null ? (function(s) { return s ? s.remainingMs : 0 })(root.selftest.status(root.selftestId, Date.now())) : 0 }
       , doctorSummary: root.doctorSummary
       , unconfigured: root.unconfigured
     })

@@ -108,21 +108,31 @@ s_stuck_key_bounds_a_lost_release() {   # Task 1/2: a repeat key whose release n
   wait_for '.config' true 5 || return 1
   local f=$XDG_CONFIG_HOME/omaremote/config.json
   jq '.timing.stuckMs = 1600' "$f" > "$F/c.json" && cat "$F/c.json" > "$f"   # above panicMs 1500, so the floor leaves it alone
+  # The wait_for below is also what guards the margin: 1600 sits 99 ms over the Config floor (1501) by coincidence,
+  # not design. If the floor ever rises past 1600 the host publishes the raised value and this fails loudly,
+  # instead of silently lengthening the wait.
   wait_for '.timing.stuckMs' 1600 5 || return 1
   ipc key up down > /dev/null                                                # pressed, never released
   wait_for '.heldKeys | length' 1 2 || return 1
   wait_for '.heldKeys | length' 0 4 || { echo "    heldKeys never cleared: $(jget '.heldKeys | join(",")')"; return 1; }
   [[ $(jget '.lastStuckKey.key') == up ]] || { echo "    lastStuckKey=$(jget '.lastStuckKey')"; return 1; }
+  [[ $(jget '.stuckKeyCount') == 1 ]] || { echo "    stuckKeyCount=$(jget '.stuckKeyCount')"; return 1; }
   local n; n=$(grep -cxF "wtype -k Up" "$F/actions.log")
   sleep 0.5
   [[ $(grep -cxF "wtype -k Up" "$F/actions.log") == "$n" ]] || { echo "    actions kept coming after the bound"; return 1; }
+  # A reset clears the {key, at} record (stale key state would read as current) but not the monotonic count:
+  # "has a release been lost since this process started" must survive the natural response to a stuck key.
+  [[ $(ipc reset) == ok ]] || return 1
+  wait_for '.lastStuckKey' null 2 || return 1
+  [[ $(jget '.stuckKeyCount') == 1 ]] || { echo "    stuckKeyCount=$(jget '.stuckKeyCount') after reset (must survive it)"; return 1; }
 }
 s_stuck_key_absent_when_release_arrives() {   # the signal must mean something: a normal press leaves it null
   wait_for '.config' true 5 || return 1
   local f=$XDG_CONFIG_HOME/omaremote/config.json
   jq '.timing.stuckMs = 1600' "$f" > "$F/c.json" && cat "$F/c.json" > "$f"   # same low bound as the lost-release scenario
   wait_for '.timing.stuckMs' 1600 5 || return 1
-  ipc key up down > /dev/null; sleep 0.2; ipc key up up > /dev/null
+  ipc key up down > /dev/null; sleep 0.5; ipc key up up > /dev/null          # past holdMs 350: the release lands in the held/repeating phase, not down
+  [[ $(grep -cxF "wtype -k Up" "$F/actions.log") -ge 1 ]] || { echo "    key never reached the repeating phase before release"; return 1; }
   sleep 2.2                                                                  # past the bound: a wrongly-armed stuck deadline would have fired by now
   [[ $(jget '.lastStuckKey') == null ]] || { echo "    lastStuckKey=$(jget '.lastStuckKey')"; return 1; }
   [[ $(jget '.heldKeys | length') == 0 ]]
@@ -465,7 +475,32 @@ s_selftest_arm_cold_retry() {   # Ruling 17: a cold (never-polled) backend gets 
   local id; id=$(jq -r .id <<<"$r"); [[ -n $id ]] || return 1
   ipc selftestDisarm "$id" > /dev/null
 }
+s_selftest_status_publishes_lease_id() {   # an interrupted caller must be able to recover the id and disarm
+  ready || return 1
+  [[ $(jget '.selftest.id') == null && $(jget '.selftest.remainingMs') == 0 ]] || { echo "    idle: $(jget '.selftest')"; return 1; }
+  local id; id=$(ipc selftestArm | jq -r '.id')
+  [[ $id == st-* ]] || return 1
+  [[ $(jget '.selftest.id') == "$id" ]] || { echo "    status id=$(jget '.selftest.id'), armed $id"; return 1; }
+  local rem; rem=$(jget '.selftest.remainingMs')
+  (( rem > 100000 && rem <= 120000 )) || { echo "    remainingMs=$rem (expected the 120 s default, counting down)"; return 1; }
+  [[ $(ipc selftestDisarm "$(jget '.selftest.id')") == ok ]] || return 1       # the id read from status is a working handle
+  [[ $(jget '.selftest.id') == null && $(jget '.selftest.remainingMs') == 0 ]]
+}
+s_ipc_reset_ends_a_selftest_lease() {   # during a lease the panic key never reaches the engine; reset is the escape hatch
+  ready || return 1
+  local first; first=$(ipc selftestArm); [[ $(jq -r .ok <<<"$first") == true ]] || { echo "    first arm: $first"; return 1; }
+  local blocked; blocked=$(ipc selftestArm | jq -r '.detail')
+  [[ $blocked == leaseActive ]] || { echo "    second arm detail=$blocked"; return 1; }       # the lease really is blocking
+  [[ $(ipc reset) == ok ]] || return 1
+  wait_for '.selftest.active' false 2 || return 1
+  [[ $(jget '.hud') != self-test ]] || { echo "    hud=$(jget '.hud')"; return 1; }
+  local r; r=$(ipc selftestArm)                                                # the gate was released, so a fresh arm succeeds
+  [[ $(jq -r .ok <<<"$r") == true ]] || { echo "    arm after reset: $r"; return 1; }
+  ipc selftestDisarm "$(jq -r .id <<<"$r")" > /dev/null
+}
 scenario selftest_counts_shortcut_not_ipc s_selftest_counts_shortcut_not_ipc
+scenario selftest_status_publishes_lease_id s_selftest_status_publishes_lease_id
+scenario ipc_reset_ends_a_selftest_lease s_ipc_reset_ends_a_selftest_lease
 scenario selftest_busy_during_session s_selftest_busy_during_session
 scenario selftest_external_f9_fails_test s_selftest_external_f9_fails_test
 scenario selftest_unknown_or_used_id s_selftest_unknown_or_used_id
