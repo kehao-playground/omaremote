@@ -435,12 +435,12 @@ was lost' from 'the release arrived' by observation instead of inference."
 
 **Files:**
 - Modify: `lib/SelfTest.mjs:3`, `:20-24`
-- Modify: `Service.qml:434`, `:436-451`, IPC block `:527-545`
+- Modify: `Service.qml:436-451` (signature and the `selftest.arm` call only — `rebuildSelftest` is untouched), IPC block `:527-545`
 - Test: `tests/SelfTest.test.mjs`, `tests/fake-remote.sh`
 
 **Interfaces:**
 - Consumes: `root.selftestArm()` from Task 2's unchanged Service.
-- Produces: `arm(now, ctx)` returns `{ ok: true, id }` or `{ ok: false, reason: "busy", detail: <string>, retryAfterMs: 300 }` where `detail` is one of `leaseActive`, `voiceBusy`, `backendStale`, `heldKeys:<comma-separated>`, `pendingCmds:<n>`, `gate`. `createSelfTest({ supportedKeys, gate, leaseMs })` clamps `leaseMs` into `[1000, 600000]`, defaulting to `120000`. IPC verb `selftestArmFor(leaseMs: string)`. Task 6 calls `selftestArmFor 120000` and branches on `detail`.
+- Produces: `arm(now, ctx, requestedLeaseMs)` returns `{ ok: true, id }` or `{ ok: false, reason: "busy", detail: <string>, retryAfterMs: 300 }` where `detail` is one of `leaseActive`, `voiceBusy`, `backendStale`, `heldKeys:<comma-separated>`, `pendingCmds:<n>`, `gate`. The lease length is a **per-call argument**, clamped into `[1000, 600000]`; `createSelfTest({ supportedKeys, gate, leaseMs })` only supplies the default, itself clamped, defaulting to `120000`. The SelfTest instance is never rebuilt to change a lease length. IPC verb `selftestArmFor(leaseMs: string)`. Task 6 calls `selftestArmFor 120000` and branches on `detail`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -475,16 +475,55 @@ test("leaseMs defaults to 120 s and is clamped, never rejected", () => {
   const hi = createSelfTest({ supportedKeys: ["up"], gate: gate(), leaseMs: 99999999 });
   hi.arm(0, okCtx);
   assert.equal(hi.nextDeadline(), 600000);
-  const lo = createSelfTest({ supportedKeys: ["up"], gate: gate(), leaseMs: 0 });
+  const lo = createSelfTest({ supportedKeys: ["up"], gate: gate(), leaseMs: 500 });
   lo.arm(0, okCtx);
-  assert.equal(lo.nextDeadline(), 1000);
-  const bad = createSelfTest({ supportedKeys: ["up"], gate: gate(), leaseMs: NaN });
-  bad.arm(0, okCtx);
-  assert.equal(bad.nextDeadline(), 120000);
+  assert.equal(lo.nextDeadline(), 1000);                  // in range (0, LEASE_MIN): clamped up
+  // 0, "" and NaN are treated as "no value given", not as "clamp to the minimum": a 1 s lease would
+  // report success and then expire before the first injection, which Review Focus 2 warns against.
+  for (const bad of [0, "", NaN, "abc", -5]) {
+    const b = createSelfTest({ supportedKeys: ["up"], gate: gate(), leaseMs: bad });
+    b.arm(0, okCtx);
+    assert.equal(b.nextDeadline(), 120000, `leaseMs ${JSON.stringify(bad)} should fall back to the default`);
+  }
+});
+
+test("the lease length is a per-arm argument and is clamped per call", () => {
+  const { st } = mk();
+  st.arm(0, okCtx, 5000);
+  assert.equal(st.nextDeadline(), 5000);
+  st.disarm("st-1", 10);
+  st.arm(100, okCtx, 99999999);
+  assert.equal(st.nextDeadline(), 100 + 600000);
+  st.disarm("st-2", 110);
+  st.arm(200, okCtx, "garbage");
+  assert.equal(st.nextDeadline(), 200 + 120000);          // falls back to the default, never throws
+});
+
+test("a second arm never replaces a live lease — it reports leaseActive", () => {
+  const { g, st } = mk();
+  const first = st.arm(0, okCtx, 120000);
+  assert.equal(first.ok, true);
+  const second = st.arm(10, okCtx, 60000);
+  assert.equal(second.ok, false);
+  assert.equal(second.detail, "leaseActive");
+  assert.equal(st.nextDeadline(), 120000);                // the first lease is untouched
+  assert.equal(g.held.size, 1);                           // and the shared gate was not acquired twice
+  const r = st.report(first.id, 20);
+  assert.ok(r.missing.length > 0);                        // still the first lease's state
+  assert.equal(g.busy(), false);                          // released exactly once
 });
 ```
 
-Remove the now-wrong assertion `assert.equal(st.nextDeadline(), 30000);` from the existing `"arm requires idle voice…"` test and replace it with `assert.equal(st.nextDeadline(), 120000);`.
+Six assertions in the existing suite hard-code the old 30 s lease (`tests/SelfTest.test.mjs:25`, `:71`, `:72`, `:105`, `:106`, `:108`). Rather than edit six magic numbers — which would only have to be edited again the next time the default moves — make the lease length explicit where a test is *about* expiry. Change the `mk` helper (line 10) to take one:
+
+```javascript
+const mk = (leaseMs) => { const g = gate(); return { g, st: createSelfTest({ supportedKeys: ["up", "ok"], gate: g, leaseMs }) }; };
+```
+
+Then:
+
+- In `"arm requires idle voice, fresh backend idle, no held keys/pending commands and a free gate"`, which is the one test genuinely asserting the **default**, replace `assert.equal(st.nextDeadline(), 30000);` with `assert.equal(st.nextDeadline(), 120000);`.
+- In `"expiry emits selftestExpired, releases the gate, and report afterwards is an error not partial data"` and `"status reports an expired lease as inactive without ending it"`, change `const { g, st } = mk();` to `const { g, st } = mk(30000);`. Their `29999`/`30000`/`30001` assertions then stay correct and stop depending on the default at all.
 
 In `tests/fake-remote.sh`, add:
 
@@ -503,6 +542,17 @@ s_selftest_arm_busy_names_the_blocker() {
   [[ $(ipc selftestArm | jq -r '.detail') == heldKeys:ok ]] || { echo "    detail=$(ipc selftestArm | jq -r '.detail')"; return 1; }
   ipc key ok up > /dev/null
 }
+s_selftest_arm_for_never_replaces_a_live_lease() {   # Blocker: rebuilding the instance would drop the lease and leak the gate
+  ready || return 1
+  local id; id=$(ipc selftestArmFor 120000 | jq -r '.id')
+  [[ $id == st-* ]] || { echo "    first arm failed: $(ipc selftestArmFor 120000)"; return 1; }
+  local second; second=$(ipc selftestArmFor 60000)
+  [[ $(jq -r '.detail' <<< "$second") == leaseActive ]] || { echo "    second arm: $second"; return 1; }
+  [[ $(ipc selftestStatus "$id" | jq -r '.active') == true ]] || { echo "    the first lease was dropped"; return 1; }
+  [[ $(ipc selftestDisarm "$id") == ok ]] || return 1
+  # the gate must be free again: a mic apply would be refused forever if the discarded instance had leaked it
+  [[ $(ipc selftestArmFor 5000 | jq -r '.ok') == true ]] || { echo "    gate still held after disarm"; return 1; }
+}
 ```
 
 and register them:
@@ -510,6 +560,7 @@ and register them:
 ```bash
 scenario selftest_arm_for_clamps_garbage s_selftest_arm_for_clamps_garbage
 scenario selftest_arm_busy_names_the_blocker s_selftest_arm_busy_names_the_blocker
+scenario selftest_arm_for_never_replaces_a_live_lease s_selftest_arm_for_never_replaces_a_live_lease
 ```
 
 - [ ] **Step 2: Run them to verify they fail**
@@ -523,18 +574,25 @@ In `lib/SelfTest.mjs`, replace the factory signature (line 3) and the `arm` meth
 
 ```javascript
 export function createSelfTest({ supportedKeys, gate, leaseMs }) {
-  // §7: the lease length is chosen by the caller. An out-of-range or unparseable value clamps rather
-  // than rejecting — it arrives as an IPC string from a shell and must never throw into the host.
+  // §7: the lease length is chosen by the caller, per arm() call. An out-of-range or unparseable
+  // value clamps rather than rejecting — it arrives as an IPC string from a shell and must never
+  // throw into the host process. The constructor argument is only the default.
   const LEASE_DEFAULT = 120000, LEASE_MIN = 1000, LEASE_MAX = 600000;
-  const n = Number(leaseMs);
-  const lease_ms = Number.isFinite(n) && n > 0 ? Math.min(LEASE_MAX, Math.max(LEASE_MIN, n)) : LEASE_DEFAULT;
+  const clampLease = (v, fallback) => {
+    const x = Number(v);
+    return Number.isFinite(x) && x > 0 ? Math.min(LEASE_MAX, Math.max(LEASE_MIN, x)) : fallback;
+  };
+  const defaultLeaseMs = clampLease(leaseMs, LEASE_DEFAULT);
 ```
 
 and
 
 ```javascript
-    arm(now, ctx) {
+    arm(now, ctx, requestedLeaseMs) {
       const busy = (detail) => ({ ok: false, reason: "busy", detail: detail, retryAfterMs: 300 });
+      // Checked first and answered without side effects: a live lease is never replaced. Rebuilding the
+      // instance to change a lease length would drop the old lease silently AND leak the shared gate,
+      // because the discarded instance's end() — the only caller of gate.release("selftest") — never runs.
       if (lease) return busy("leaseActive");
       if (!ctx) return busy("voiceBusy");
       if (!ctx.voiceIdle) return busy("voiceBusy");
@@ -542,42 +600,44 @@ and
       if (ctx.heldKeys && ctx.heldKeys.length) return busy("heldKeys:" + ctx.heldKeys.join(","));
       if ((ctx.pendingCmds || 0) > 0) return busy("pendingCmds:" + ctx.pendingCmds);
       if (!gate.acquire("selftest")) return busy("gate");
-      lease = { id: `st-${++seq}`, until: now + lease_ms, counts: { shortcut: {}, ipc: {} }, down: new Set() };
+      const ms = requestedLeaseMs === undefined ? defaultLeaseMs : clampLease(requestedLeaseMs, defaultLeaseMs);
+      lease = { id: `st-${++seq}`, until: now + ms, counts: { shortcut: {}, ipc: {} }, down: new Set() };
       return { ok: true, id: lease.id };
     },
 ```
 
-Replace every remaining use of the old `leaseMs` identifier inside the module with `lease_ms`.
+The old `leaseMs` identifier is no longer referenced anywhere else in the module; `nextDeadline()` keeps returning `lease.until`.
 
 - [ ] **Step 4: Thread it through Service**
 
-In `Service.qml`, give `rebuildSelftest` a lease argument and add the new verb. Replace `rebuildSelftest` (`:432-435`):
+In `Service.qml`, `rebuildSelftest` is **left exactly as it is** — it must never be called to change a lease length. Only `root.selftestArm` grows an argument. Change its signature and the `selftest.arm` call inside it (`:436-451`):
 
 ```qml
-  property int selftestLeaseMs: 120000
-  function rebuildSelftest() {
-    var keys = Defaults.KEY_NAMES.filter(function(k) { return root.config.keys[k].supported !== false })
-    selftest = SelfTest.createSelfTest({ supportedKeys: keys, gate: voice.gate, leaseMs: root.selftestLeaseMs })
-  }
-  function selftestArmWith(leaseMs) {
-    root.selftestLeaseMs = leaseMs
-    root.rebuildSelftest()
-    return root.selftestArm()
-  }
+  function selftestArm(leaseMs) {                     // leaseMs: undefined or "" means the default
 ```
 
-and in the `IpcHandler` block, beside `selftestArm`:
+and, in the same function, pass it through to the engine call:
 
 ```qml
-    function selftestArmFor(leaseMs: string): string { return JSON.stringify(root.selftestArmWith(leaseMs)) }
+    var r = root.guarded("selftest.arm", function() {
+      return selftest.arm(now, { voiceIdle: s.state === "idle", backendIdleFresh: fresh, heldKeys: engine.heldKeys(), pendingCmds: s.pendingCmds + runner.pending("voice") },
+                          leaseMs === "" || leaseMs === undefined ? undefined : leaseMs)
+    }, { ok: false, reason: "error" })
 ```
 
-`selftestArm()` keeps its zero-argument signature and its existing body, so `tests/fake-remote.sh`'s current calls are untouched.
+In the `IpcHandler` block, keep `selftestArm` zero-argument and add the new verb beside it:
+
+```qml
+    function selftestArm(): string { return JSON.stringify(root.selftestArm(undefined)) }
+    function selftestArmFor(leaseMs: string): string { return JSON.stringify(root.selftestArm(leaseMs)) }
+```
+
+`selftestArm()` keeps its zero-argument IPC signature, so `tests/fake-remote.sh`'s current calls are untouched.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `make check`
-Expected: PASS. `rebuildSelftest` is called from `onKeyEdge`'s guard (`Service.qml:179`) only when no lease is active, so swapping the instance cannot drop a live lease.
+Expected: PASS, including the new "a second arm never replaces a live lease" test. Confirm by inspection that `rebuildSelftest` has no new call site: the only ones are config load and `onKeyEdge`'s `if (!selftestActive)` guard (`Service.qml:179`), both of which already cannot run under a live lease.
 
 - [ ] **Step 6: Commit**
 
@@ -590,11 +650,18 @@ tell 'retry in 300 ms' from 'a key is stuck and will never clear'. arm now
 returns a detail naming the blocker.
 
 The 30 s lease cannot cover the bind sweep or any human-in-the-loop check;
-the default rises to 120 s with a 600 s cap, clamped rather than rejected
-because the value arrives as an IPC string from a shell.
+the length becomes a per-arm() argument defaulting to 120 s with a 600 s
+cap, clamped rather than rejected because it arrives as an IPC string.
 
-selftestArm() keeps its zero-argument arity — fake-remote.sh calls it that
-way — and selftestArmFor(leaseMs) is added beside it."
+Deliberately NOT implemented by rebuilding the SelfTest instance per
+requested lease length. That would drop a live lease silently and also leak
+the shared voice gate, because the discarded instance's end() is the only
+caller of gate.release('selftest') — every later mic apply and recovery
+would then be refused. arm() answers a live lease with leaseActive before
+any side effect.
+
+selftestArm() keeps its zero-argument IPC arity — fake-remote.sh calls it
+that way — and selftestArmFor(leaseMs) is added beside it."
 ```
 
 ---
@@ -1092,7 +1159,7 @@ Main spec §3 asserts "`hl.dsp.global` requests the release event itself, so a s
 
 **Interfaces:**
 - Consumes: `tests/inject-key.py` (Task 4), `selftestArmFor` and `arm`'s `detail` (Task 3), `.lastStuckKey` (Task 2), `timing.stuckMs` (Task 1).
-- Produces: a markdown matrix on stdout, one row per (configuration, key, duration) with `down`/`up` counts, `heldKeys` and `lastStuckKey`; exit 0 only when a configuration qualifies. `~/.config/hypr/omaremote.lua` is left **removed** on exit — Task 7 generates the real one.
+- Produces: a markdown matrix on stdout, one row per (configuration, key, duration) naming the `down`/`up` counts and, explicitly, which edge was **lost** and which was **duplicated**, plus `heldKeys` and `lastStuckKey`; exit 0 only when a configuration qualifies. `~/.config/hypr/omaremote.lua` is left **removed** on exit — Task 7 generates the real one.
 
 - [ ] **Step 1: Write the sweep**
 
@@ -1110,6 +1177,11 @@ set -euo pipefail
 
 LUA=$HOME/.config/hypr/omaremote.lua
 HYPRLAND_LUA=$HOME/.config/hypr/hyprland.lua
+HYPRLAND_BAK=$HYPRLAND_LUA.omaremote-matrix.bak
+REQUIRE_ADDED=0
+# Documented exception to the plan's host-file staging policy: $LUA is a temporary bind module this
+# script owns outright and deletes on exit, so there is nothing to stage against or preserve. The
+# user's own hyprland.lua is NOT an exception — it is backed up and restored byte-for-byte below.
 INJECT=$(dirname "$0")/inject-key.py
 SHELL_CMD=${OMAREMOTE_SHELL:-omarchy-shell}
 LEASE_MS=120000
@@ -1137,7 +1209,14 @@ write_lua() {   # write_lua <one|two>
       fi
     done
   } > "$LUA"
-  grep -q 'require("hypr.omaremote")' "$HYPRLAND_LUA" || printf '%s\n' 'require("hypr.omaremote")' >> "$HYPRLAND_LUA"
+  # The require line is the user's file, so it is restored from a backup rather than sed-deleted:
+  # a blind `sed -i '/require("hypr.omaremote")/d'` on cleanup would also remove an identical line
+  # the user had added themselves. Only a line this script appended is ever taken away.
+  if ! grep -q 'require("hypr.omaremote")' "$HYPRLAND_LUA"; then
+    cp -a "$HYPRLAND_LUA" "$HYPRLAND_BAK"
+    printf '%s\n' 'require("hypr.omaremote")' >> "$HYPRLAND_LUA"
+    REQUIRE_ADDED=1
+  fi
   hyprctl reload >/dev/null
   # NOT $(( ... mode == two ... )): inside arithmetic, bash expands `mode` and `two` as variables,
   # so a string comparison there is silently always true.
@@ -1177,27 +1256,31 @@ trial() {   # trial <key> <neutral> <hold_ms> -> "down up held stuck"
       echo "  .. discarding trial for $key/${ms}ms: unexpected keys seen ($unexpected); do not touch the remote" >&2
       attempt=$((attempt + 1)); sleep 1; continue
     fi
-    local d u held stuck
+    local d u held stuck lost dup
     d=$(jq -r --arg k "$key" '.counts.shortcut[$k].down // 0' <<< "$rep")
     u=$(jq -r --arg k "$key" '.counts.shortcut[$k].up // 0' <<< "$rep")
     held=$(ipc status | jq -r '.heldKeys | join(",")')
     stuck=$(ipc status | jq -r '.lastStuckKey.key // "-"')
-    printf '%s %s %s %s\n' "$d" "$u" "${held:--}" "$stuck"
+    # Name the defect instead of leaving it to be inferred from the counts: the whole point of the
+    # matrix is to say which cells lost or duplicated an edge.
+    lost=""; (( d < 1 )) && lost="down"; (( u < 1 )) && lost="${lost:+$lost+}up"
+    dup=""; (( d > 1 )) && dup="down x$d"; (( u > 1 )) && dup="${dup:+$dup, }up x$u"
+    printf '%s %s %s %s %s %s\n' "$d" "$u" "${lost:--}" "${dup:--}" "${held:--}" "$stuck"
     return 0
   done
   echo "  !! $key/${ms}ms never produced a clean trial" >&2; return 1
 }
 
 sweep() {   # sweep <one|two> -> prints rows, sets QUALIFIES / LOST
-  local mode=$1 k neutral ms row d u held stuck
+  local mode=$1 k neutral ms row d u lost dup held stuck
   QUALIFIES=1; LOST=0
   write_lua "$mode" || { QUALIFIES=0; LOST=99; return 0; }
   for probe in "${PROBES[@]}"; do
     IFS=: read -r k neutral <<< "$probe"
     for ms in "${DURATIONS[@]}"; do
       row=$(trial "$k" "$neutral" "$ms") || { QUALIFIES=0; LOST=$((LOST + 1)); continue; }
-      read -r d u held stuck <<< "$row"
-      printf '| %s | %s | %sms | %s | %s | %s | %s |\n' "$mode" "$k" "$ms" "$d" "$u" "$held" "$stuck"
+      read -r d u lost dup held stuck <<< "$row"
+      printf '| %s | %s | %sms | %s | %s | %s | %s | %s | %s |\n' "$mode" "$k" "$ms" "$d" "$u" "$lost" "$dup" "$held" "$stuck"
       (( d >= 1 )) || { QUALIFIES=0; }
       (( u >= 1 )) || { QUALIFIES=0; LOST=$((LOST + 1)); }
       [[ $held == "-" || -z $held ]] || QUALIFIES=0
@@ -1206,7 +1289,13 @@ sweep() {   # sweep <one|two> -> prints rows, sets QUALIFIES / LOST
   done
 }
 
-cleanup() { rm -f "$LUA"; sed -i '/require("hypr.omaremote")/d' "$HYPRLAND_LUA"; hyprctl reload >/dev/null 2>&1 || true; }
+cleanup() {
+  rm -f "$LUA"
+  if (( REQUIRE_ADDED )) && [[ -f $HYPRLAND_BAK ]]; then
+    cp -a "$HYPRLAND_BAK" "$HYPRLAND_LUA" && rm -f "$HYPRLAND_BAK"
+  fi
+  hyprctl reload >/dev/null 2>&1 || true
+}
 trap cleanup EXIT
 
 echo "Lowering timing.stuckMs for the sweep (must stay above panicMs 1500)."
@@ -1214,8 +1303,8 @@ echo "Set \"stuckMs\": 2000 in ~/.config/omaremote/config.json before running, t
 read -r _
 
 echo
-echo "| config | key | duration | down | up | heldKeys | lastStuckKey |"
-echo "|---|---|---|---|---|---|---|"
+echo "| config | key | duration | down | up | lost | duplicated | heldKeys | lastStuckKey |"
+echo "|---|---|---|---|---|---|---|---|---|"
 sweep one; ONE_Q=$QUALIFIES; ONE_LOST=$LOST
 sweep two; TWO_Q=$QUALIFIES; TWO_LOST=$LOST
 echo
@@ -1475,7 +1564,8 @@ require(\"hypr.omaremote\") line, too many is a leftover generated file."
 - Modify: `host/omaremote-setup` (add `cmd_plugin`, `cmd_mic`, `cmd_verify`, `cmd_all`; extend usage)
 
 **Interfaces:**
-- Consumes: `verify_binds` (Task 7), `tests/inject-key.py` (Task 4), the main spec §3 mic-apply contract (`mic`/`micStatus` IPC, already implemented in Plan 2).
+- Consumes: `verify_binds` and `KEY_ORDER` (Task 7/5), `tests/inject-key.py` (Task 4), `selftestArmFor` (Task 3), the main spec §3 mic-apply contract (`mic`/`micStatus` IPC, already implemented in Plan 2).
+- Acceptance contract for the transport sweep, identical to `tests/bind-matrix.sh`'s: every supported key `down >= 1` and `up >= 1`, nothing held, no key seen that was not injected. Duplicate edges are reported and tolerated. `SelfTest.report().ok` is deliberately **not** used, because it treats `up > 1` as an extra.
 - Produces: `omaremote-setup plugin|mic|verify`, and a bare `omaremote-setup` running every step in order.
 
 - [ ] **Step 1: Add the remaining subcommands**
@@ -1553,13 +1643,27 @@ cmd_verify() {
   done
   sleep 0.5
   local rep; rep=$(ipc selftestReport "$id")
-  if [[ $(jq -r '.ok' <<< "$rep") == true ]]; then
-    say "transport: every supported key delivered exactly one press and one release"
-  else
-    say "transport FAILED:"
-    jq -r '"  missing: \(.missing | join(",")) extras: \(.extras | join(",")) held: \(.held | join(","))"' <<< "$rep" 2>/dev/null || jq . <<< "$rep"
-    return 1
+  # NOT `.ok`: SelfTest.compute() counts down>1 or up>1 as an "extra", so in two-bind mode the
+  # duplicate release that tests/bind-matrix.sh deliberately accepted would fail here — the same
+  # transport would qualify in Task 6 and fail in Task 8. Apply the matrix's contract instead:
+  # every supported key down>=1 and up>=1, nothing held. Duplicates are reported, not fatal.
+  local missing dupes unexpected held
+  missing=$(jq -r '[.counts.shortcut as $c | .missing[]] | join(",")' <<< "$rep")
+  unexpected=$(jq -r --argjson keys "$(printf '%s\n' "${KEY_ORDER[@]}" | jq -R . | jq -s .)" \
+                  '[.counts.shortcut | keys[] | select(. as $k | $keys | index($k) | not)] | join(",")' <<< "$rep")
+  dupes=$(jq -r '[.counts.shortcut | to_entries[] | select(.value.down > 1 or .value.up > 1)
+                 | "\(.key)(down=\(.value.down),up=\(.value.up))"] | join(" ")' <<< "$rep")
+  held=$(jq -r '.held | join(",")' <<< "$rep")
+  [[ -n $dupes ]] && say "  duplicate edges (expected in two-bind mode, tolerated by KeyEngine): $dupes"
+  if [[ -z $missing && -z $unexpected && -z $held ]]; then
+    say "transport: every supported key delivered at least one press and one release"
+    return 0
   fi
+  say "transport FAILED:"
+  [[ -n $missing    ]] && say "  keys missing an edge: $missing"
+  [[ -n $unexpected ]] && say "  keys seen that were never injected: $unexpected"
+  [[ -n $held       ]] && say "  keys still held at the end: $held"
+  return 1
 }
 
 cmd_all() {
@@ -1616,7 +1720,7 @@ Expected: `succeeded` and `audioDevice` of `default`. A residual `errorCount: 1`
 Expected: binds verified, and the transport sweep explicitly `SKIPPED` with "NOT reporting a pass".
 
 Ask the user to run `! sudo -v && ./host/omaremote-setup verify`
-Expected: `transport: every supported key delivered exactly one press and one release`.
+Expected: `transport: every supported key delivered at least one press and one release`. In two-bind mode a `duplicate edges (expected in two-bind mode…)` line appears first and is **not** a failure — the acceptance contract here is deliberately the same one `tests/bind-matrix.sh` used to qualify the configuration, so a transport cannot pass Task 6 and fail Task 8.
 
 - [ ] **Step 6: End-to-end with the real remote**
 
@@ -1640,9 +1744,16 @@ git commit -m "feat(host): plugin, mic mode and verification subcommands
 
 omaremote-setup is now complete end to end and has been run on this host.
 
-verify refuses to claim a pass it did not earn: without root the injector
-cannot write /dev/uinput, so the transport sweep is reported as SKIPPED
-rather than silently omitted from a successful-looking run.
+verify refuses to claim a pass it did not earn: without usable sudo the
+injector cannot write /dev/uinput, so the transport sweep is reported as
+SKIPPED rather than silently omitted from a successful-looking run.
+
+It also does not use SelfTest.report().ok, which counts up>1 as an extra.
+In two-bind mode the duplicate release that bind-matrix.sh deliberately
+accepted would have failed here, so the same transport would have qualified
+in the sweep and failed in verify. Both now apply one contract: every
+supported key down>=1 and up>=1, nothing held, no uninjected key seen;
+duplicates are reported, not fatal.
 
 mic reaches 'system' through the main spec §3 apply contract, polling
 micStatus to a terminal state; DEFAULT_VOICE.mic stays 'remote' and the
