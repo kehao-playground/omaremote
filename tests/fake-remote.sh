@@ -119,7 +119,11 @@ s_stuck_key_bounds_a_lost_release() {   # Task 1/2: a repeat key whose release n
 }
 s_stuck_key_absent_when_release_arrives() {   # the signal must mean something: a normal press leaves it null
   wait_for '.config' true 5 || return 1
-  ipc key up down > /dev/null; sleep 0.2; ipc key up up > /dev/null; sleep 0.1
+  local f=$XDG_CONFIG_HOME/omaremote/config.json
+  jq '.timing.stuckMs = 1600' "$f" > "$F/c.json" && cat "$F/c.json" > "$f"   # same low bound as the lost-release scenario
+  wait_for '.timing.stuckMs' 1600 5 || return 1
+  ipc key up down > /dev/null; sleep 0.2; ipc key up up > /dev/null
+  sleep 2.2                                                                  # past the bound: a wrongly-armed stuck deadline would have fired by now
   [[ $(jget '.lastStuckKey') == null ]] || { echo "    lastStuckKey=$(jget '.lastStuckKey')"; return 1; }
   [[ $(jget '.heldKeys | length') == 0 ]]
 }
