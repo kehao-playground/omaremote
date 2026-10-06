@@ -494,6 +494,7 @@ s_ipc_reset_ends_a_selftest_lease() {   # during a lease the panic key never rea
   [[ $(ipc reset) == ok ]] || return 1
   wait_for '.selftest.active' false 2 || return 1
   [[ $(jget '.hud') != self-test ]] || { echo "    hud=$(jget '.hud')"; return 1; }
+  ipc voice poll - > /dev/null; wait_for ".voice.backendFresh" true 3 || return 1   # the gate must be free again
   local r; r=$(ipc selftestArm)                                                # the gate was released, so a fresh arm succeeds
   [[ $(jq -r .ok <<<"$r") == true ]] || { echo "    arm after reset: $r"; return 1; }
   ipc selftestDisarm "$(jq -r .id <<<"$r")" > /dev/null
