@@ -21,6 +21,7 @@ lint:
 # that's unset in every non-interactive shell (Ruling 7), so `make check` silently skipped integration there
 # even though tests/fake-remote.sh itself recovers the socket fine. Mirror that recovery here.
 check: test lint
+	bash tests/setup-helpers.sh
 	@RUNTIME="$${XDG_RUNTIME_DIR:-/run/user/$$(id -u)}"; \
 	if command -v qs >/dev/null 2>&1 && ls "$$RUNTIME"/wayland-[0-9]* >/dev/null 2>&1; then bash tests/fake-remote.sh; else echo "integration skipped (no Wayland session / quickshell)"; fi
 

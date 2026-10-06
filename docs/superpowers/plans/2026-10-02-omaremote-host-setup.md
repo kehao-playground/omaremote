@@ -1007,7 +1007,14 @@ cmd_deps() {
 cmd_keyd() {
   need keyd
   step "staging $KEYD_CONF for $DEVICE_ID"
-  local tmp; tmp=$(mktemp); trap 'rm -f "$tmp"' RETURN
+  # Correction (2026-10-06): this was `tmp=$(mktemp); trap 'rm -f "$tmp"' RETURN`. A RETURN trap is
+  # not scoped to the function that sets it: it stayed installed, fired again when `main` returned
+  # with `tmp` a dead local, and under `set -u` made a wholly successful run exit non-zero. It also
+  # never fired on `die`, so it leaked on exactly the paths that mattered. Replaced by one
+  # eagerly-created WORKDIR removed by a single EXIT trap -- eagerly, because a lazily-created one
+  # registered from `t=$(mktmp)` would register inside a subshell and the parent would clean up
+  # nothing. See host/omaremote-setup's header and tests/setup-helpers.sh.
+  local tmp=$WORKDIR/omaremote.conf
   gen_keyd_conf > "$tmp"
   sed 's/^/    /' "$tmp"
 
@@ -1053,6 +1060,18 @@ cmd_keyd() {
   fi
 
   step "enabling the service"
+  # Correction (2026-10-06): keyd binds a single socket, so the foreground validation run and the
+  # unit cannot coexist. Enabling while the validation run is alive fails with "failed to create
+  # /var/run/keyd.socket (another instance already running?)" and leaves the unit enabled+failed,
+  # which reads as a rejected config at the end of validating a config. Observed live.
+  local stray; stray=$(stray_keyd)
+  if [[ -n $stray ]]; then
+    say "A keyd instance is running outside the service (pid(s): $stray)."
+    say "Stop it first -- Ctrl-C the foreground run, and quit any 'keyd monitor' -- then:"
+    say "    sudo systemctl enable --now keyd"
+    say "Starting the unit now would fail on the socket, not on the config."
+    return 1
+  fi
   say "Run:  sudo systemctl enable --now keyd"
   say "Then re-run 'omaremote-setup keyd' to confirm it is active."
   systemctl is-active --quiet keyd && say "keyd.service: active" || say "keyd.service: not active yet"
@@ -1116,13 +1135,22 @@ Expected: every tool ok, including a keyd version line, exit 0.
 
 - [ ] **Step 5: Verify the generated conf against `keyd list-keys` before trusting it**
 
+**Correction (2026-10-06).** The original form of this check scraped the `keyd` subcommand's own
+output, which is indented four spaces for human reading — so `^\[main\]` never matched, the `sed`
+range never opened, and `comm` compared two empty sets. "No output" was read as "every name is
+valid"; it would have passed with every key name misspelled. The script therefore grows a `genconf`
+subcommand that prints the conf unindented to stdout, and the check reads that.
+
 ```bash
-./host/omaremote-setup keyd < /dev/null 2>&1 | sed -n '/^\[main\]/,/^$/p' | awk '{print $1; print $3}' | grep -v '^$' | sort -u > /tmp/omaremote-confkeys
+./host/omaremote-setup genconf | sed -n '/^\[main\]/,$p' | awk 'NF && $1 != "[main]" {print $1; print $3}' | sort -u > /tmp/omaremote-confkeys
+wc -l < /tmp/omaremote-confkeys        # must be 26; a count of 0 means the extraction broke, not that the names are fine
 keyd list-keys | sort -u > /tmp/omaremote-validkeys
 comm -23 /tmp/omaremote-confkeys /tmp/omaremote-validkeys
 ```
 
-Expected: no output — every name in the generated conf is a name keyd accepts. Any line printed is a name keyd would reject.
+Expected: 26 names extracted, and no output from `comm` — every name in the generated conf is a name
+keyd accepts. Any line printed is a name keyd would reject. Assert the count, not just the silence:
+an empty extraction is silent too.
 
 - [ ] **Step 6: Run the `keyd` subcommand, answering its prompts**
 
@@ -1495,7 +1523,7 @@ cmd_binds() {
   need hyprctl; need jq
   [[ $BIND_MODE == one || $BIND_MODE == two ]] || die "BIND_MODE must be 'one' or 'two' (settled by tests/bind-matrix.sh); got '$BIND_MODE'"
   step "generating $HYPR_DIR/omaremote.lua ($BIND_MODE-bind)"
-  local tmp; tmp=$(mktemp); trap 'rm -f "$tmp"' RETURN
+  local tmp=$WORKDIR/omaremote.lua      # same RETURN-trap correction as Task 5; WORKDIR is defined there
   gen_lua > "$tmp"
   stage_file "$HYPR_DIR/omaremote.lua" "$tmp"
 
