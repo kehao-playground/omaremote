@@ -45,6 +45,7 @@ Item {
   property string lastError: ""
   property string _lastVoiceErrorReason: ""       // finding #16: voice's own error reason, kept apart from the shared lastError slot
   property var heldKeys: []
+  property var lastStuckKey: null      // { key, at } — set when a key's release never arrived within timing.stuckMs; normal-operation signal only (no edges reach KeyEngine during a self-test lease)
   signal resetHappened()                          // §4.3: BarWidget closes the Panel
 
   // ---- modules ---------------------------------------------------------------
@@ -104,6 +105,11 @@ Item {
     switch (e.type) {
       case "action": root.runAction(e); break
       case "reset": root.onEngineReset(); break
+      case "stuckKey":
+        root.lastStuckKey = { key: e.key, at: Date.now() }
+        root.heldKeys = engine ? engine.heldKeys() : []    // advanceAll() never refreshes this; without it the status keeps reporting a key the engine already released
+        console.log("omaremote: key " + e.key + " exceeded timing.stuckMs; release presumed lost")
+        break
       case "hud": root.hudText = e.text; break
       case "error":
         root.errorCount++; root.lastError = e.reason
@@ -246,6 +252,7 @@ Item {
   // ---- reset (§4.3 hard-coded escape hatch) ------------------------------------
   function onEngineReset() {                        // the engine already cleared its keys before emitting {type:"reset"}
     root.heldKeys = []
+    root.lastStuckKey = null
     root.showFlash("Reset", root.resetFlashMs)     // §6.3 1 s
     if (voice) root.dispatch(root.guarded("voice.abort", function() { return voice.abort(Date.now()) }), "voice")                // §4.3: cancel, never stop
     root.resetHappened()
@@ -509,7 +516,7 @@ Item {
     return JSON.stringify({
       config: !!engine, configInvalid: root.configInvalid, configProblems: root.configProblems,
       timing: root.config ? root.config.timing : null,
-      heldKeys: root.heldKeys, lastAction: root.lastAction, hud: root.hudLine, flash: root.flash,
+      heldKeys: root.heldKeys, lastStuckKey: root.lastStuckKey, lastAction: root.lastAction, hud: root.hudLine, flash: root.flash,
       errorCount: root.errorCount, lastError: root.lastError
       , voice: voice ? (function(s) { return { state: s.state, owner: s.owner, inferred: s.inferred, pendingCmds: s.pendingCmds, gates: s.gates, backendFresh: s.backendFresh } })(voice.snapshot()) : null
       , backend: root.backendClass

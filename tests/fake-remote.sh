@@ -104,6 +104,25 @@ s_ipc_reset_clears_held_keys() {
   [[ $(jget '.heldKeys | join(",")') == ok ]] || return 1
   [[ $(ipc reset) == ok ]] && wait_for '.heldKeys | length' 0
 }
+s_stuck_key_bounds_a_lost_release() {   # Task 1/2: a repeat key whose release never arrives must stop and self-clear
+  wait_for '.config' true 5 || return 1
+  local f=$XDG_CONFIG_HOME/omaremote/config.json
+  jq '.timing.stuckMs = 1600' "$f" > "$F/c.json" && cat "$F/c.json" > "$f"   # above panicMs 1500, so the floor leaves it alone
+  wait_for '.timing.stuckMs' 1600 5 || return 1
+  ipc key up down > /dev/null                                                # pressed, never released
+  wait_for '.heldKeys | length' 1 2 || return 1
+  wait_for '.heldKeys | length' 0 4 || { echo "    heldKeys never cleared: $(jget '.heldKeys | join(",")')"; return 1; }
+  [[ $(jget '.lastStuckKey.key') == up ]] || { echo "    lastStuckKey=$(jget '.lastStuckKey')"; return 1; }
+  local n; n=$(grep -cxF "wtype -k Up" "$F/actions.log")
+  sleep 0.5
+  [[ $(grep -cxF "wtype -k Up" "$F/actions.log") == "$n" ]] || { echo "    actions kept coming after the bound"; return 1; }
+}
+s_stuck_key_absent_when_release_arrives() {   # the signal must mean something: a normal press leaves it null
+  wait_for '.config' true 5 || return 1
+  ipc key up down > /dev/null; sleep 0.2; ipc key up up > /dev/null; sleep 0.1
+  [[ $(jget '.lastStuckKey') == null ]] || { echo "    lastStuckKey=$(jget '.lastStuckKey')"; return 1; }
+  [[ $(jget '.heldKeys | length') == 0 ]]
+}
 s_config_external_reload() {
   wait_for '.config' true 5 || return 1
   local f=$XDG_CONFIG_HOME/omaremote/config.json
@@ -127,6 +146,8 @@ scenario simple_key_fires_on_press s_simple_key_fires_on_press
 scenario repeat s_repeat
 scenario panic_reset s_panic_reset
 scenario ipc_reset_clears_held_keys s_ipc_reset_clears_held_keys
+scenario stuck_key_bounds_a_lost_release s_stuck_key_bounds_a_lost_release
+scenario stuck_key_absent_when_release_arrives s_stuck_key_absent_when_release_arrives
 scenario config_external_reload s_config_external_reload
 scenario corrupt_config_never_overwritten s_corrupt_config_never_overwritten
 
