@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { load, serialize, withPatch, withKey, withDefaultKeys } from "../lib/ConfigFile.mjs";
+import { load, serialize, withPatch, withMerged, withKey, withDefaultKeys } from "../lib/ConfigFile.mjs";
 import { DEFAULT_CONFIG } from "../lib/Defaults.mjs";
 
 test("empty or missing text loads defaults and flags missing (first run creates the file)", () => {
@@ -34,6 +34,19 @@ test("withPatch sets a nested path without touching other fields and deletes on 
   assert.equal(raw.voice.mic, "remote");                 // input untouched
   assert.deepEqual(withPatch({}, ["timing", "holdMs"], 400), { timing: { holdMs: 400 } });
   assert.deepEqual(withPatch({ a: { b: 1 } }, ["a", "b"], undefined), { a: {} });
+});
+
+test("withMerged keeps node fields the caller did not supply (a Timing save must not drop stuckMs)", () => {
+  const raw = { extra: 1, timing: { holdMs: 350, doubleMs: 250, repeatMs: 80, panicMs: 1500, stuckMs: 30000, custom: "x" } };
+  const next = withMerged(raw, ["timing"], { holdMs: 400, doubleMs: 250, repeatMs: 80, panicMs: 1500 });
+  assert.equal(next.timing.stuckMs, 30000);
+  assert.equal(next.timing.custom, "x");
+  assert.equal(next.timing.holdMs, 400);
+  assert.equal(next.extra, 1);
+  assert.equal(raw.timing.holdMs, 350);                  // input untouched
+  assert.deepEqual(withMerged({}, ["timing"], { holdMs: 400 }), { timing: { holdMs: 400 } });
+  assert.deepEqual(withMerged({ timing: 5 }, ["timing"], { holdMs: 400 }), { timing: { holdMs: 400 } });
+  assert.deepEqual(withMerged({ t: { a: 1, b: 2 } }, ["t"], { a: undefined }), { t: { b: 2 } });
 });
 
 test("withKey merges fields into keys[name], deletes undefined fields, keeps unknown fields", () => {
