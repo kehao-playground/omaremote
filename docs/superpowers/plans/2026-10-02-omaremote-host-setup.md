@@ -28,11 +28,11 @@
 
 ## Review Focus
 
-1. **`timing.stuckMs` of `0`, or below the longest key timer.** `num()` (`lib/Config.mjs:7-9`) accepts any finite `v >= 0`, so `0` passes validation and would time every key out on the press itself; any value below `panicMs` (1500) times a panic key out before its reset can fire, silently removing the §4.3 escape hatch — and the sweep procedure itself tells an operator to lower this value. Expected: the value is raised to a safe floor and a config problem says so. → Task 1.
+1. **`timing.stuckMs` of `0`, or below the longest key timer.** `num()` (`lib/Config.mjs:7-9`) accepts any finite `v >= 0`, so `0` passes validation and would time every key out on the press itself; any value below `panicMs` (1500) times a panic key out before its reset can fire, silently removing the §4.3 escape hatch. It is a hand-edited field in `config.json` with no UI, so a plausible typo disables the one hard-coded way out. Expected: the value is raised to a safe floor and a config problem says so. → Task 1.
 2. **`selftestArmFor` with `""`, `"abc"`, `"0"` or `"99999999999"`.** An IPC string arrives from a shell; it must clamp to the default or the cap, never throw into the shell process or arm a zero-length lease that reports success and expires before the first injection. → Task 3.
-3. **A real remote button pressed during the sweep.** Raw `GlobalShortcut` counts include real input (main spec §7 step 6), so a stray press reads as a duplicate-edge failure and would be recorded as the bind configuration's verdict. Expected: the sweep notices the unexpected key, discards that trial, and retries rather than publishing a false matrix cell. → Task 6.
+3. **A real remote button pressed during the sweep.** Raw `GlobalShortcut` counts include real input (main spec §7 step 6), so a stray press reads as a duplicate-edge failure and would be recorded as the bind configuration's verdict. Expected: a press of a *different* key is detected, the trial discarded and retried. A press of the *same* key being injected is indistinguishable in the raw counts — an accepted, documented limitation that no retry can cover. → Task 6.
 4. **`hyprctl binds -j` already carrying `omaremote:` descriptions, or carrying none because the `require` line is missing.** A leftover generated file gives too many; a present file with no `require("hypr.omaremote")` gives zero. Both must be distinguished from each other and from a genuine mismatch, because "zero" and "double" need opposite fixes. → Task 7.
-5. **`stuckKey` while a self-test lease is active, and `reset` racing a stuck timeout.** `root.heldKeys` is only recomputed in `onKeyEdge` (`Service.qml:226`); `stuckKey` arrives via `advanceAll()`, which does not touch it, so the status would keep reporting a key that the engine has already released. → Task 2.
+5. **A stuck timeout reported through a path that never refreshes `heldKeys`.** `root.heldKeys` is recomputed only in `onKeyEdge` (`Service.qml:226`), but `stuckKey` arrives via `advanceAll()`, which does not touch it — so the status would keep naming a key the engine has already released, and only a later `reset` would clear it. → Task 2.
 
 ---
 
@@ -329,7 +329,7 @@ The engine now emits `stuckKey`, but nothing consumes it, and `root.heldKeys` is
 
 **Interfaces:**
 - Consumes: `{ type: "stuckKey", key }` from Task 1, dispatched with `src === "engine"`.
-- Produces: `root.lastStuckKey` — `null`, or `{ key: <string>, at: <epoch ms> }` — published in `statusJson()` as `.lastStuckKey`. Task 6's sweep reads `.lastStuckKey.key` to tell a lost release from a delivered one.
+- Produces: `root.lastStuckKey` — `null`, or `{ key: <string>, at: <epoch ms> }` — published in `statusJson()` as `.lastStuckKey`. Its consumer is the **normal-operation** check in Task 8 step 6, where a non-null value means a release is being lost in real use. It is explicitly *not* an instrument for Task 6's sweep: inside a lease no edge reaches KeyEngine, so `stuckKey` cannot fire there.
 
 - [ ] **Step 1: Write the failing integration scenarios**
 
@@ -421,8 +421,10 @@ never recomputed root.heldKeys — only onKeyEdge did. Without the resync the
 status kept reporting a key the engine had already released, which would
 have blocked the bind sweep's own held-key check.
 
-lastStuckKey is also the sweep's instrument: it distinguishes 'the release
-was lost' from 'the release arrived' by observation instead of inference."
+lastStuckKey is for normal operation, not for the self-test sweep: inside a
+lease onKeyEdge hands edges to selftest.record() and returns, so KeyEngine
+never sees them and cannot time anything out. The sweep uses the lease's own
+down-without-up tracking instead."
 ```
 
 ---
@@ -1158,8 +1160,23 @@ Main spec §3 asserts "`hl.dsp.global` requests the release event itself, so a s
 - Modify: `docs/hw-keymap-xiaomi-voice-remote.md` (the open bind-edge bullet), `docs/superpowers/plans/2026-09-14-omaremote-qml-host-task0.md` ("Correction (2026-10-02)")
 
 **Interfaces:**
-- Consumes: `tests/inject-key.py` (Task 4), `selftestArmFor` and `arm`'s `detail` (Task 3), `.lastStuckKey` (Task 2), `timing.stuckMs` (Task 1).
-- Produces: a markdown matrix on stdout, one row per (configuration, key, duration) naming the `down`/`up` counts and, explicitly, which edge was **lost** and which was **duplicated**, plus `heldKeys` and `lastStuckKey`; exit 0 only when a configuration qualifies. `~/.config/hypr/omaremote.lua` is left **removed** on exit — Task 7 generates the real one.
+- Consumes: `tests/inject-key.py` (Task 4), `selftestArmFor` and `arm`'s `detail` (Task 3), and `selftestReport`'s `.counts.shortcut` and `.held`. It does **not** consume `.lastStuckKey` or `timing.stuckMs`.
+- Produces: a markdown matrix on stdout, one row per (configuration, key, duration) naming the `down`/`up` counts and, explicitly, which edge was **lost**, which was **duplicated**, and what was still **held**; exit 0 only when a configuration qualifies. `~/.config/hypr/omaremote.lua` is left **removed** on exit — Task 7 generates the real one.
+
+**Limitations, stated before the measurement rather than discovered after it:**
+
+- **`.held` must come from the report, never from `ipc status`.** During a lease, `onKeyEdge` passes
+  edges to `selftest.record()` and returns (`Service.qml:213-219`), so KeyEngine never sees them; and
+  `selftestReport` ends the lease, after which `onSelftestEnded()` clears `root.heldKeys`
+  (`Service.qml:456`). The lease's own down-without-up tracking, surfaced as the report's `.held`, is
+  the only valid held-key observation for a trial.
+- **`stuckKey` cannot occur inside a lease**, for the same reason, so it is not evidence about a trial.
+  The sweep therefore neither lowers `timing.stuckMs` nor reads `.lastStuckKey`. `lastStuckKey` remains
+  the right instrument for *normal operation*, which is how Task 8 step 6 uses it.
+- **Same-key human contamination is undetectable.** A trial is discarded when counts appear for a key
+  that was not injected, but a real press of the *same* key being injected is indistinguishable from
+  the injection in the raw counts, and no retry can cover it. That is why not touching the remote is a
+  precondition of the measurement rather than a courtesy.
 
 - [ ] **Step 1: Write the sweep**
 
@@ -1256,31 +1273,36 @@ trial() {   # trial <key> <neutral> <hold_ms> -> "down up held stuck"
       echo "  .. discarding trial for $key/${ms}ms: unexpected keys seen ($unexpected); do not touch the remote" >&2
       attempt=$((attempt + 1)); sleep 1; continue
     fi
-    local d u held stuck lost dup
+    local d u held lost dup
     d=$(jq -r --arg k "$key" '.counts.shortcut[$k].down // 0' <<< "$rep")
     u=$(jq -r --arg k "$key" '.counts.shortcut[$k].up // 0' <<< "$rep")
-    held=$(ipc status | jq -r '.heldKeys | join(",")')
-    stuck=$(ipc status | jq -r '.lastStuckKey.key // "-"')
+    # held comes from the report, which derives it from the lease's own down-without-up tracking.
+    # Reading `ipc status .heldKeys` here would be worthless: during a lease onKeyEdge hands edges to
+    # selftest.record() and returns (Service.qml:213-219), so KeyEngine never sees them and has no
+    # held key -- and selftestReport ends the lease, whose onSelftestEnded() then clears
+    # root.heldKeys outright (Service.qml:456). Likewise .lastStuckKey can never be produced by an
+    # injected edge in this window, so it is not an observation of this trial and is not collected.
+    held=$(jq -r '.held | join(",")' <<< "$rep")
     # Name the defect instead of leaving it to be inferred from the counts: the whole point of the
     # matrix is to say which cells lost or duplicated an edge.
     lost=""; (( d < 1 )) && lost="down"; (( u < 1 )) && lost="${lost:+$lost+}up"
     dup=""; (( d > 1 )) && dup="down x$d"; (( u > 1 )) && dup="${dup:+$dup, }up x$u"
-    printf '%s %s %s %s %s %s\n' "$d" "$u" "${lost:--}" "${dup:--}" "${held:--}" "$stuck"
+    printf '%s %s %s %s %s\n' "$d" "$u" "${lost:--}" "${dup:--}" "${held:--}"
     return 0
   done
   echo "  !! $key/${ms}ms never produced a clean trial" >&2; return 1
 }
 
 sweep() {   # sweep <one|two> -> prints rows, sets QUALIFIES / LOST
-  local mode=$1 k neutral ms row d u lost dup held stuck
+  local mode=$1 k neutral ms row d u lost dup held
   QUALIFIES=1; LOST=0
   write_lua "$mode" || { QUALIFIES=0; LOST=99; return 0; }
   for probe in "${PROBES[@]}"; do
     IFS=: read -r k neutral <<< "$probe"
     for ms in "${DURATIONS[@]}"; do
       row=$(trial "$k" "$neutral" "$ms") || { QUALIFIES=0; LOST=$((LOST + 1)); continue; }
-      read -r d u lost dup held stuck <<< "$row"
-      printf '| %s | %s | %sms | %s | %s | %s | %s | %s | %s |\n' "$mode" "$k" "$ms" "$d" "$u" "$lost" "$dup" "$held" "$stuck"
+      read -r d u lost dup held <<< "$row"
+      printf '| %s | %s | %sms | %s | %s | %s | %s | %s |\n' "$mode" "$k" "$ms" "$d" "$u" "$lost" "$dup" "$held"
       (( d >= 1 )) || { QUALIFIES=0; }
       (( u >= 1 )) || { QUALIFIES=0; LOST=$((LOST + 1)); }
       [[ $held == "-" || -z $held ]] || QUALIFIES=0
@@ -1298,13 +1320,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "Lowering timing.stuckMs for the sweep (must stay above panicMs 1500)."
-echo "Set \"stuckMs\": 2000 in ~/.config/omaremote/config.json before running, then press enter."
-read -r _
-
 echo
-echo "| config | key | duration | down | up | lost | duplicated | heldKeys | lastStuckKey |"
-echo "|---|---|---|---|---|---|---|---|---|"
+echo "| config | key | duration | down | up | lost | duplicated | held |"
+echo "|---|---|---|---|---|---|---|---|"
 sweep one; ONE_Q=$QUALIFIES; ONE_LOST=$LOST
 sweep two; TWO_Q=$QUALIFIES; TWO_LOST=$LOST
 echo
@@ -1336,14 +1354,15 @@ bash -n tests/bind-matrix.sh && echo "syntax ok"
 
 Expected: `syntax ok`.
 
-- [ ] **Step 3: Lower `stuckMs` for the sweep**
+- [ ] **Step 3: Confirm the plugin is in a state the sweep can measure**
 
 ```bash
-jq '.timing.stuckMs = 2000' ~/.config/omaremote/config.json > /tmp/omaremote-cfg.json && cat /tmp/omaremote-cfg.json > ~/.config/omaremote/config.json
-omarchy-shell omaremote status | jq '.timing.stuckMs, .configProblems'
+omarchy-shell omaremote status | jq '{heldKeys, configProblems, voice: .voice.state, backend}'
 ```
 
-Expected: `2000` and no `stuck-ms-raised` problem — 2000 is above `panicMs` 1500, so Task 1's floor leaves it alone. If it comes back as `1501`, the value was below the floor and the sweep would be measuring the clamp instead of the binds.
+Expected: `heldKeys` empty and `voice.state` `idle`; otherwise `arm` answers `heldKeys:…` or `voiceBusy` and the sweep stops before it starts.
+
+`timing.stuckMs` is deliberately **not** touched for the sweep, for the reason in Limitations above: KeyEngine is not in the loop during a lease, so the bound cannot affect anything the sweep observes.
 
 - [ ] **Step 4: Run the sweep**
 
@@ -1351,20 +1370,11 @@ Ask the user to run `! sudo -v && ./tests/bind-matrix.sh` (the script sudos only
 
 Expected: the markdown matrix, then one of the three verdicts. Save the output.
 
-- [ ] **Step 5: Restore `stuckMs`**
-
-```bash
-jq '.timing.stuckMs = 10000' ~/.config/omaremote/config.json > /tmp/omaremote-cfg.json && cat /tmp/omaremote-cfg.json > ~/.config/omaremote/config.json
-omarchy-shell omaremote status | jq '.timing.stuckMs'
-```
-
-Expected: `10000`.
-
-- [ ] **Step 6: If no configuration qualified, stop here**
+- [ ] **Step 5: If no configuration qualified, stop here**
 
 Record the matrix and the failing cells in `docs/hw-keymap-xiaomi-voice-remote.md`, commit it, and report to the user that Task 7 is blocked. Do not generate `omaremote.lua`. Do not pick the least-bad configuration. This is the one branch of the plan where the correct action is to stop with the work incomplete.
 
-- [ ] **Step 7: Record the measured matrix**
+- [ ] **Step 6: Record the measured matrix**
 
 In `docs/hw-keymap-xiaomi-voice-remote.md`, replace the bullet beginning `**How many \`hl.bind\` lines per key is still open.**` with the measured matrix, the verdict, and this paragraph:
 
@@ -1384,7 +1394,7 @@ In `docs/hw-keymap-xiaomi-voice-remote.md`, replace the bullet beginning `**How 
 Make the matching edit to the "Correction (2026-10-02)" section of
 `docs/superpowers/plans/2026-09-14-omaremote-qml-host-task0.md`, replacing its open question with the verdict and a pointer here.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add tests/bind-matrix.sh docs/hw-keymap-xiaomi-voice-remote.md docs/superpowers/plans/2026-09-14-omaremote-qml-host-task0.md

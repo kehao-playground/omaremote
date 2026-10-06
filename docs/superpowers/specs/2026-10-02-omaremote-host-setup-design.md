@@ -107,12 +107,20 @@ who genuinely holds a direction key for more than `stuckMs` will see the repeat 
 the safety boundary doing its job. The remedy is to raise `timing.stuckMs` in `config.json`, not to
 weaken the bound.
 
-### `stuckKey` is also the measurement instrument
+### `stuckKey` is observable, but not by the §5 sweep
 
 Service logs the effect and exposes the most recent one in `statusJson()` as `lastStuckKey`
-(`{ key, at }` or null). This lets §5's measurement distinguish "the release was lost" from "the
-release arrived" by observation instead of inference. The measurement runs with `stuckMs` lowered to
-2000 so each trial settles quickly.
+(`{ key, at }` or null), so a release being lost in **normal operation** is visible rather than
+merely suspected.
+
+**Correction (2026-10-06).** An earlier draft of this section claimed `lastStuckKey` was §5's
+measurement instrument and that the sweep should lower `stuckMs` to 2000. Both were wrong. While a
+self-test lease is active, `onKeyEdge` hands each edge to `selftest.record()` and returns
+(`Service.qml:213-219`), so KeyEngine never receives the edge, accumulates no per-key state, and
+cannot fire `stuckKey` at all; and `selftestReport` ends the lease, after which `onSelftestEnded()`
+clears `root.heldKeys` (`Service.qml:456`). The sweep's valid held-key observation is the report's
+own `.held`, computed from the lease's down-without-up tracking. `lastStuckKey` belongs to the
+end-to-end check with the real remote, not to the sweep.
 
 Editing `stuckMs` from `TimingEditor.qml` is not part of this round; accepting and defaulting it in
 the config schema is.
@@ -212,9 +220,20 @@ place the real neutral keys are available and the question can be settled proper
 
 ### Instrument
 
-The existing self-test lease. `SelfTest.record()` counts raw press/release per key *before*
-`KeyEngine` consumes them (`Service.qml:215`), keeping IPC injections in a separate bucket, which is
-exactly the measurement needed: `counts.shortcut.<key>.{down,up}`.
+The existing self-test lease. `SelfTest.record()` counts raw press/release per key *instead of*
+letting `KeyEngine` consume them (`Service.qml:213-219`), keeping IPC injections in a separate
+bucket, which is exactly the measurement needed: `counts.shortcut.<key>.{down,up}` plus `.held`.
+
+Two consequences of the engine being out of the loop are easy to get wrong, so they are stated here:
+the sweep must read `.held` from the report rather than `heldKeys` from the status, and no
+`stuckKey` can be produced inside a lease.
+
+### Known limitation
+
+A trial is discarded and retried when counts appear for a key that was not injected, but a real
+press of the *same* key being injected is indistinguishable from the injection in the raw counts.
+No retry can cover it, which is why not touching the remote during the sweep is a precondition of
+the measurement rather than a courtesy.
 
 ### Variables
 
@@ -234,12 +253,13 @@ exactly the measurement needed: `counts.shortcut.<key>.{down,up}`.
 3. For each (key, duration): `selftestStatus <id>` to confirm the lease is still active, inject, then
    wait a settle margin.
 4. `selftestReport <id>` for the counts matrix.
-5. Read `ipc status` for `heldKeys` and `lastStuckKey`.
+5. Take the held-key observation from that same report (`.held`), **not** from `ipc status`: by the
+   time the report returns, the lease has ended and `root.heldKeys` has been cleared.
 
 ### Decision rule
 
 A configuration qualifies when, for every duration and both key classes, `down >= 1` and `up >= 1`,
-and `heldKeys` is empty at the end. If both qualify, prefer one bind: fewer generated lines and no
+and the report's `.held` is empty. If both qualify, prefer one bind: fewer generated lines and no
 duplicate releases. If only the two-bind configuration delivers releases, take it — `KeyEngine`
 tolerating a duplicate release is verified, a loss it cannot.
 
