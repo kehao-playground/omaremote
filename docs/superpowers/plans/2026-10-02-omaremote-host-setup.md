@@ -21,7 +21,7 @@
 - The agent has **no root**. Every `sudo` command in this plan is handed to the user to run with `! sudo …`; the plan step says so explicitly and waits for the output.
 - Every host-file write is staged to a temporary file, validated, compared against the current contents, and replaces it only on a difference, keeping the prior version as `.bak`.
 - keyd 2.6.0 from `extra`. Valid key names are whatever `keyd list-keys` prints; all 26 names this device needs were verified on 2026-10-02.
-- `timing.stuckMs` default `10000`. The bind sweep lowers it to `2000` — which must stay above `panicMs` (1500).
+- `timing.stuckMs` default `10000`, and any configured value is raised to a floor above the longest key timer (`panicMs` 1500). The bind sweep neither reads nor changes it: during a self-test lease the raw edges never reach `KeyEngine` (`Service.qml:213-219`), so `stuckMs` cannot affect anything the sweep observes.
 - Self-test lease: default `120000` ms, hard cap `600000` ms.
 - Bind sweep: durations 120 / 600 / 3000 ms; keys `up` (F13, `repeat: true`) and `back` (F18, long non-repeat). `power` (F24) is excluded — its tap action blanks the screen.
 - **A least-bad bind matrix is a diagnostic, never a pass.** If no configuration qualifies, Task 7 does not run, no `~/.config/hypr/omaremote.lua` is generated, and `omaremote-setup` reports failure.
