@@ -825,13 +825,14 @@ if __name__ == "__main__":
 chmod +x tests/inject-key.py
 python3 -c "
 import ctypes
-# _IOW(type, nr, size) = (2<<30)|(size<<16)|(ord(type)<<8)|nr ; _IO = (0<<30)|...
+# asm-generic/ioctl.h: _IOC_NONE=0, _IOC_WRITE=1, _IOC_READ=2, so _IOW carries 1<<30 (NOT 2<<30,
+# which is _IOR). Getting this backwards makes all three _IOW constants look wrong.
 IOC=lambda d,t,n,s:(d<<30)|(s<<16)|(ord(t)<<8)|n
 print('UI_DEV_CREATE ', hex(IOC(0,'U',1,0)))
 print('UI_DEV_DESTROY', hex(IOC(0,'U',2,0)))
-print('UI_SET_EVBIT  ', hex(IOC(2,'U',100,4)))
-print('UI_SET_KEYBIT ', hex(IOC(2,'U',101,4)))
-print('UI_DEV_SETUP  ', hex(IOC(2,'U',3,ctypes.sizeof(ctypes.c_uint16)*4+80+4)))
+print('UI_SET_EVBIT  ', hex(IOC(1,'U',100,4)))
+print('UI_SET_KEYBIT ', hex(IOC(1,'U',101,4)))
+print('UI_DEV_SETUP  ', hex(IOC(1,'U',3,ctypes.sizeof(ctypes.c_uint16)*4+80+4)))
 "
 ```
 
@@ -841,11 +842,17 @@ Expected: the five values printed match the constants in the script. If any diff
 
 Ask the user to run both halves; the reader must be started first. The injector is useless as a judge until this passes.
 
-Terminal A: `! sudo python3 /tmp/claude-1000/*/scratchpad/learn-keys.py /dev/input/by-path/platform-omaremote-inject 20` — if that path does not exist, first run `! ls -l /dev/input/by-id/ /dev/input/by-path/` while the injector is alive, or identify the node with `! grep -A4 omaremote-inject /proc/bus/input/devices`.
+**Correction (2026-10-06).** A uinput device gets no `/dev/input/by-path` entry, so the two-terminal
+procedure originally written here could not run. Replaced by one script that discovers the node from
+`/proc/bus/input/devices` itself (poll until `omaremote-inject` appears, during the injector's settle
+window), reads the events back off it, and prints the measured durations against the requested ones.
+It must treat `ENODEV` on the node as end-of-stream, not failure: the injector destroys its own device
+on exit, which is correct behaviour.
 
-Terminal B: `! sudo ./tests/inject-key.py --seq f13:120,f18:3000 --gap-ms 500`
+Run it as one command under sudo, passing the injector's path. It starts the injector with a long
+`--settle-ms` so the reader can attach before the first event.
 
-Expected in terminal A: `down`/`up` pairs for `KEY_F13` about 0.12 s apart and `KEY_F18` about 3.0 s apart, each within roughly 30 ms of the requested duration. Record the measured durations — Task 6's matrix is only as trustworthy as this number.
+Expected: `down`/`up` pairs for `KEY_F13` about 0.12 s apart and `KEY_F18` about 3.0 s apart, each within roughly 30 ms of the requested duration. Record the measured durations — Task 6's matrix is only as trustworthy as this number.
 
 - [ ] **Step 4: Self-verification check 2 — the events reach Hyprland's bind layer**
 
@@ -854,10 +861,11 @@ Add a temporary ordinary bind (not a `GlobalShortcut`), fire it, confirm it, rem
 ```bash
 cat > ~/.config/hypr/omaremote-injecttest.lua <<'LUA'
 -- TEMPORARY: injector self-verification only; removed in the next step.
-hl.bind("F24", hl.dsp.exec("bash -c 'date +%s%3N >> /tmp/omaremote-inject-proof'"), { description = "omaremote-injecttest" })
+hl.bind("F24", hl.dsp.exec_cmd("bash -c 'date +%s%3N >> /tmp/omaremote-inject-proof'"), { description = "omaremote-injecttest" })
 LUA
 grep -q 'hypr.omaremote-injecttest' ~/.config/hypr/hyprland.lua || printf '%s\n' 'require("hypr.omaremote-injecttest")' >> ~/.config/hypr/hyprland.lua
 hyprctl reload
+hyprctl configerrors            # MANDATORY: reload answers "ok" even when the Lua raised; only this shows it
 hyprctl binds -j | jq -r '.[].description | select(. == "omaremote-injecttest")'
 rm -f /tmp/omaremote-inject-proof
 ```
