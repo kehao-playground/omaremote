@@ -490,12 +490,16 @@ s_selftest_arm_for_never_replaces_a_live_lease() {   # Blocker: rebuilding the i
   ready || return 1
   local id; id=$(ipc selftestArmFor 120000 | jq -r '.id')
   [[ $id == st-* ]] || { echo "    first arm failed: $(ipc selftestArmFor 120000)"; return 1; }
+  sleep 0.7   # past the 500 ms backend-freshness window, which nothing refreshes while a lease idles: the lease check must precede it
+  [[ $(ipc selftestStatus "$id" | jq -r '.active') == true ]] || { echo "    the first lease lapsed"; return 1; }
   local second; second=$(ipc selftestArmFor 60000)
   [[ $(jq -r '.detail' <<< "$second") == leaseActive ]] || { echo "    second arm: $second"; return 1; }
   [[ $(ipc selftestStatus "$id" | jq -r '.active') == true ]] || { echo "    the first lease was dropped"; return 1; }
   [[ $(ipc selftestDisarm "$id") == ok ]] || return 1
   # the gate must be free again: a mic apply would be refused forever if the discarded instance had leaked it
-  [[ $(ipc selftestArmFor 5000 | jq -r '.ok') == true ]] || { echo "    gate still held after disarm"; return 1; }
+  ipc voice poll - > /dev/null; wait_for ".voice.backendFresh" true 3 || return 1   # the 0.7 s sleep let freshness lapse; a backendStale here would not be a gate leak
+  local third; third=$(ipc selftestArmFor 5000)
+  [[ $(jq -r ".ok" <<< "$third") == true ]] || { echo "    re-arm after disarm: $third"; return 1; }
 }
 
 scenario selftest_arm_cold_retry s_selftest_arm_cold_retry

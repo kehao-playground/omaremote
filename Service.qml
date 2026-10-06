@@ -443,6 +443,10 @@ Item {
   function selftestArm(leaseMs) {                     // leaseMs: undefined or "" means the default
     var now = Date.now()
     if (!selftest || !voice) return { ok: false, reason: "not-ready" }
+    // A live lease is the answer regardless of mic or backend state. Checked before the freshness pre-check:
+    // nothing refreshes backendAt while a lease idles, so past 500 ms the pre-check would say backendStale
+    // ("retry, it will clear") for a lease that never clears on its own.
+    if (selftest.active()) return { ok: false, reason: "busy", detail: "leaseActive", retryAfterMs: 300 }
     if (mic && mic.pending()) return { ok: false, reason: "busy", detail: "gate", retryAfterMs: 300 }   // a mic apply holds the shared gate
     var s = voice.snapshot()
     var fresh = s.backend === "idle" && s.backendFresh && now - s.backendAt <= 500
