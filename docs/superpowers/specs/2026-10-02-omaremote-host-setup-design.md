@@ -325,8 +325,8 @@ length becomes caller-chosen, and the default rises to 120 s with a 600 s cap.
 
 `selftestArm()` is a zero-argument `IpcHandler` function and `tests/fake-remote.sh` calls it that way,
 so its arity is not changed. A new verb `selftestArmFor(leaseMs: string)` is added; both delegate to
-one `root.selftestArm(leaseMs)`, with `selftestArm()` passing the default. An out-of-range or
-unparseable value is clamped, not rejected.
+one `root.selftestArm(leaseMs)`, with `selftestArm()` passing the default. Out-of-range values are
+clamped to [1000, 600000] ms; zero, negative, and unparseable values fall back to the 120 s default.
 
 ## 8. `host/omaremote-setup`
 
