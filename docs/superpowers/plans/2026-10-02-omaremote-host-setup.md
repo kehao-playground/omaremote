@@ -1456,6 +1456,30 @@ known-defective configuration for being the best of what was seen."
 
 ### Task 7: Generate the real Hyprland binds
 
+**Correction (2026-10-07), from Task 6's measurement — Task 7 gains a step the plan never had.**
+
+`BIND_MODE` is **`one`**: a single `hl.bind` per key, measured 12/12 clean at 120/600/3000 ms on both
+a `repeat: true` key and a long non-repeat key. Two binds duplicate the release in every cell. Main
+spec §3 was right; the plan's premise that measurement had disproved it was mistaken, and Task 9 must
+not "correct" §3's Hyprland claim.
+
+Before the generated binds can match anything, `~/.config/hypr/input.lua` needs the xkb option
+`fkeys:basic_13-24`. Without it `/usr/share/X11/xkb/symbols/pc` leaves `<FK13>`–`<FK24>` unmapped and
+`inet(evdev)` gives them `XF86Tools` / `XF86Launch5-9` / `XF86AudioMicMute` / `XF86Touchpad*`, with
+only `F19` and `F24` keeping their own names — so eleven of thirteen generated binds are
+unmatchable and the remote does nothing. `omaremote-setup binds` must therefore manage that option,
+and:
+
+- `kb_options` **replaces rather than appends**, so Omarchy's own
+  `compose:caps,shift:both_capslock_cancel` has to be repeated alongside it. Read the live value from
+  `hyprctl getoption input:kb_options` rather than hard-coding it.
+- `hyprctl keyword input:kb_options …` cannot set it — "keyword can't work with non-legacy parsers".
+  It must be written into `input.lua` and applied with `hyprctl reload`.
+- `mic` is `XF86Launch1`, not `XF86Tools` (`KEY_PROG1` is `<I156>`). `lib/Defaults.mjs` is corrected
+  and `tests/Config.test.mjs` now asserts all 13 keysyms are distinct — before the fix `up` and `mic`
+  both resolved to `XF86Tools`.
+- Every `hyprctl reload` in this task is followed by `hyprctl configerrors`, for the Task 4 reason.
+
 Runs **only** if Task 6 produced a qualifying configuration.
 
 **Files:**

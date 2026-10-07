@@ -23,7 +23,9 @@ panic key is available and no `PANIC_FALLBACK_ORDER` entry is needed.
 ## Mapping
 
 Physical code as emitted by the remote → neutral key from `lib/Defaults.mjs NEUTRAL_KEYS` → the
-keysym a Hyprland bind uses.
+keysym a Hyprland bind uses. The `F13`–`F24` column holds **only** with the xkb option
+`fkeys:basic_13-24` applied; without it those keycodes produce `XF86Tools` / `XF86Launch5-9` /
+`XF86AudioMicMute` / `XF86Touchpad*` instead. See the consequences section.
 
 | logical | remote emits | code | keyd neutral | Hyprland keysym |
 |---|---|---|---|---|
@@ -39,7 +41,7 @@ keysym a Hyprland bind uses.
 | volup | `KEY_VOLUMEUP` | 115 | `f22` | `F22` |
 | voldown | `KEY_VOLUMEDOWN` | 114 | `f23` | `F23` |
 | power | `KEY_POWER` | 116 | `f24` | `F24` |
-| mic | `KEY_F5` | 63 | `prog1` | `XF86Tools` |
+| mic | `KEY_F5` | 63 | `prog1` | `XF86Launch1` |
 
 Every button delivered a clean press **and** release pair (~0.2 s apart), with no autorepeat held
 back by the kernel — the engine's tap/hold/repeat discrimination has real edges to work with.
@@ -82,12 +84,72 @@ back by the kernel — the engine's tap/hold/repeat discrimination has real edge
 
   keyd's own key names are assumed to be the lowercased `KEY_*` stems; `keyd check` must validate the
   file before it replaces anything (spec §7 step 2 already requires this).
-- **How many `hl.bind` lines per key is still open.** Measured on this remote via `XF86Back` (keyd
-  absent): one bind delivers both edges for a short press but loses the release on a long press
-  (leaving the key in `heldKeys`); two binds (press + `{ release = true }`) deliver the release but
-  double it on short presses. The engine tolerates the duplicate, not the loss. Settle it in Plan 3
-  against the real keyd F-keys with the self-test lease — see "Correction (2026-10-02)" in
-  `docs/superpowers/plans/2026-09-14-omaremote-qml-host-task0.md`.
+- **Settled 2026-10-07 by measurement: ONE bind per key.** `tests/bind-matrix.sh`, with keyd
+  installed, the real neutral keys, and durations driven by `tests/inject-key.py` (measured accurate
+  to under 1 ms). `up`/F13 is a `repeat: true` key, exercising the engine's `repeating` phase;
+  `back`/F18 is a long non-repeat key, exercising `held`.
+
+  | config | key | duration | down | up | lost | duplicated | held |
+  |---|---|---|---|---|---|---|---|
+  | one | up | 120ms | 1 | 1 | - | - | - |
+  | one | up | 600ms | 1 | 1 | - | - | - |
+  | one | up | 3000ms | 1 | 1 | - | - | - |
+  | one | back | 120ms | 1 | 1 | - | - | - |
+  | one | back | 600ms | 1 | 1 | - | - | - |
+  | one | back | 3000ms | 1 | 1 | - | - | - |
+  | two | up | 120ms | 1 | 2 | - | up x2 | - |
+  | two | up | 600ms | 1 | 2 | - | up x2 | - |
+  | two | up | 3000ms | 1 | 2 | - | up x2 | - |
+  | two | back | 120ms | 1 | 2 | - | up x2 | - |
+  | two | back | 600ms | 1 | 2 | - | up x2 | - |
+  | two | back | 3000ms | 1 | 2 | - | up x2 | - |
+
+  A single `hl.bind` delivers both edges at every duration on both key classes — no loss, no
+  duplication, nothing left held. Two binds duplicate the release at every duration. So main spec §3
+  was **right**: `hl.dsp.global` does request the release event itself, and the plan's own premise
+  that live measurement had disproved it was mistaken.
+
+  **Why the 2026-10-02 round concluded the opposite.** That round measured `XF86Back` — the remote's
+  native `KEY_BACK` — by hand, because 11 of the 13 native codes collided with the keyboard, and it
+  reported a release lost on a long press. It does not reproduce here at 3000 ms. The honest summary
+  is that the earlier result came from a hand-timed press on a different key and a different code
+  path, and should not have been promoted to a claim about the bind layer. This round controls the
+  duration to under a millisecond and reads raw edge counts out of the self-test lease.
+
+  **This measurement was impossible until an xkb option was added — and the first attempt silently
+  measured nothing.** See the next bullet; 12 of 12 cells came back `down=0, up=0`, which is not
+  what a lost release edge looks like.
+
+- **`hl.bind("F13", …)` cannot match without `fkeys:basic_13-24`.** `/usr/share/X11/xkb/symbols/pc`
+  never maps `<FK13>`–`<FK24>`. The default `inet(evdev)` keymap does, and hands them out as:
+
+  | keyd neutral | keysym without the option |
+  |---|---|
+  | `f13` | `XF86Tools` |
+  | `f14`–`f18` | `XF86Launch5`–`XF86Launch9` |
+  | `f19` | `F19` |
+  | `f20` | `XF86AudioMicMute` |
+  | `f21`–`f23` | `XF86TouchpadToggle` / `XF86TouchpadOn` / `XF86TouchpadOff` |
+  | `f24` | `F24` |
+
+  Only `F19` and `F24` keep their own names. So every bind this project generates was unmatchable
+  except `home` and `power`. The fix is the xkb option `fkeys:basic_13-24`
+  (`/usr/share/X11/xkb/rules/evdev`), which maps `<FK13>`–`<FK24>` to `F13`–`F24` — exactly what
+  `lib/Defaults.mjs NEUTRAL_KEYS` already declares, so no key table changes. `kb_options` **replaces
+  rather than appends**, so Omarchy's own `compose:caps,shift:both_capslock_cancel` must be repeated
+  alongside it. `hyprctl keyword input:kb_options` cannot set it — "keyword can't work with
+  non-legacy parsers" — so it has to live in `~/.config/hypr/input.lua`.
+
+  Binding the actual `XF86*` keysyms instead was rejected: it needs no keymap change, but it binds
+  semantically real keys (mic mute, touchpad toggle), and it is outright broken for this key set
+  because `f13` yields `XF86Tools` and `mic`/`prog1` was *recorded* as `XF86Tools` too — see below.
+
+- **`mic` is `XF86Launch1`, not `XF86Tools` (corrected 2026-10-07).** `KEY_PROG1` is `<I156>`, which
+  `symbols/inet` maps to `XF86Launch1`. The table below said `XF86Tools`, which is what `<FK13>`
+  produces — so before this was corrected, `up` and `mic` resolved to the same keysym and one of them
+  could never have fired. Verified by injecting `prog1` against binds on both names: `XF86Launch1`
+  fired. `tests/Config.test.mjs` now asserts all 13 keysyms are distinct, which is the assertion that
+  would have caught the collision.
 - **End-to-end verified pre-keyd:** remote button → libinput/xkb → Hyprland bind → `GlobalShortcut`
   → engine → action, with `back:tap:Escape` and `back:hold:BackSpace` observed from the remote's own
   Back button on 2026-10-02.

@@ -61,10 +61,18 @@ test("keyClass classifies keys", () => {
   assert.deepEqual(keyClass({ tap: { type: "none" }, panic: true, double: { type: "none" } }), { long: false, panic: true, double: true, simple: false });
 });
 
-test("neutral key table covers all 13 keys with unique keyd names", () => {
+test("neutral key table covers all 13 keys with unique keyd names and keysyms", () => {
   const names = KEY_NAMES.map(k => NEUTRAL_KEYS[k].keyd);
   assert.equal(new Set(names).size, 13);
-  assert.equal(NEUTRAL_KEYS.mic.keysym, "XF86Tools");
+  // Measured on the host 2026-10-07, not assumed: KEY_PROG1 is <I156>, which symbols/inet maps to
+  // XF86Launch1. The table said XF86Tools, which is what <FK13> (keyd f13, our `up`) produces --
+  // so before this was corrected, `up` and `mic` resolved to the SAME keysym and one of them could
+  // never fire. Verified by injecting prog1 against binds on both names: XF86Launch1 fired.
+  assert.equal(NEUTRAL_KEYS.mic.keysym, "XF86Launch1");
+  // The collision above is the reason this is asserted at all: every keysym must be distinct, or
+  // two logical keys fight over one bind.
+  const syms = KEY_NAMES.map(k => NEUTRAL_KEYS[k].keysym);
+  assert.equal(new Set(syms).size, 13);
 });
 
 test("timing.stuckMs is raised above the longest key timer, with a problem recorded", () => {

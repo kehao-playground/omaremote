@@ -11,7 +11,7 @@ were run with the user's pre-granted go-ahead.
 | ES modules (`.mjs` named exports, Map/Set/spread/template/default params/includes) | **FAIL** (object spread) / pass (everything else) | see "ES-modules / object-spread finding" below; `es` output after work-around: `{"keys":13,"map":1,"set":2,"spread":3,"tpl":"t2","includes":true,"defaults":5,"engineAction":"action"}` |
 | (1) bar-widget + service kinds; widget reaches service via `bar.shell.serviceFor` | pass | `counts` → `"widget":true` |
 | (2) service-owned PanelWindow | pass | `counts` → `"hudVisible":true` after a press |
-| (3) one `global` bind delivers press and release | **PASS for short presses; long-press release unresolved** (2026-10-02, real remote) | see "GlobalShortcut press+release finding", "Resolution" and "Correction (2026-10-02)" below |
+| (3) one `global` bind delivers press and release | **PASS** — settled 2026-10-07 by measurement (Plan 3 Task 6): one bind, both edges, 12/12 cells at 120/600/3000 ms | see "GlobalShortcut press+release finding", "Resolution" and "Correction (2026-10-02)" below |
 | (4) Voxtype capture stream only while recording | pass | idle `0`, recording `1`, after cancel `0` |
 
 Versions: Hyprland 0.56.2 (commit `efb50993`), Quickshell 0.3.1 (Arch package), voxtype 1.0.1,
@@ -212,17 +212,46 @@ short presses. `lib/KeyEngine.mjs` tolerates a duplicate `up` (verified directly
 tap-then-hold with duplicated releases all resolve one action and leave `heldKeys` empty), so the
 duplicate is harmless; a *missing* release is not.
 
-**Unresolved, and deliberately left to Plan 3:** which configuration is correct for the keys the
-product actually uses. Everything above was measured on a pre-keyd workaround key (`XF86Back`, a
-consumer-control key) because the remote's other twelve codes collide with the keyboard. The real
-path is keyd → `F13`–`F24`/`prog1`, plain function keys, and Plan 3 can settle it cheaply: install
-the keyd conf, then arm the self-test lease once per bind configuration and compare
-`counts.shortcut.<key>` for a short and a long press of every key. Do not assume either
-configuration until that measurement exists.
+**Settled 2026-10-07 (Plan 3 Task 6): ONE bind per key.** With keyd installed, the real neutral keys,
+and press durations driven by `tests/inject-key.py` (accurate to under 1 ms), a single `hl.bind`
+delivered both edges in 12 of 12 cells — `up`/F13 (a `repeat: true` key) and `back`/F18 (a long
+non-repeat key) at 120, 600 and 3000 ms — with nothing lost, duplicated or left held. Two binds
+duplicated the release in all 12. The matrix is in
+`docs/hw-keymap-xiaomi-voice-remote.md`; the sweep is `tests/bind-matrix.sh`.
 
-**Robustness finding for the spec:** a lost release leaves the key in `heldKeys` indefinitely, and
-for a `repeat: true` key that means an unbounded action stream (observed: the `up` runaway). Only the
-hard-coded panic reset recovers it, which requires the panic key's own press/release to be working.
-A stuck-key timeout in `lib/KeyEngine.mjs` — release a key held beyond, say, `max(holdMs, panicMs) ×
-N` and stop any repeat — would make this self-healing. §4.1/§4.3 currently say nothing about it.
+So the table above does **not** generalise, and the pessimistic reading of it was wrong: main spec §3's
+claim that `hl.dsp.global` requests the release event itself is correct. Three things about the
+2026-10-02 round explain the difference, and all three are reasons not to have promoted it to a rule:
+
+1. **Different key, different code path.** `XF86Back` is the remote's native `KEY_BACK`, a
+   consumer-control code. The product's path is keyd → `F13`–`F24`, plain function keys.
+2. **Hand-timed presses.** "Long press (~2 s)" was a human holding a button. The 3000 ms cell above is
+   accurate to under a millisecond, read back off the injector's own evdev node.
+3. **The modifier row was always a separate phenomenon.** `SUPER + F12` losing the release is the
+   modmask ceasing to match once the modifier is released first — still true, and still a reason never
+   to use modifier combinations. It is not evidence about unmodified keys.
+
+**A trap discovered while settling this, which this document's `F13`–`F24` assumption walked into.**
+`/usr/share/X11/xkb/symbols/pc` never maps `<FK13>`–`<FK24>`; the default `inet(evdev)` keymap gives
+them `XF86Tools`, `XF86Launch5`–`Launch9`, `XF86AudioMicMute` and `XF86Touchpad*`, with only `F19` and
+`F24` keeping their own names. So "the real path is keyd → `F13`–`F24`, plain function keys" was not
+true of this host: those binds could not match at all. The first sweep returned `down=0, up=0` in all
+12 cells. The xkb option `fkeys:basic_13-24` makes `F13`–`F24` real, and the measurement above was
+taken with it applied. Details and the full keysym table are in
+`docs/hw-keymap-xiaomi-voice-remote.md`.
+
+**Robustness finding for the spec — IMPLEMENTED 2026-10-06 (Plan 3 Task 1).** A lost release left the
+key in `heldKeys` indefinitely, and for a `repeat: true` key that meant an unbounded action stream
+(observed: the `up` runaway). `lib/KeyEngine.mjs` now arms one absolute per-key bound, `stuckAt =
+press + timing.stuckMs` (default 10 s), checked before any phase logic, emitting a single
+`{ type: "stuckKey", key }` and returning the key to `idle`. `lib/Config.mjs` raises any configured
+`stuckMs` below `max(holdMs, panicMs, doubleMs) + 1` so the bound can never pre-empt a key's own
+timer — including the panic reset's. `Service.qml` publishes `lastStuckKey` and a monotonic
+`stuckKeyCount`.
+
+Worth noting for anyone re-reading the trade-off above: this bound is what made the one-bind
+configuration safe to choose. When this document was written, a lost release on a repeat key was
+catastrophic and recoverable only by the panic reset, so the duplicate-release cost of two binds
+looked cheap. The premise changed, not merely the taste — and in the end the measurement showed one
+bind loses nothing anyway.
 

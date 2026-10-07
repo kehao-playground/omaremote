@@ -22,6 +22,7 @@ lint:
 # even though tests/fake-remote.sh itself recovers the socket fine. Mirror that recovery here.
 check: test lint
 	bash tests/setup-helpers.sh
+	bash tests/matrix-helpers.sh
 	@RUNTIME="$${XDG_RUNTIME_DIR:-/run/user/$$(id -u)}"; \
 	if command -v qs >/dev/null 2>&1 && ls "$$RUNTIME"/wayland-[0-9]* >/dev/null 2>&1; then bash tests/fake-remote.sh; else echo "integration skipped (no Wayland session / quickshell)"; fi
 
