@@ -8,10 +8,25 @@ test("parseKeys splits modifiers and key, case-insensitive modifiers", () => {
   assert.deepEqual(parseKeys("ctrl+c"), { mods: ["ctrl"], key: "c" });
 });
 
-test("key action maps to wtype with press/release modifier pairs in reverse order", () => {
-  assert.deepEqual(toArgv({ type: "key", keys: "ctrl+shift+Return" }),
-    { kind: "process", argv: ["wtype", "-M", "ctrl", "-M", "shift", "-k", "Return", "-m", "shift", "-m", "ctrl"] });
-  assert.deepEqual(toArgv({ type: "key", keys: "Up" }), { kind: "process", argv: ["wtype", "-k", "Up"] });
+test("key action maps to a send_key_state down/up pair, not wtype", () => {
+  // wtype is not usable for this: its virtual keyboard appearing while the triggering key is still
+  // physically held destroys that key's release edge, so a hold or repeat action leaves the key
+  // stuck until timing.stuckMs. Measured on the host 2026-10-07 against the real remote and
+  // reproduced with an injected 2000ms press; a Hyprland-native dispatch in the same position keeps
+  // the release. Omarchy's own clipboard bindings avoid wtype for the same class of reason
+  // ("the physically held SUPER merges into the injected chord at the seat").
+  assert.deepEqual(toArgv({ type: "key", keys: "ctrl+shift+Return" }), {
+    kind: "keyseq",
+    down: 'hl.dsp.send_key_state({ mods = "CTRL SHIFT", key = "Return", state = "down" })',
+    up: 'hl.dsp.send_key_state({ mods = "CTRL SHIFT", key = "Return", state = "up" })',
+  });
+  // mods is REQUIRED by the dispatcher -- omitting it answers "hl.send_key_state: 'mods' is
+  // required" -- so the no-modifier case is an empty string, not an absent field. Verified live.
+  assert.deepEqual(toArgv({ type: "key", keys: "Up" }), {
+    kind: "keyseq",
+    down: 'hl.dsp.send_key_state({ mods = "", key = "Up", state = "down" })',
+    up: 'hl.dsp.send_key_state({ mods = "", key = "Up", state = "up" })',
+  });
 });
 
 test("dispatch action is a Hyprland dispatch string, no process", () => {

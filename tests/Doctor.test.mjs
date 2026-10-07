@@ -7,7 +7,7 @@ import { DEFAULT_CONFIG, KEY_NAMES } from "../lib/Defaults.mjs";
 const config = normalizeConfig({ ...DEFAULT_CONFIG, keys: { ...DEFAULT_CONFIG.keys, mic: { supported: false } } }).config;
 const supported = KEY_NAMES.filter(k => k !== "mic");
 const good = () => ({
-  tools: { keyd: true, wtype: true, playerctl: true, wpctl: true, "pw-dump": true, voxtype: true, evtest: true, jq: true, node: true },
+  tools: { keyd: true, playerctl: true, wpctl: true, "pw-dump": true, voxtype: true, evtest: true, jq: true, node: true },
   keyd: { enabled: true, active: true, checkOk: true, grabbed: true },
   hypr: { required: true, descriptions: supported.map(k => `omaremote:${k}`) },
   voxtype: { version: "0.8.1", statusClass: "idle", outputMode: "type", audioDevice: "G20S PRO" },
@@ -18,6 +18,17 @@ const good = () => ({
   now: 2000,
 });
 const row = (rows, id) => rows.find(r => r.id === id);
+
+test("wtype is not a required tool: key actions no longer spawn it", () => {
+  // Key actions are dispatched as send_key_state down/up pairs through Hyprland. wtype's virtual
+  // keyboard destroyed the release edge of the key that triggered it (measured 2026-10-07), so the
+  // product no longer runs it at all -- and doctor must not send the user to install a package
+  // nothing uses, nor report a problem when it is absent.
+  const f = good();
+  delete f.tools.wtype;
+  const r = row(evaluate(f, config), "tools");
+  assert.equal(r.status, "pass", `tools row was "${r.status}": ${r.detail}`);
+});
 
 test("all-good facts in remote mode: every applicable row passes and summary is ready", () => {
   const rows = evaluate(good(), config);
@@ -73,10 +84,10 @@ test("last capture: null is unknown (not yet verified); mismatch is a warning", 
 test("panic key, tools, keyd and config rows", () => {
   const noPanic = normalizeConfig({ ...DEFAULT_CONFIG, keys: { ...DEFAULT_CONFIG.keys, menu: { ...DEFAULT_CONFIG.keys.menu, supported: false } } }).config;
   assert.equal(row(evaluate(good(), noPanic), "panic-key").status, "fail");
-  const f = good(); f.tools.wtype = false; f.keyd.active = false; f.configProblems = [{ code: "action-invalid", message: "ok.tap bad" }];
+  const f = good(); f.tools.playerctl = false; f.keyd.active = false; f.configProblems = [{ code: "action-invalid", message: "ok.tap bad" }];
   const rows = evaluate(f, config);
   assert.equal(row(rows, "tools").status, "fail");
-  assert.match(row(rows, "tools").detail, /wtype/);
+  assert.match(row(rows, "tools").detail, /playerctl/);
   assert.equal(row(rows, "keyd-service").status, "fail");
   assert.equal(row(rows, "keyd-service").fix, "sudo systemctl enable --now keyd");
   assert.equal(row(rows, "config-valid").status, "fail");
@@ -109,11 +120,11 @@ test("tools fix: only voxtype missing -> omarchy-update", () => {
   assert.equal(r.fix, "omarchy-update");
 });
 
-test("tools fix: wtype and voxtype missing -> pacman install wtype && omarchy-update", () => {
-  const f = good(); f.tools.wtype = false; f.tools.voxtype = false;
+test("tools fix: a package tool and voxtype missing -> pacman install it && omarchy-update", () => {
+  const f = good(); f.tools.playerctl = false; f.tools.voxtype = false;
   const r = row(evaluate(f, config), "tools");
   assert.equal(r.status, "fail");
-  assert.equal(r.fix, "sudo pacman -S --needed wtype && omarchy-update");
+  assert.equal(r.fix, "sudo pacman -S --needed playerctl && omarchy-update");
 });
 
 test("voxtype-version: tools.voxtype false with no version -> fail with voxtype not installed", () => {
@@ -125,7 +136,7 @@ test("voxtype-version: tools.voxtype false with no version -> fail with voxtype 
 });
 
 test("summarize: tools fail does not mark summary unconfigured in remote mode", () => {
-  const f = good(); f.tools.wtype = false;
+  const f = good(); f.tools.playerctl = false;
   const rows = evaluate(f, config);
   assert.equal(row(rows, "tools").status, "fail");
   assert.equal(summarize(rows, config), "ready");

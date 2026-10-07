@@ -238,12 +238,51 @@ Item {
   }
 
   // ---- actions (§4.4) ----------------------------------------------------------
+  // A key action is a send_key_state down/up pair rather than one wtype process, because wtype's
+  // virtual keyboard appearing while the triggering key is still held destroys that key's release
+  // edge (measured 2026-10-07). The two halves are spaced: Omarchy's own bindings use 50 ms and
+  // note that the split works around Hyprland leaving synthetic key state stuck or repeating.
+  //
+  // The releases are a queue, not one restartable timer. A `repeat: true` key fires every
+  // timing.repeatMs -- 80 ms by default, and settable lower -- so a single timer restarted on each
+  // press would discard the pending release of the previous one and leave synthetic keys down.
+  readonly property int keyUpDelayMs: 50
+  property var pendingKeyUps: []
+  function dispatchLua(cmd) {
+    if (root.dispatchViaHyprctl) Quickshell.execDetached(["hyprctl", "dispatch", cmd])
+    else Hyprland.dispatch(cmd)
+  }
+  function queueKeyUp(cmd) {
+    var q = root.pendingKeyUps.slice()
+    q.push({ cmd: cmd, at: Date.now() + root.keyUpDelayMs })
+    root.pendingKeyUps = q
+    if (!keyUpTimer.running) keyUpTimer.restart()
+  }
+  function flushKeyUps() {
+    var now = Date.now(), still = [], i
+    for (i = 0; i < root.pendingKeyUps.length; i++) {
+      var p = root.pendingKeyUps[i]
+      if (p.at <= now) root.dispatchLua(p.cmd); else still.push(p)
+    }
+    root.pendingKeyUps = still
+    if (still.length) {
+      var soonest = still[0].at
+      for (i = 1; i < still.length; i++) if (still[i].at < soonest) soonest = still[i].at
+      keyUpTimer.interval = Math.max(1, soonest - now)
+      keyUpTimer.restart()
+    }
+  }
+  Timer { id: keyUpTimer; interval: root.keyUpDelayMs; repeat: false; onTriggered: root.flushKeyUps() }
+
   function runAction(e) {
     if (selftest && selftest.active()) return   // §7 step 6: no real actions under a lease
     var r = Actions.toArgv(e.action)
     if (r.kind === "dispatch") {
       if (root.dispatchViaHyprctl) Quickshell.execDetached(["hyprctl", "dispatch"].concat(r.cmd.split(" ")))
       else Hyprland.dispatch(r.cmd)
+    } else if (r.kind === "keyseq") {
+      root.dispatchLua(r.down)
+      root.queueKeyUp(r.up)
     } else if (r.kind === "process") Quickshell.execDetached(r.argv)
     root.lastAction = e.key + ":" + e.trigger + (e.repeat ? ":repeat" : "") + ":" + Actions.describe(e.action)
     if (e.trigger !== "tap" && root.config && root.config.voice.actionFlash)
@@ -254,6 +293,12 @@ Item {
 
   // ---- reset (§4.3 hard-coded escape hatch) ------------------------------------
   function onEngineReset() {                        // the engine already cleared its keys before emitting {type:"reset"}
+    // Release any synthetic keys still pending. The reset exists to escape a stuck state, so it
+    // must not leave one of its own behind.
+    var pending = root.pendingKeyUps
+    root.pendingKeyUps = []
+    keyUpTimer.stop()
+    for (var i = 0; i < pending.length; i++) root.dispatchLua(pending[i].cmd)
     root.heldKeys = []
     root.lastStuckKey = null
     root.showFlash("Reset", root.resetFlashMs)     // §6.3 1 s

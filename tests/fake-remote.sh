@@ -22,6 +22,18 @@ pass=0; fail=0; failed=(); HPID=""
 F=$OMAREMOTE_FAKE_DIR
 HARNESS=$F/harness # materialized by start_harness — Quickshell only loads QML under its config root
 
+# A key action is now a send_key_state down/up pair dispatched through Hyprland, not one wtype
+# process: wtype's virtual keyboard, created while the triggering key is still held, destroys that
+# key's release edge (measured on the host 2026-10-07). In the harness OMAREMOTE_DISPATCH=hyprctl,
+# so each half lands in actions.log as a fake-hyprctl invocation. Assert on the `down` half: it is
+# emitted at the moment the action fires, whereas the `up` is queued 50 ms later.
+kdown() {   # kdown <key> [MODS] -> the exact actions.log line for that key action's press
+  printf 'hyprctl dispatch hl.dsp.send_key_state({ mods = "%s", key = "%s", state = "down" })' "${2:-}" "$1"
+}
+kup() {     # kup <key> [MODS] -> the matching release line
+  printf 'hyprctl dispatch hl.dsp.send_key_state({ mods = "%s", key = "%s", state = "up" })' "${2:-}" "$1"
+}
+
 ipc() { qs ipc -p "$HARNESS" call -- omaremote-test "$@"; }
 jget() { ipc status | jq -r "$1"; }
 wait_for() {   # wait_for <jq-expr> <expected> [timeout-s]
@@ -75,9 +87,9 @@ s_tap_and_hold() {
   local st; st=$(ipc status)                  # one snapshot right after the edge: the 600 ms flash must be read before IPC round-trips eat it
   [[ $(jq -r '.lastAction' <<< "$st") == "ok:hold:Ctrl+C" ]] || { echo "    lastAction=$(jq -r '.lastAction' <<< "$st")"; return 1; }
   [[ $(jq -r '.flash' <<< "$st") == "OK · hold → Ctrl+C" ]] || { echo "    flash=$(jq -r '.flash' <<< "$st")"; return 1; }
-  has_line "$F/actions.log" "wtype -M ctrl -k c -m ctrl" || return 1
+  has_line "$F/actions.log" "$(kdown c CTRL)" || return 1
   ipc key ok down > /dev/null; ipc key ok up > /dev/null; sleep 0.15
-  has_line "$F/actions.log" "wtype -k Return"
+  has_line "$F/actions.log" "$(kdown Return)"
 }
 s_simple_key_fires_on_press() {
   wait_for '.config' true 5 || return 1
@@ -88,7 +100,7 @@ s_simple_key_fires_on_press() {
 s_repeat() {
   wait_for '.config' true 5 || return 1
   ipc key up down > /dev/null; sleep 0.65; ipc key up up > /dev/null; sleep 0.1
-  (( $(grep -cxF "wtype -k Up" "$F/actions.log") >= 3 ))
+  (( $(grep -cxF "$(kdown Up)" "$F/actions.log") >= 3 ))
 }
 s_panic_reset() {
   wait_for '.config' true 5 || return 1
@@ -96,7 +108,7 @@ s_panic_reset() {
   [[ $(jget '.flash') == Reset ]] || { echo "    flash=$(jget '.flash')"; return 1; }
   [[ $(jget '.heldKeys | length') == 0 ]] || return 1
   ipc key menu up > /dev/null; sleep 0.1
-  no_line "$F/actions.log" "wtype -k Tab"
+  no_line "$F/actions.log" "$(kdown Tab)"
 }
 s_ipc_reset_clears_held_keys() {
   wait_for '.config' true 5 || return 1
@@ -117,9 +129,9 @@ s_stuck_key_bounds_a_lost_release() {   # Task 1/2: a repeat key whose release n
   wait_for '.heldKeys | length' 0 4 || { echo "    heldKeys never cleared: $(jget '.heldKeys | join(",")')"; return 1; }
   [[ $(jget '.lastStuckKey.key') == up ]] || { echo "    lastStuckKey=$(jget '.lastStuckKey')"; return 1; }
   [[ $(jget '.stuckKeyCount') == 1 ]] || { echo "    stuckKeyCount=$(jget '.stuckKeyCount')"; return 1; }
-  local n; n=$(grep -cxF "wtype -k Up" "$F/actions.log")
+  local n; n=$(grep -cxF "$(kdown Up)" "$F/actions.log")
   sleep 0.5
-  [[ $(grep -cxF "wtype -k Up" "$F/actions.log") == "$n" ]] || { echo "    actions kept coming after the bound"; return 1; }
+  [[ $(grep -cxF "$(kdown Up)" "$F/actions.log") == "$n" ]] || { echo "    actions kept coming after the bound"; return 1; }
   # A reset clears the {key, at} record (stale key state would read as current) but not the monotonic count:
   # "has a release been lost since this process started" must survive the natural response to a stuck key.
   [[ $(ipc reset) == ok ]] || return 1
@@ -132,7 +144,7 @@ s_stuck_key_absent_when_release_arrives() {   # the signal must mean something: 
   jq '.timing.stuckMs = 1600' "$f" > "$F/c.json" && cat "$F/c.json" > "$f"   # same low bound as the lost-release scenario
   wait_for '.timing.stuckMs' 1600 5 || return 1
   ipc key up down > /dev/null; sleep 0.5; ipc key up up > /dev/null          # past holdMs 350: the release lands in the held/repeating phase, not down
-  [[ $(grep -cxF "wtype -k Up" "$F/actions.log") -ge 1 ]] || { echo "    key never reached the repeating phase before release"; return 1; }
+  [[ $(grep -cxF "$(kdown Up)" "$F/actions.log") -ge 1 ]] || { echo "    key never reached the repeating phase before release"; return 1; }
   sleep 2.2                                                                  # past the bound: a wrongly-armed stuck deadline would have fired by now
   [[ $(jget '.lastStuckKey') == null ]] || { echo "    lastStuckKey=$(jget '.lastStuckKey')"; return 1; }
   [[ $(jget '.heldKeys | length') == 0 ]]
@@ -143,7 +155,7 @@ s_config_external_reload() {
   jq '.timing.holdMs = 900 | .keep_me = {"x": 1}' "$f" > "$F/c.json" && cat "$F/c.json" > "$f"     # in-place: keep the watched inode
   wait_for '.timing.holdMs' 900 5 || return 1
   ipc key ok down > /dev/null; sleep 0.5; ipc key ok up > /dev/null; sleep 0.15
-  has_line "$F/actions.log" "wtype -k Return"                                                        # 500 ms < new holdMs: tap, not hold
+  has_line "$F/actions.log" "$(kdown Return)"                                                  # 500 ms < new holdMs: tap, not hold
 }
 s_corrupt_config_never_overwritten() {
   wait_for '.config' true 5 || return 1
@@ -151,7 +163,7 @@ s_corrupt_config_never_overwritten() {
   printf '{ broken' > "$f"
   wait_for '.configInvalid' true 5 || return 1
   ipc key ok down > /dev/null; ipc key ok up > /dev/null; sleep 0.15
-  has_line "$F/actions.log" "wtype -k Return" || return 1          # defaults keep working
+  has_line "$F/actions.log" "$(kdown Return)" || return 1    # defaults keep working
   [[ $(cat "$f") == '{ broken' ]]
 }
 scenario config_created s_config_created
@@ -400,7 +412,7 @@ s_selftest_counts_shortcut_not_ipc() {   # §7 step 6: IPC-injected events are t
   [[ $(jget '.selftest.active') == true && $(jget '.hud') == self-test ]] || return 1
   [[ $(ipc selftestStatus "$id" | jq -r .active) == true ]] || return 1
   ipc key ok down > /dev/null; ipc key ok up > /dev/null; sleep 0.15
-  no_line "$F/actions.log" "wtype -k Return" || return 1                       # real actions suppressed
+  no_line "$F/actions.log" "$(kdown Return)" || return 1                 # real actions suppressed
   local rep; rep=$(ipc selftestReport "$id")
   [[ $(jq -r .ok <<<"$rep") == false ]] || { echo "    $rep"; return 1; }
   jq -e '.missing | index("ok") != null' <<<"$rep" > /dev/null || return 1     # ok never arrived through GlobalShortcut
