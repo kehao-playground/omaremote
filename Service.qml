@@ -278,8 +278,11 @@ Item {
     if (selftest && selftest.active()) return   // §7 step 6: no real actions under a lease
     var r = Actions.toArgv(e.action)
     if (r.kind === "dispatch") {
-      if (root.dispatchViaHyprctl) Quickshell.execDetached(["hyprctl", "dispatch"].concat(r.cmd.split(" ")))
-      else Hyprland.dispatch(r.cmd)
+      // One argv element, not r.cmd.split(" "): a Lua dispatcher carries its arguments inside the
+      // string -- hl.dsp.focus({ workspace = "e+1" }) has spaces -- and splitting it would hand
+      // hyprctl a dozen fragments. The live path never split; only the harness path did, so the
+      // two disagreed exactly where a spaced dispatcher would have shown it.
+      root.dispatchLua(r.cmd)
     } else if (r.kind === "keyseq") {
       root.dispatchLua(r.down)
       root.queueKeyUp(r.up)

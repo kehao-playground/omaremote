@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { DEFAULT_KEYS, KEY_NAMES } from "../lib/Defaults.mjs";
 import { parseKeys, toArgv, validateAction, describe } from "../lib/Actions.mjs";
 
 test("parseKeys splits modifiers and key, case-insensitive modifiers", () => {
@@ -39,7 +40,9 @@ test("volume, media and screen map to documented tools", () => {
   assert.deepEqual(toArgv({ type: "volume", delta: "-5" }).argv, ["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "5%-"]);
   assert.deepEqual(toArgv({ type: "volume", delta: "mute" }).argv, ["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"]);
   assert.deepEqual(toArgv({ type: "media", cmd: "play-pause" }).argv, ["playerctl", "play-pause"]);
-  assert.deepEqual(toArgv({ type: "screen", cmd: "off" }).argv, ["hyprctl", "dispatch", "dpms", "off"]);
+  // Not a spawned `hyprctl dispatch dpms off`: on an Omarchy Lua config that string is evaluated
+  // as Lua and dies with `')' expected near 'off'`. Verified on the host 2026-10-07.
+  assert.deepEqual(toArgv({ type: "screen", cmd: "off" }), { kind: "dispatch", cmd: 'hl.dsp.dpms("off")' });
   assert.deepEqual(toArgv({ type: "screen", cmd: "lock" }).argv, ["omarchy-lock-screen"]);
   assert.deepEqual(toArgv({ type: "none" }), { kind: "none" });
 });
@@ -55,4 +58,24 @@ test("describe gives a short human label", () => {
   assert.equal(describe({ type: "dispatch", dispatcher: "workspace", arg: "e+1" }), "workspace e+1");
   assert.equal(describe({ type: "volume", delta: "+5" }), "Volume +5");
   assert.equal(describe({ type: "screen", cmd: "lock" }), "Lock screen");
+});
+
+test("no default key action uses a legacy dispatcher string", () => {
+  // Hyprland evaluates a dispatch string as Lua on an Omarchy Lua config, so "exec omarchy-menu"
+  // and "workspace e+1" are parse errors, not dispatches -- `home`, `app` and `power`'s tap did
+  // nothing at all on this host until 2026-10-07. The failure is silent twice over: the action
+  // appears in lastAction as though it ran, and `hyprctl dispatch` answers "ok" even for an
+  // argument it cannot use (verified: `hl.dsp.dpms(42)` answers ok), so the only way to know a
+  // dispatcher call is right is to watch what it does.
+  for (const name of KEY_NAMES) {
+    const k = DEFAULT_KEYS[name];
+    for (const trigger of ["tap", "hold", "double"]) {
+      const a = k[trigger];
+      if (!a || a.type !== "dispatch") continue;
+      assert.ok(a.dispatcher.startsWith("hl."),
+        `DEFAULT_KEYS.${name}.${trigger} dispatcher "${a.dispatcher}" is a legacy string; it must be Lua`);
+      assert.equal(a.arg, undefined,
+        `DEFAULT_KEYS.${name}.${trigger} still has an 'arg'; a Lua dispatcher carries its own arguments`);
+    }
+  }
 });

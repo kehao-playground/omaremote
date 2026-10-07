@@ -94,8 +94,11 @@ s_tap_and_hold() {
 s_simple_key_fires_on_press() {
   wait_for '.config' true 5 || return 1
   ipc key home down > /dev/null; sleep 0.15
-  [[ $(jget '.lastAction') == "home:tap:exec omarchy-menu" ]] || return 1
-  has_line "$F/actions.log" "hyprctl dispatch exec omarchy-menu"      # OMAREMOTE_DISPATCH=hyprctl in the harness; live shell uses Hyprland.dispatch
+  # The dispatcher is Lua, not the legacy "exec omarchy-menu": Hyprland evaluates a dispatch string
+  # as Lua on an Omarchy Lua config, so the legacy form was a parse error and `home` did nothing at
+  # all until 2026-10-07.
+  [[ $(jget '.lastAction') == 'home:tap:hl.dsp.exec_cmd("omarchy-menu")' ]] || { echo "    lastAction=$(jget '.lastAction')"; return 1; }
+  has_line "$F/actions.log" 'hyprctl dispatch hl.dsp.exec_cmd("omarchy-menu")'   # OMAREMOTE_DISPATCH=hyprctl in the harness; live shell uses Hyprland.dispatch
 }
 s_repeat() {
   wait_for '.config' true 5 || return 1

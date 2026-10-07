@@ -20,6 +20,8 @@ HYPR_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/hypr
 # XF86Tools / XF86Launch5-9 / XF86AudioMicMute / XF86Touchpad* -- only F19 and F24 keep their own
 # names, so eleven of the thirteen binds below can never match and the remote does nothing at all.
 XKB_OPTION=fkeys:basic_13-24
+PLUGIN_ID=io.github.kehao-chen.omaremote
+SHELL_CMD=${OMAREMOTE_SHELL:-omarchy-shell}
 
 # Learned on 2026-10-02 from the real remote; see docs/hw-keymap-xiaomi-voice-remote.md.
 # TODO(plan4): replace this table with the interactive learning step of main spec §7 step 2.
@@ -302,6 +304,147 @@ cmd_binds() {
   verify_binds
 }
 
+# ---- plugin, mic mode, verification (Task 8) ----------------------------------------------
+ipc() { $SHELL_CMD omaremote "$@"; }
+
+cmd_plugin() {
+  need omarchy; need jq
+  step "ensuring the plugin is installed and enabled"
+  if omarchy plugin list 2>/dev/null | grep -q "$PLUGIN_ID"; then
+    say "plugin present: $PLUGIN_ID"
+  else
+    say "Install it from this checkout, then re-run:"
+    say "    omarchy plugin add . --enable"
+    return 1
+  fi
+  $SHELL_CMD shell rescanPlugins >/dev/null 2>&1 || true
+  step "waiting for the service to answer (at most 15 s)"
+  local i=0
+  while (( i < 150 )); do
+    [[ $(ipc selftestPing 2>/dev/null) == ok ]] && { say "selftestPing: ok"; return 0; }
+    sleep 0.1; i=$((i + 1))
+  done
+  die "the service never answered selftestPing. A changed keepLoaded manifest needs a full restart: omarchy-restart-shell"
+}
+
+cmd_mic() {   # cmd_mic <remote|system>
+  need jq
+  local mode=${1:-system}
+  [[ $mode == remote || $mode == system ]] || die "mic mode must be 'remote' or 'system'; got '$mode'"
+  step "applying mic mode: $mode"
+  say "This restarts voxtype once. Do not use F9 until it finishes."
+  local r id; r=$(ipc mic "$mode"); id=$(jq -r '.operationId // empty' <<< "$r")
+  [[ -n $id ]] || die "mic apply was not accepted: $r"
+  say "operation $id queued; polling"
+  local i=0 state=""
+  while (( i < 150 )); do          # 150 s client budget per main spec §7 step 5
+    state=$(ipc micStatus "$id" | jq -r '.state // "?"')
+    case $state in
+      succeeded) say "mic mode applied: $mode"; return 0 ;;
+      failed|rollingBack) die "mic apply ended $state: $(ipc micStatus "$id")" ;;
+    esac
+    sleep 1; i=$((i + 1))
+  done
+  die "mic apply did not reach a terminal state within 150 s (last: $state); resolve before retrying"
+}
+
+cmd_verify() {
+  need jq
+  step "verifying the loaded binds"
+  hyprctl version >/dev/null 2>&1 || die "hyprctl cannot reach Hyprland; run this from a terminal inside your Hyprland session"
+  verify_binds
+
+  step "verifying the transport"
+  # Gated on sudo being USABLE, not on being root: this must stay a user-run script so its
+  # omarchy-shell IPC reaches the user's session and $HOME is theirs.
+  if ! sudo -n true 2>/dev/null; then
+    say "SKIPPED: the transport sweep needs sudo for the injector (/dev/uinput)."
+    say "Run 'sudo -v' to cache credentials, then re-run this subcommand. NOT reporting a pass."
+    # Exit 2, not 0. Printing "NOT reporting a pass" and then exiting 0 tells a human one thing and
+    # every caller the opposite, and the caller is what CI and `cmd_all` read. 2 means "did not
+    # verify", distinct from 1, which means "verified and failed".
+    return 2
+  fi
+  local inject; inject=$(dirname "$0")/../tests/inject-key.py
+  [[ -x $inject ]] || die "injector not found at $inject"
+
+  # A refused arm names its blocker. backendStale is the common one and it is self-clearing:
+  # nothing refreshes the 500 ms freshness window on its own, so any arm taken a moment after the
+  # last poll is stale. Poll and WAIT for freshness rather than sleeping a guessed interval.
+  #
+  # `ipc voice poll -` takes two arguments: the IpcHandler function is voice(verb, arg) with fixed
+  # arity, and the one-argument form answers "Too few arguments provided (2 required but 1 were
+  # provided.)" -- so a retry written as `ipc voice poll` never polls and the next arm is just as
+  # stale. That is exactly how this failed on first run.
+  local r id tries=0
+  while (( tries < 10 )); do
+    r=$(ipc selftestArmFor 60000)
+    id=$(jq -r '.id // empty' <<< "$r")
+    [[ -n $id ]] && break
+    case $(jq -r '.detail // "?"' <<< "$r") in
+      heldKeys:*) die "cannot arm a lease while keys are held: $r (press nothing, or run 'omarchy-shell omaremote reset')" ;;
+    esac
+    ipc voice poll - >/dev/null 2>&1 || true
+    local w=0
+    while (( w < 20 )); do
+      [[ $(ipc status | jq -r '.voice.backendFresh') == true ]] && break
+      sleep 0.1; w=$((w + 1))
+    done
+    tries=$((tries + 1))
+  done
+  [[ -n $id ]] || die "could not arm a self-test lease after $tries tries: $r"
+
+  # All 13 keys in ONE injected sequence rather than 13 create/destroy cycles: fewer device-add
+  # events for the compositor to process, and closer to how a real keyboard behaves.
+  #
+  # Injecting `power` is safe here ONLY because a lease suppresses actions (Service.qml:242) --
+  # outside a lease its tap blanks the screen, which is why tests/bind-matrix.sh excludes it. The
+  # same suppression is what makes a lease unable to observe anything about actions, so this sweep
+  # proves the TRANSPORT and nothing about what the keys do. Step 6's real-remote pass covers that.
+  local k neutral seq=""
+  for k in "${KEY_ORDER[@]}"; do
+    IFS=: read -r _ neutral <<< "${LEARNED_KEYS[$k]}"
+    seq+="${seq:+,}$neutral:120"
+  done
+  sudo "$inject" --seq "$seq" --gap-ms 250 >/dev/null
+  sleep 0.5
+
+  local rep; rep=$(ipc selftestReport "$id")
+  # NOT `.ok`: SelfTest.compute() counts down>1 or up>1 as an "extra", so a duplicate release --
+  # which tests/bind-matrix.sh deliberately accepts, and which KeyEngine is verified to tolerate --
+  # would fail here. The same transport would then qualify in Task 6 and fail in Task 8. Apply the
+  # matrix's contract instead: every supported key down>=1 and up>=1, nothing held, no key seen that
+  # was not injected. `.missing` is already exactly "supported keys with down<1 or up<1".
+  local missing unexpected dupes held
+  missing=$(jq -r '.missing | join(",")' <<< "$rep")
+  unexpected=$(jq -r --argjson keys "$(printf '%s\n' "${KEY_ORDER[@]}" | jq -R . | jq -s .)" \
+                  '[.counts.shortcut | keys[] | select(. as $k | $keys | index($k) | not)] | join(",")' <<< "$rep")
+  dupes=$(jq -r '[.counts.shortcut | to_entries[] | select(.value.down > 1 or .value.up > 1)
+                 | "\(.key)(down=\(.value.down),up=\(.value.up))"] | join(" ")' <<< "$rep")
+  held=$(jq -r '.held | join(",")' <<< "$rep")
+  [[ -n $dupes ]] && say "  duplicate edges (tolerated by KeyEngine, reported not fatal): $dupes"
+  if [[ -z $missing && -z $unexpected && -z $held ]]; then
+    say "transport: every supported key delivered at least one press and one release"
+    return 0
+  fi
+  say "transport FAILED:"
+  [[ -n $missing    ]] && say "  keys missing an edge: $missing"
+  [[ -n $unexpected ]] && say "  keys seen that were never injected: $unexpected"
+  [[ -n $held       ]] && say "  keys still held at the end: $held"
+  return 1
+}
+
+cmd_all() {
+  # keyd and the mic apply both stop for confirmation or restart a daemon, so a bare run is
+  # interactive by design. Pass --yes to skip the keyd prompts.
+  cmd_deps
+  cmd_keyd
+  cmd_binds
+  cmd_plugin
+  cmd_mic system
+  cmd_verify
+}
+
 usage() {
   cat <<'USAGE'
 usage: omaremote-setup [--yes] <subcommand>
@@ -309,8 +452,13 @@ usage: omaremote-setup [--yes] <subcommand>
   deps     check host tools; report what to install (installs nothing itself)
   keyd     stage and validate /etc/keyd/omaremote.conf, then guide enabling the service
   binds    ensure the xkb option, generate ~/.config/hypr/omaremote.lua, reload and verify
+  plugin   check the Omarchy plugin is installed and the service answers
+  mic      apply a mic mode (remote|system) through the mic-apply contract
+  verify   verify the loaded binds and sweep the transport with the injector
   genconf  print the generated keyd config to stdout and exit (writes nothing)
   genlua   print the generated Hyprland binds to stdout and exit (writes nothing)
+
+With no subcommand, every step runs in order (interactive: keyd confirms, mic restarts voxtype).
 
 Environment:
   OMAREMOTE_DEVICE   vendor:product of the remote (default 2717:32b8)
@@ -329,9 +477,13 @@ main() {
     deps) cmd_deps ;;
     keyd) cmd_keyd ;;
     binds) cmd_binds ;;
+    plugin) cmd_plugin ;;
+    mic) cmd_mic "${2:-system}" ;;
+    verify) cmd_verify ;;
     genconf) cmd_genconf ;;
     genlua) gen_lua ;;
-    ""|help) usage ;;
+    "") cmd_all ;;
+    help) usage ;;
     *) die "unknown subcommand: $1" ;;
   esac
 }

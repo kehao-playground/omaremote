@@ -75,6 +75,23 @@ test("neutral key table covers all 13 keys with unique keyd names and keysyms", 
   assert.equal(new Set(syms).size, 13);
 });
 
+test("a legacy dispatcher string is reported, because it fails silently", () => {
+  // Hyprland evaluates a dispatch string as Lua on an Omarchy Lua config, so "exec omarchy-menu"
+  // is a parse error. Nothing surfaces: the action still appears in lastAction as though it ran,
+  // and `hyprctl dispatch` answers "ok" even for arguments it cannot use. `home` and `app` did
+  // nothing at all on this host until 2026-10-07, and the config that caused it looked valid.
+  const r = normalizeConfig({ keys: { home: { tap: { type: "dispatch", dispatcher: "exec", arg: "omarchy-menu" } } } });
+  const p = r.problems.find(x => x.code === "legacy-dispatcher");
+  assert.ok(p, `expected a legacy-dispatcher problem, got ${JSON.stringify(r.problems)}`);
+  assert.match(p.message, /home\.tap/);
+  // The action is kept, not dropped: it is the user's, it may be right on a legacy-parser host,
+  // and dropping it would replace a visible misbehaviour with an invisible one.
+  assert.equal(r.config.keys.home.tap.dispatcher, "exec");
+  // A Lua dispatcher is not reported.
+  const ok = normalizeConfig({ keys: { home: { tap: { type: "dispatch", dispatcher: 'hl.dsp.exec_cmd("omarchy-menu")' } } } });
+  assert.equal(ok.problems.filter(x => x.code === "legacy-dispatcher").length, 0);
+});
+
 test("timing.stuckMs is raised above the longest key timer, with a problem recorded", () => {
   const r = normalizeConfig({ timing: { stuckMs: 0 } });
   assert.equal(r.config.timing.stuckMs, 1501);            // panicMs 1500 is the longest default timer
