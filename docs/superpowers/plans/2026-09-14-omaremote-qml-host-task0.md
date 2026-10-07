@@ -212,16 +212,24 @@ short presses. `lib/KeyEngine.mjs` tolerates a duplicate `up` (verified directly
 tap-then-hold with duplicated releases all resolve one action and leave `heldKeys` empty), so the
 duplicate is harmless; a *missing* release is not.
 
-**Settled 2026-10-07 (Plan 3 Task 6): ONE bind per key.** With keyd installed, the real neutral keys,
+**Correction (2026-10-07, later the same day): the verdict below is withdrawn.** The sweep that
+produced it runs inside a self-test lease, and a lease suppresses KeyEngine (`Service.qml:242`), so
+no action is ever dispatched during a measured press. `wtype` running mid-press is what loses the
+release edge — proven by four tests varying only the action type, with the bind count making no
+difference — so this document's original finding was right and my rebuttal was wrong. Details in
+`docs/hw-keymap-xiaomi-voice-remote.md`. The measurement below stands as a statement about binds
+with no action dispatched, which is not the shipping condition.
+
+**Superseded verdict (valid only with no action dispatched): ONE bind per key.** With keyd installed, the real neutral keys,
 and press durations driven by `tests/inject-key.py` (accurate to under 1 ms), a single `hl.bind`
 delivered both edges in 12 of 12 cells — `up`/F13 (a `repeat: true` key) and `back`/F18 (a long
 non-repeat key) at 120, 600 and 3000 ms — with nothing lost, duplicated or left held. Two binds
 duplicated the release in all 12. The matrix is in
 `docs/hw-keymap-xiaomi-voice-remote.md`; the sweep is `tests/bind-matrix.sh`.
 
-So the table above does **not** generalise, and the pessimistic reading of it was wrong: main spec §3's
-claim that `hl.dsp.global` requests the release event itself is correct. Three things about the
-2026-10-02 round explain the difference, and all three are reasons not to have promoted it to a rule:
+Within that condition the table above does not generalise. Three things about the 2026-10-02 round
+differ from this sweep — but note that none of them turned out to be the operative difference, which
+was that the earlier round dispatched a hold action and this sweep cannot:
 
 1. **Different key, different code path.** `XF86Back` is the remote's native `KEY_BACK`, a
    consumer-control code. The product's path is keyd → `F13`–`F24`, plain function keys.

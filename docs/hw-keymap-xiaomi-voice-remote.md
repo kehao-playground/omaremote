@@ -84,7 +84,17 @@ back by the kernel — the engine's tap/hold/repeat discrimination has real edge
 
   keyd's own key names are assumed to be the lowercased `KEY_*` stems; `keyd check` must validate the
   file before it replaces anything (spec §7 step 2 already requires this).
-- **Settled 2026-10-07 by measurement: ONE bind per key.** `tests/bind-matrix.sh`, with keyd
+- **WITHDRAWN 2026-10-07, same day: the matrix below answers a question that decides nothing.**
+  A self-test lease suppresses KeyEngine entirely (`Service.qml:242`,
+  `if (selftest && selftest.active()) return   // no real actions under a lease`), so during every
+  cell of every sweep **no action was dispatched**. Both edges always arrive under those conditions,
+  for either bind count. In real operation a `hold` or `repeat` action runs `wtype` *while the key is
+  still down*, and that is what loses the release edge — see the next bullet. The matrix is kept
+  because its numbers are correct and its method is reusable, but it did not and cannot settle the
+  bind count.
+
+- **Superseded measurement: ONE bind per key (valid only with no action dispatched).**
+  `tests/bind-matrix.sh`, with keyd
   installed, the real neutral keys, and durations driven by `tests/inject-key.py` (measured accurate
   to under 1 ms). `up`/F13 is a `repeat: true` key, exercising the engine's `repeating` phase;
   `back`/F18 is a long non-repeat key, exercising `held`.
@@ -105,20 +115,44 @@ back by the kernel — the engine's tap/hold/repeat discrimination has real edge
   | two | back | 3000ms | 1 | 2 | - | up x2 | - |
 
   A single `hl.bind` delivers both edges at every duration on both key classes — no loss, no
-  duplication, nothing left held. Two binds duplicate the release at every duration. So main spec §3
-  was **right**: `hl.dsp.global` does request the release event itself, and the plan's own premise
-  that live measurement had disproved it was mistaken.
+  duplication, nothing left held. Two binds duplicate the release at every duration. **Both
+  statements hold only while nothing is dispatched during the press**, which is the only condition a
+  self-test lease can produce.
 
-  **Why the 2026-10-02 round concluded the opposite.** That round measured `XF86Back` — the remote's
-  native `KEY_BACK` — by hand, because 11 of the 13 native codes collided with the keyboard, and it
-  reported a release lost on a long press. It does not reproduce here at 3000 ms. The honest summary
-  is that the earlier result came from a hand-timed press on a different key and a different code
-  path, and should not have been promoted to a claim about the bind layer. This round controls the
-  duration to under a millisecond and reads raw edge counts out of the self-test lease.
+  **The 2026-10-02 round was right and I argued it down wrongly.** I claimed it did not generalise
+  for three reasons — a different key, hand-timed presses, and a modifier artifact. Each was true;
+  none was the reason. It reported a release lost on a long press because it was pressing a key whose
+  hold action ran, and this sweep never runs one.
 
   **This measurement was impossible until an xkb option was added — and the first attempt silently
-  measured nothing.** See the next bullet; 12 of 12 cells came back `down=0, up=0`, which is not
-  what a lost release edge looks like.
+  measured nothing.** See below; 12 of 12 cells came back `down=0, up=0`, which is not what a lost
+  release edge looks like.
+
+- **`wtype` destroys the release edge of the key that triggered it (2026-10-07).** This is the real
+  finding, and it is a product defect rather than a configuration choice. Four tests on the live
+  host, one variable changed at a time, `back`/F18 held 2000 ms:
+
+  | `back.hold` action | binds | release edge |
+  |---|---|---|
+  | `{"type":"none"}` | one | **arrives** — `heldKeys` empty, `stuckKeyCount` flat |
+  | `{"type":"key","keys":"BackSpace"}` (`wtype`) | one | **lost** — `heldKeys: ["back"]`, stuck fires |
+  | `{"type":"key","keys":"BackSpace"}` (`wtype`) | **two** | **lost** — bind count is irrelevant |
+  | `{"type":"dispatch", ...}` (Hyprland-native) | one | **arrives** |
+
+  A physical long press on the real remote reproduces the `wtype` case. `keyd monitor` shows keyd
+  emitting both edges (`f18 down`, then `f18 up` 1700 ms later), so the loss happens above keyd,
+  when `wtype`'s virtual keyboard appears while the triggering key is still held.
+
+  **This also explains the 2026-10-02 `up` runaway** that motivated the stuck-key bound: `up` is
+  `repeat: true`, so its repeat action dispatches `wtype` during the press, killing the release, and
+  the key repeats until something stops it. Tap actions are unaffected — a tap fires *on* release,
+  after the edge has been processed.
+
+  The indicated fix is to stop injecting keys with `wtype` and use the compositor's own key
+  injection instead; Omarchy's bindings use `hl.dsp.send_key_state({ mods, key, state })`, which
+  needs a `down` and an `up` dispatch per keystroke. That is an engine change (`lib/Actions.mjs`
+  returns `{kind:"process", argv:["wtype", …]}` today) and a spec change (the main spec names
+  `wtype` throughout), so it is not folded in here.
 
 - **`hl.bind("F13", …)` cannot match without `fkeys:basic_13-24`.** `/usr/share/X11/xkb/symbols/pc`
   never maps `<FK13>`–`<FK24>`. The default `inet(evdev)` keymap does, and hands them out as:

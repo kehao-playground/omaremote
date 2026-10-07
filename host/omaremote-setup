@@ -7,10 +7,13 @@ DEVICE_ID=${OMAREMOTE_DEVICE:-2717:32b8}
 KEYD_CONF=/etc/keyd/omaremote.conf
 ASSUME_YES=0
 
-# Settled by tests/bind-matrix.sh on 2026-10-07; matrix in docs/hw-keymap-xiaomi-voice-remote.md.
-# "one" = a single hl.bind per key; "two" = press plus { release = true }. Measured 12/12 clean for
-# one bind at 120/600/3000 ms on both a repeat:true key and a long non-repeat key; two binds
-# duplicate the release in every cell.
+# "one" = a single hl.bind per key; "two" = press plus { release = true }.
+# tests/bind-matrix.sh measured one bind 12/12 clean and two binds duplicating the release in every
+# cell -- but that sweep runs inside a self-test lease, which suppresses KeyEngine (Service.qml:242)
+# so no action is dispatched during a measured press. The release edge is actually lost when `wtype`
+# runs mid-press, for EITHER bind count; see docs/hw-keymap-xiaomi-voice-remote.md. So the bind count
+# is chosen on the remaining merits -- fewer lines, no duplicate releases -- and not because it fixes
+# anything. Switching to two changes nothing about the wtype defect.
 BIND_MODE=${OMAREMOTE_BIND_MODE:-one}
 HYPR_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/hypr
 # Without this xkb option, symbols/pc leaves <FK13>-<FK24> unmapped and inet(evdev) gives them

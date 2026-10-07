@@ -27,6 +27,17 @@ INJECT=$(dirname "$0")/inject-key.py
 SHELL_CMD=${OMAREMOTE_SHELL:-omarchy-shell}
 LEASE_MS=120000
 DURATIONS=(120 600 3000)
+# The virtual device must stay alive until AFTER the lease report is read, and that is not a tuning
+# knob. A compositor synthesises releases for keys still held on a device that is being removed, so
+# an injector that destroys its device straight after the release makes a LOST release edge look
+# delivered. The 2026-10-07 matrix did exactly that and reported 12/12 clean for one bind, while a
+# real physical long press on the same key left it in heldKeys. Verified by injecting with
+# --linger-ms: the release then goes missing for the injector too, and stuckKeyCount rises.
+#
+# Lingering alone is still not enough -- the report has to be taken while the device is alive, so
+# the injector runs in the background and the report is read during its linger window.
+LINGER_MS=4000
+SETTLE_MS=500
 # key:neutral -- up is repeat:true (phase `repeating`), back is a long non-repeat key (phase `held`).
 # power/f24 is excluded on purpose: its tap action blanks the screen.
 PROBES=(up:f13 back:f18)
@@ -166,9 +177,14 @@ trial() {   # trial <key> <neutral> <hold_ms> -> a TAB-separated row from classi
   local key=$1 neutral=$2 ms=$3 id attempt=0
   while (( attempt < 3 )); do
     id=$(arm) || return 1
-    sudo "$INJECT" "$neutral" --hold-ms "$ms" >/dev/null
-    sleep 0.4
+    # Background the injector and read the report while its device is still alive; see LINGER_MS.
+    sudo "$INJECT" "$neutral" --hold-ms "$ms" --settle-ms "$SETTLE_MS" --linger-ms "$LINGER_MS" >/dev/null &
+    local ipid=$!
+    # settle + the press itself + a margin for the release to propagate, all inside the linger.
+    local wait_s; wait_s=$(awk -v s="$SETTLE_MS" -v m="$ms" 'BEGIN{printf "%.2f", (s + m + 600)/1000}')
+    sleep "$wait_s"
     local rep; rep=$(ipc selftestReport "$id")
+    wait "$ipid" 2>/dev/null || true
     local unexpected
     unexpected=$(jq -r --arg k "$key" '[.counts.shortcut | keys[] | select(. != $k)] | join(",")' <<< "$rep")
     if [[ -n $unexpected ]]; then

@@ -96,6 +96,12 @@ def main():
     ap.add_argument("--seq", help="comma-separated name:hold_ms pairs, e.g. f13:120,f18:3000")
     ap.add_argument("--gap-ms", type=int, default=300, help="pause between sequence entries")
     ap.add_argument("--settle-ms", type=int, default=int(SETTLE_S * 1000))
+    ap.add_argument("--linger-ms", type=int, default=0,
+                    help="keep the virtual device alive this long AFTER the last release. "
+                         "Without it the device is destroyed immediately, and a compositor that "
+                         "synthesises releases for keys held on a removed device can make a LOST "
+                         "release edge look delivered -- which is exactly what happened to the "
+                         "2026-10-07 bind matrix.")
     args = ap.parse_args()
 
     if os.geteuid() != 0:
@@ -123,6 +129,9 @@ def main():
                 time.sleep(args.gap_ms / 1000.0)
             inj.tap(name, ms)
             print(f"injected {name} for {ms}ms", flush=True)
+        if args.linger_ms:
+            time.sleep(args.linger_ms / 1000.0)
+            print(f"lingered {args.linger_ms}ms before destroying the device", flush=True)
     finally:
         inj.close()
 
