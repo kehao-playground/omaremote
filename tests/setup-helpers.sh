@@ -95,5 +95,40 @@ else
   check "a successful run exits 0 under set -u" "0" "nonzero"
 fi
 
+# ---- the keysym table is duplicated, so pin the duplication ------------------------
+# host/omaremote-setup cannot import lib/Defaults.mjs (bash, ES module), so neutral_keysym()
+# restates NEUTRAL_KEYS. That duplication is how `mic` sat on XF86Tools -- which is <FK13>'s
+# keysym, i.e. our `up` -- until it was measured on 2026-10-07. Two tables with no test between
+# them drift silently, and the symptom is a key that never fires.
+keysym_from_bash() {   # keysym_from_bash <logical>
+  bash -c "
+    $(sed -n '/^declare -A LEARNED_KEYS=(/,/^)/p' "$SRC")
+    $(sed -n '/^neutral_keysym()/,/^}/p' "$SRC")
+    neutral_keysym '$1'
+  "
+}
+
+if ! command -v node >/dev/null 2>&1; then
+  printf '  SKIP  %-46s %s\n' "bash keysyms match lib/Defaults.mjs" "node not available"
+else
+  defaults=$(cd "$(dirname "$SRC")/.." && pwd)/lib/Defaults.mjs
+  # An absolute file:// URL, because a bare relative path makes node resolve it as a PACKAGE name
+  # ("Cannot find package 'tests'"). The first version of this test did exactly that: the import
+  # threw, the loop below read nothing, `mismatch` stayed empty and the check reported PASS against
+  # zero comparisons. Hence the count assertion before it.
+  pairs=$(node --input-type=module -e "
+    import { NEUTRAL_KEYS, KEY_NAMES } from 'file://$defaults';
+    for (const k of KEY_NAMES) console.log(k + '=' + NEUTRAL_KEYS[k].keysym);
+  " 2>&1) || pairs=""
+  check "lib/Defaults.mjs yielded all 13 keysyms to compare" "13" "$(printf '%s\n' "$pairs" | grep -c '=' || true)"
+  mismatch=""
+  while IFS='=' read -r logical want; do
+    [[ -n $logical && -n $want ]] || continue
+    got=$(keysym_from_bash "$logical")
+    [[ $got == "$want" ]] || mismatch+="$logical(bash=$got mjs=$want) "
+  done <<< "$pairs"
+  check "bash keysyms match lib/Defaults.mjs for all 13 keys" "" "$mismatch"
+fi
+
 printf '\n%s\n' "$([[ $fail == 0 ]] && echo 'RESULT: PASS' || echo 'RESULT: FAIL')"
 exit $fail
