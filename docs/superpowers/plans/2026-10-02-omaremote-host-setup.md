@@ -1792,7 +1792,45 @@ Expected: binds verified, and the transport sweep explicitly `SKIPPED` with "NOT
 Ask the user to run `! sudo -v && ./host/omaremote-setup verify`
 Expected: `transport: every supported key delivered at least one press and one release`. In two-bind mode a `duplicate edges (expected in two-bind mode…)` line appears first and is **not** a failure — the acceptance contract here is deliberately the same one `tests/bind-matrix.sh` used to qualify the configuration, so a transport cannot pass Task 6 and fail Task 8.
 
-- [ ] **Step 6: End-to-end with the real remote**
+- [x] **Step 6: End-to-end with the real remote** — **12 of 13 keys pass; `mic` is blocked**
+
+**Result (2026-10-08).** The user ran the full press-and-hold pass on the real remote and reported
+「mic 看起來没運作，其他都正常」 — every key except `mic` behaves as the default profile
+specifies, and `stuckKeyCount` stayed `0` across the pass. A separate in-order sweep of all twelve
+non-mic buttons under `keyd monitor -t` reproduced the documented code for each one, in order, with
+112–186 ms press durations.
+
+This step earned its place: it caught two things the injected sweep structurally could not.
+
+1. **The injected sweep does not cover keyd at all.** `[ids] 2717:32b8` is an explicit list, so the
+   injector's uinput device is never grabbed and its keysyms go straight to the compositor. The
+   `f5 = prog1` line has never been exercised by any injection. A green sweep says the bind layer
+   works, not that keyd rewrites anything.
+2. **`mic` cannot be held, by firmware.** Press and release arrive in the *same millisecond* —
+   measured independently at the raw HID layer (`/dev/input/event13`, identical timestamps) and at
+   keyd's output (`+0 ms` between `down` and `up`). So `ptt: true` can never work on this button;
+   `hidPress` and `hidRelease` are indistinguishable in time. This is not a defect in our stack, and
+   it retires the keymap doc's claim that "push-to-talk can be driven by the remote's own microphone
+   button" (now withdrawn there).
+
+**Open blocker: which code `mic` emits.** The raw read reported `KEY_F5` (63); the full `keyd
+monitor` sweep reports `f21` for the mic press — which is what `grave = f21` (the **app** button, the
+TV icon) produces — and `prog1` never appears at all. keyd's virtual keyboard *does* advertise
+`KEY_PROG1` (checked via the key bitmap in `/proc/bus/input/devices`), so a capability limit is ruled
+out. If the firmware really sends `grave`, then `app` and `mic` differ only by duration (163 ms vs
+0 ms), which is not a usable discriminator, and the mic button has never had a working path.
+Outstanding measurement: a raw read printing **every** event including `EV_MSC` scancodes, with keyd
+stopped, pressing mic and then app.
+
+**The interaction design cannot be settled until that lands**, because the options differ by whether
+a distinct code exists:
+- a **toggle** on the mic button (press to start, press again to stop) — the only interaction a pulse
+  can support, but it needs a new trigger mode; the existing `micToggle()` is ATVVoice-only and
+  returns `no-atvvoice`;
+- **PTT on a different, holdable key** — available today, no new mechanism;
+- **`voice.mic = "remote"` with ATVVoice** — the spec default, explicitly out of Plan 3's scope.
+
+- [ ] **Step 6b: original instructions, for reference**
 
 This is the row the injector cannot cover: it proves the remote's own HID edges and keyd's translation, not just a Hyprland bind on a virtual device.
 
