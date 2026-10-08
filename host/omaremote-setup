@@ -178,9 +178,25 @@ cmd_keyd() {
     say "Starting the unit now would fail on the socket, not on the config."
     return 1
   fi
-  say "Run:  sudo systemctl enable --now keyd"
-  say "Then re-run 'omaremote-setup keyd' to confirm it is active."
-  systemctl is-active --quiet keyd && say "keyd.service: active" || say "keyd.service: not active yet"
+  if systemctl is-active --quiet keyd; then
+    # keyd is ALREADY running, so `systemctl enable --now keyd` is a no-op and the config we just
+    # wrote would never load. On a re-run that is silent and total: keyd keeps serving the previous
+    # mapping, every check that reads the FILE agrees with the new one, and only an injection
+    # through keyd disagrees. Measured 2026-10-08: `f5 = prog1` -> `f5 = xfer` left keyd emitting
+    # the old KEY_F21 for 50 minutes, so the mic key still fired `app` and the transport sweep
+    # reported `app(down=2,up=2)` with `mic` missing -- both source keys landing on one code.
+    step "reloading keyd so the new config takes effect"
+    if sudo keyd reload; then
+      say "keyd reloaded; the config above is now live"
+    else
+      die "keyd reload failed. The OLD mapping is still live. Check 'sudo keyd check' and the journal."
+    fi
+    say "keyd.service: active"
+  else
+    say "Run:  sudo systemctl enable --now keyd"
+    say "Then re-run 'omaremote-setup keyd' to confirm it is active."
+    say "keyd.service: not active yet"
+  fi
 }
 
 # ---- Hyprland binds (Task 7) --------------------------------------------------------------
