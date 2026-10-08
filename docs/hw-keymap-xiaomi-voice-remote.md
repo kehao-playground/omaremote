@@ -63,7 +63,7 @@ mic button is physically impossible on this model.
   `hl.bind("Up", …)` would hijack the user's keyboard; keyd's `[ids] 2717:32b8` section is what keeps
   the remap confined to the remote. Only `KEY_BACK` (158) and arguably `KEY_COMPOSE` (127) are free
   enough on this host to bind directly, which is why the pre-keyd end-to-end smoke test uses `back`.
-- **`mic` is a real HID key here, but push-to-talk on it is impossible.** ~~push-to-talk can be
+- **`mic` is a real HID key here, but push-to-talk on it is useless.** ~~push-to-talk can be
   driven by the remote's own microphone button~~ — **WITHDRAWN 2026-10-08.** The button emits a
   zero-duration pulse (see above), so there is no hold interval to gate recording with. The spec's
   "most ATVV remotes have no HID mic key — skipping is normal" prompt does not apply for the reason
@@ -71,6 +71,20 @@ mic button is physically impossible on this model.
   (press to start, press again to stop) is the only interaction a pulse can support.
   Note that `F5` unremapped is "reload" in browsers — another argument for keyd rather than
   direct binds.
+- **The fix for the pulse is `keys.mic.trigger = "toggle"` (2026-10-08).** Push-to-talk on this
+  button is *mechanically correct*: both edges arrive (`mic down=3 up=3` from the real remote under
+  a self-test lease), the plugin sends the start and the stop, and voxtype's journal shows
+  `Recording started (external trigger)` / `Recording stopped (0.1s)`. There is simply no hold
+  interval, so the recording is ~0.1 s. The earlier theory that the *release* was being dropped was
+  wrong and is recorded here so nobody re-derives it: the release is delivered at every injected
+  hold duration including 0 ms.
+
+  `trigger: "toggle"` drives the session from the **press edge alone** — press to start, press
+  again to stop — which is the only interaction a pulse supports. Set it in
+  `~/.config/omaremote/config.json` under `keys.mic`; the shipped default stays `"ptt"` for generic
+  remotes, so a host with this remote must opt in. `omaremote status` publishes the active value as
+  `micTrigger`.
+
 - **RESOLVED 2026-10-08: keyd aliases `prog1` to `KEY_F21`, so `mic` emitted `app`'s code.**
   The remote is blameless. An unfiltered read of `/dev/input/event13` shows mic sending `KEY_F5`
   (63, HID scancode `0x7003E`) and app sending `KEY_GRAVE` (41, `0x70035`) — two distinct codes.

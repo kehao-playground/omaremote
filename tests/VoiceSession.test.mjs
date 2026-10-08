@@ -648,3 +648,72 @@ test("a pending D-Bus end re-read is dropped when a stop is requested for anothe
   assert.equal(vs.nextDeadline(), 1400 + 15000);                  // no stale 1450 deadline
   assert.deepEqual(vs.advance(1450), []);
 });
+
+// ---- toggle trigger (pulse-type mic buttons) --------------------------------------------
+const toggleCfg = () => cfg({ keys: { ...DEFAULT_CONFIG.keys, mic: { trigger: "toggle" } } });
+
+test("toggle starts a session from idle and stops it on the next press", () => {
+  // The remote's mic button sends press and release ~0 ms apart, so push-to-talk records ~0.1 s.
+  // A toggle is driven by the PRESS edge alone, which is why it works on that hardware.
+  const vs = createVoiceSession(toggleCfg());
+  vs.status("idle", 0, { fresh: true });
+
+  const start = vs.hidToggle(10);
+  assert.deepEqual(kinds(start), ["start"], "first press starts");
+  assert.equal(stateOf(start), "starting");
+  vs.cmdExit(cmdId(start, "start"), 0, 20);
+  vs.status("recording", 100);
+  assert.equal(vs.snapshot().state, "recording");
+
+  const stop = vs.hidToggle(200);
+  assert.deepEqual(kinds(stop), ["stop"], "second press stops");
+});
+
+test("toggle ignores the release edge entirely", () => {
+  // In ptt mode the release stops the session. In toggle mode it must do nothing at all, or a
+  // pulse would start and immediately stop -- reproducing the 0.1 s recording we are escaping.
+  const vs = createVoiceSession(toggleCfg());
+  vs.status("idle", 0, { fresh: true });
+  const start = vs.hidToggle(10);
+  vs.cmdExit(cmdId(start, "start"), 0, 20);
+  vs.status("recording", 100);
+  // hidRelease is simply never called by the host in toggle mode; assert it is also harmless if it
+  // were, so the two modes cannot interact badly during a config change mid-session.
+  assert.deepEqual(kinds(vs.hidRelease(110)), ["stop"], "hidRelease still stops when called directly");
+  assert.equal(vs.snapshot().state, "stopping");
+});
+
+test("toggle pressed while still starting stops on confirm, not never", () => {
+  // A pulse delivers the second press long before voxtype confirms if the user double-taps, and
+  // the start is in flight. Dropping it would leave a recording nothing can stop -- the exact
+  // failure seen on the host before this existed.
+  const vs = createVoiceSession(toggleCfg());
+  vs.status("idle", 0, { fresh: true });
+  const start = vs.hidToggle(10);
+  assert.deepEqual(kinds(vs.hidToggle(15)), [], "no stop command while the start is unconfirmed");
+  vs.cmdExit(cmdId(start, "start"), 0, 20);
+  const fx = vs.status("recording", 100);
+  assert.deepEqual(kinds(fx), ["stop"], "the deferred stop fires as soon as recording is confirmed");
+});
+
+test("toggle never steals a session another owner holds, and respects gates", () => {
+  const vs = createVoiceSession(toggleCfg());
+  vs.status("idle", 0, { fresh: true });
+  vs.status("recording", 100);                      // adopted: someone pressed voxtype's own hotkey
+  assert.equal(vs.snapshot().owner, "keyboard");
+  assert.deepEqual(kinds(vs.hidToggle(200)), [], "does not stop a keyboard-owned session");
+
+  const gated = createVoiceSession(toggleCfg());
+  gated.status("idle", 0, { fresh: true });
+  assert.equal(gated.gate.acquire("mic-apply"), true);
+  assert.deepEqual(gated.hidToggle(10), [], "a held gate blocks a toggle start");
+});
+
+test("toggle is inert unless the mic trigger selects it", () => {
+  const ptt = createVoiceSession(cfg());            // default trigger is ptt
+  ptt.status("idle", 0, { fresh: true });
+  assert.deepEqual(ptt.hidToggle(10), [], "ptt mode ignores a toggle");
+  const asKey = createVoiceSession(cfg({ keys: { ...DEFAULT_CONFIG.keys, mic: { trigger: "key" } } }));
+  asKey.status("idle", 0, { fresh: true });
+  assert.deepEqual(asKey.hidToggle(10), [], "key mode ignores a toggle");
+});

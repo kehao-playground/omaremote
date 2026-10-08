@@ -53,7 +53,7 @@ Item {
         MouseArea { anchors.fill: parent; enabled: root.supported && !(parent.modelData === "hold" && root.panic); cursorShape: Qt.PointingHandCursor; onClicked: root.editRequested(parent.modelData) }
       }
     }
-    Text { visible: root.isMic; textFormat: Text.PlainText; text: root.keyConfig.ptt !== false ? "push-to-talk" : "ptt off"; color: root.fg; font.family: root.fontFamily; font.pixelSize: Style.font.caption; anchors.verticalCenter: parent.verticalCenter }
+    Text { visible: root.isMic; textFormat: Text.PlainText; text: root.keyConfig.trigger === "toggle" ? "toggle" : root.keyConfig.trigger === "key" ? "plain key" : "push-to-talk"; color: root.fg; font.family: root.fontFamily; font.pixelSize: Style.font.caption; anchors.verticalCenter: parent.verticalCenter }
     ToggleSwitch {
       visible: !root.isMic
       checked: root.keyConfig.repeat === true

@@ -397,6 +397,30 @@ s_stats_and_capture() {                    # §5.5 + §3 capture verification
   has_line "$F/actions.log" "pw-dump "   # fake-log quirk: a zero-arg invocation logs "basename " with a trailing space
 }
 scenario mic_apply_system s_mic_apply_system
+s_mic_toggle_session() {   # a pulse-type mic button: press starts, next press stops, release ignored
+  ready || return 1
+  local f=$XDG_CONFIG_HOME/omaremote/config.json
+  jq '.keys.mic.trigger = "toggle"' "$f" > "$F/c.json" && cat "$F/c.json" > "$f"
+  wait_for '.micTrigger' toggle 5 || return 1
+
+  # A pulse: down and up back to back, as the real remote delivers them. In ptt mode this stops the
+  # session ~0 ms after starting it; in toggle mode the release must be ignored entirely.
+  ipc key mic down > /dev/null; ipc key mic up > /dev/null
+  wait_for '.voice.state' recording 3 || { echo "    toggle press did not start a session"; return 1; }
+  [[ $(jget '.voice.owner') == hid ]] || return 1
+  has_line "$F/vox.log" "voxtype record start" || return 1
+
+  sleep 0.5
+  [[ $(jget '.voice.state') == recording ]] || { echo "    the ignored release stopped it: $(jget '.voice.state')"; return 1; }
+  no_line "$F/vox.log" "voxtype record stop" || { echo "    a stop was sent by the release"; return 1; }
+
+  ipc key mic down > /dev/null; ipc key mic up > /dev/null
+  wait_for '.voice.state' idle 5 || { echo "    second press did not stop it"; return 1; }
+  has_line "$F/vox.log" "voxtype record stop" || return 1
+  no_line "$F/vox.log" "voxtype record cancel"
+}
+scenario mic_toggle_session s_mic_toggle_session
+
 scenario mic_apply_second_request_is_busy s_mic_apply_second_request_is_busy
 scenario mic_apply_unknown_id_is_failure s_mic_apply_unknown_id_is_failure
 scenario mic_apply_waits_for_session s_mic_apply_waits_for_session

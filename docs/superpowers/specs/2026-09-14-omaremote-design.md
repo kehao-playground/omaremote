@@ -209,14 +209,14 @@ Logical key names: `up down left right ok back home menu app volup voldown power
     "ok":   { "tap": {"type":"key","keys":"Return"}, "hold": {"type":"key","keys":"ctrl+c"} },
     "up":   { "tap": {"type":"key","keys":"Up"}, "repeat": true },
     "menu": { "tap": {"type":"key","keys":"Tab"}, "panic": true },
-    "mic":  { "ptt": true },
+    "mic":  { "trigger": "ptt" },
     "app":  { "supported": false }
   },
   "voice": { "mic": "remote", "maxSessionSec": 60, "startTimeoutMs": 1500, "arbitrationMs": 250, "stopTimeoutMs": 15000, "hud": true, "actionFlash": true }
 }
 ```
 
-Per-key fields: `tap`, `hold`, `double` (each an Action or absent), `repeat` (bool), `panic` (bool), `ptt` (bool, `mic` only), `supported` (bool, default true; set to false by setup for keys the remote does not emit — the Keys tab greys the row and no bind is generated). Validation: `panic` is mutually exclusive with `hold` and `repeat` on the same key (the UI disables the fields; a hand-edited config that combines them is reported by Doctor and the key falls back to `tap`-only). Unknown fields are preserved on write.
+Per-key fields: `tap`, `hold`, `double` (each an Action or absent), `repeat` (bool), `panic` (bool), `trigger` (`mic` only: `"ptt"` | `"toggle"` | `"key"`, default `"ptt"`), `supported` (bool, default true; set to false by setup for keys the remote does not emit — the Keys tab greys the row and no bind is generated). Validation: `panic` is mutually exclusive with `hold` and `repeat` on the same key (the UI disables the fields; a hand-edited config that combines them is reported by Doctor and the key falls back to `tap`-only). Unknown fields are preserved on write.
 
 ### 4.3 State machine (per key, pure JS with injected clock)
 
@@ -269,7 +269,7 @@ dispatch` answers `ok` even for an argument it cannot use (verified: `hl.dsp.dpm
 | app | `dispatch workspace e+1` | — | |
 | volup / voldown | volume +5 / −5 | — | repeat |
 | power | screen off | screen lock | |
-| mic | — | — | ptt |
+| mic | — | — | trigger |
 
 ## 5. Voice session
 
@@ -278,7 +278,28 @@ dispatch` answers `ok` even for an argument it cannot use (verified: `hl.dsp.dpm
 Because ATVVoice runs with `--mic-on-demand`, every source funnels into the same Voxtype commands; the plugin does not call `MicOpen` for normal sessions. A **plugin-owned remote mic** therefore exists only after the plugin's own `MicToggle`/mic test (§6.1) opened it; that is the only mic `abort()` and recovery ever close.
 
 - **D-Bus — remote mic button:** `busctl --user monitor --match "type='signal',interface='org.atvvoice.Daemon',member='MicStateChanged'"`, parsed by `lib/Dbus.js` into `{ state, sender, path, interface, generation }`. Only signals from the selected `org.atvvoice.*` sender, exact object path and interface are accepted. A monitor reconnect increments `generation`; buffered signals and prior generations are discarded. The remote's own button makes ATVVoice go `streaming`; that is the start signal. On start and after every monitor reconnect the `State` and `NodeName` properties are read once.
-- **HID mic key:** `mic` press/release from the engine when `ptt: true` (rare; most ATVV remotes have no HID mic key).
+- **HID mic key:** with `trigger: "ptt"` the `mic` press starts a session and its release ends it
+  (rare; most ATVV remotes have no HID mic key). With `trigger: "toggle"` the **press edge alone**
+  toggles: press to start, press again to stop, and the release is ignored entirely. With
+  `trigger: "key"` the engine handles `mic` as an ordinary key and the voice path never sees it.
+
+  **A toggle is not a preference, it is a hardware requirement on some remotes.** The Xiaomi
+  2717:32b8's mic button emits press and release ~0 ms apart -- a firmware pulse, measured at the
+  raw HID layer and at keyd's output independently (see `docs/hw-keymap-xiaomi-voice-remote.md`).
+  Push-to-talk on it is *mechanically correct and useless*: voxtype's own journal shows
+  `Recording started` / `Recording stopped (0.1s)`, far too short to speak into. Both edges do
+  arrive, so this is not a lost-release problem; there is simply no hold interval to express.
+  A toggle, driven by the press edge, is the only interaction such a button supports.
+
+  A second press while the start is still unconfirmed latches a deferred stop rather than being
+  dropped, because dropping it leaves a recording nothing can end -- observed on the host before
+  this existed. A toggle never stops a session it did not start, so voxtype's own hotkey and a
+  mic-apply holding the gate are both safe from it.
+
+  `keys.mic.ptt` (bool) was the earlier spelling. A boolean could not express the third state, and
+  `ptt: false` already meant "treat mic as an ordinary key", so it migrates to `"key"` -- never to
+  `"ptt"`. The boolean is not kept alongside the enum: a derived duplicate is what let the keyd and
+  xkb neutral-key tables drift apart.
 - **Keyboard (F9 / any other Voxtype hotkey):** observed through `voxtype status --follow --format json`.
 
 ### 5.2 State machine

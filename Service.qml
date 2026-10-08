@@ -226,11 +226,21 @@ Item {
       root.rearm()
       return true
     }
-    if (name === "mic" && root.config.keys.mic.ptt) {                          // §5.1 HID mic key
+    var micTrigger = root.config.keys.mic.trigger                              // §5.1 HID mic key
+    if (name === "mic" && micTrigger === "toggle") {
+      // Press edge only. This mode exists for buttons whose firmware sends press and release in the
+      // same millisecond, where acting on the release would stop the session ~0.1 s after starting
+      // it -- mechanically correct and useless. Dropping the release is the point.
+      if (edge === "down") root.dispatch(root.guarded("voice.hidToggle", function() { return voice.hidToggle(now) }), "voice")
+      root.rearm()
+      return true
+    }
+    if (name === "mic" && micTrigger === "ptt") {
       root.dispatch(root.guarded("voice.hid" + edge, function() { return edge === "down" ? voice.hidPress(now) : voice.hidRelease(now) }), "voice")
       root.rearm()
       return true
     }
+    // micTrigger === "key" falls through to the engine, so mic behaves as an ordinary key.
     root.dispatch(root.guarded("engine." + edge, function() { return edge === "down" ? engine.press(name, now) : engine.release(name, now) }), "engine")
     root.heldKeys = engine.heldKeys()
     root.rearm()
@@ -575,6 +585,10 @@ Item {
     return JSON.stringify({
       config: !!engine, configInvalid: root.configInvalid, configProblems: root.configProblems,
       timing: root.config ? root.config.timing : null,
+      // The mic trigger is published because nothing else exposes it: `config` here is a boolean
+      // (engine configured yes/no), so a caller cannot tell ptt from toggle, and an integration
+      // test has no deterministic way to wait for a config reload to take effect.
+      micTrigger: root.config ? root.config.keys.mic.trigger : null,
       heldKeys: root.heldKeys, lastStuckKey: root.lastStuckKey, stuckKeyCount: root.stuckKeyCount, lastAction: root.lastAction, hud: root.hudLine, flash: root.flash,
       errorCount: root.errorCount, lastError: root.lastError
       , voice: voice ? (function(s) { return { state: s.state, owner: s.owner, inferred: s.inferred, pendingCmds: s.pendingCmds, gates: s.gates, backendFresh: s.backendFresh } })(voice.snapshot()) : null

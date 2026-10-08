@@ -129,3 +129,32 @@ test("a stuckMs above every key timer is honoured untouched", () => {
   assert.equal(r.config.timing.stuckMs, 4000);
   assert.ok(!r.problems.some(p => p.code === "stuck-ms-raised"));
 });
+
+test("mic trigger: ptt | toggle | key, migrating the legacy ptt boolean", () => {
+  // `keys.mic.ptt` was a boolean, which cannot express a third interaction. This remote's mic
+  // button sends press and release ~0 ms apart (firmware pulse, measured 2026-10-08), so
+  // push-to-talk records ~0.1 s -- mechanically correct and useless. A toggle is the only
+  // interaction a pulse supports, so the field became an enum.
+  const trig = (mic) => normalizeConfig({ version: 1, keys: { mic } }).config.keys.mic.trigger;
+
+  assert.equal(trig({ trigger: "toggle" }), "toggle");
+  assert.equal(trig({ trigger: "ptt" }), "ptt");
+  assert.equal(trig({ trigger: "key" }), "key");
+
+  // Legacy configs on disk carry `ptt`. ptt:false meant "mic is an ordinary key, let the engine
+  // handle tap/hold", which is now spelled "key" -- so the migration must not turn it into "ptt".
+  assert.equal(trig({ ptt: true }), "ptt");
+  assert.equal(trig({ ptt: false }), "key");
+  assert.equal(trig({}), "ptt", "an unspecified mic trigger keeps the spec default");
+
+  // Garbage falls back to the default rather than disabling the mic silently.
+  assert.equal(trig({ trigger: "nonsense" }), "ptt");
+  assert.equal(trig({ trigger: 7 }), "ptt");
+  // An explicit trigger wins over a stale ptt left beside it by an older writer.
+  assert.equal(trig({ trigger: "toggle", ptt: true }), "toggle");
+  assert.equal(trig({ trigger: "key", ptt: true }), "key");
+
+  // The boolean is gone from the normalized shape: a derived duplicate is what let the keyd/xkb
+  // tables drift apart, so there is exactly one source of truth.
+  assert.equal(normalizeConfig({ version: 1 }).config.keys.mic.ptt, undefined);
+});
