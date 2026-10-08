@@ -27,24 +27,34 @@ keysym a Hyprland bind uses. The `F13`–`F24` column holds **only** with the xk
 `fkeys:basic_13-24` applied; without it those keycodes produce `XF86Tools` / `XF86Launch5-9` /
 `XF86AudioMicMute` / `XF86Touchpad*` instead. See the consequences section.
 
-| logical | remote emits | code | keyd neutral | Hyprland keysym |
-|---|---|---|---|---|
-| up | `KEY_UP` | 103 | `f13` | `F13` |
-| down | `KEY_DOWN` | 108 | `f14` | `F14` |
-| left | `KEY_LEFT` | 105 | `f15` | `F15` |
-| right | `KEY_RIGHT` | 106 | `f16` | `F16` |
-| ok | `KEY_ENTER` | 28 | `f17` | `F17` |
-| back | `KEY_BACK` | 158 | `f18` | `F18` |
-| home | `KEY_HOME` | 102 | `f19` | `F19` |
-| menu | `KEY_COMPOSE` | 127 | `f20` | `F20` |
-| app | `KEY_GRAVE` | 41 | `f21` | `F21` |
-| volup | `KEY_VOLUMEUP` | 115 | `f22` | `F22` |
-| voldown | `KEY_VOLUMEDOWN` | 114 | `f23` | `F23` |
-| power | `KEY_POWER` | 116 | `f24` | `F24` |
-| mic | `KEY_F5` | 63 | `prog1` | `XF86Launch1` |
+| logical | physical button | remote emits | code | keyd neutral | Hyprland keysym |
+|---|---|---|---|---|---|
+| up | D-pad up | `KEY_UP` | 103 | `f13` | `F13` |
+| down | D-pad down | `KEY_DOWN` | 108 | `f14` | `F14` |
+| left | D-pad left | `KEY_LEFT` | 105 | `f15` | `F15` |
+| right | D-pad right | `KEY_RIGHT` | 106 | `f16` | `F16` |
+| ok | D-pad centre | `KEY_ENTER` | 28 | `f17` | `F17` |
+| back | back arrow | `KEY_BACK` | 158 | `f18` | `F18` |
+| home | house icon | `KEY_HOME` | 102 | `f19` | `F19` |
+| menu | hamburger / three lines | `KEY_COMPOSE` | 127 | `f20` | `F20` |
+| app | **TV icon** | `KEY_GRAVE` | 41 | `f21` | `F21` |
+| volup | volume up | `KEY_VOLUMEUP` | 115 | `f22` | `F22` |
+| voldown | volume down | `KEY_VOLUMEDOWN` | 114 | `f23` | `F23` |
+| power | power symbol | `KEY_POWER` | 116 | `f24` | `F24` |
+| mic | microphone icon | `KEY_F5` (disputed, see below) | 63 | `prog1` | `XF86Launch1` |
 
-Every button delivered a clean press **and** release pair (~0.2 s apart), with no autorepeat held
-back by the kernel — the engine's tap/hold/repeat discrimination has real edges to work with.
+The **twelve non-mic buttons** each delivered a clean press **and** release pair (~0.11--0.19 s
+apart), with no autorepeat held back by the kernel — the engine's tap/hold/repeat discrimination has
+real edges to work with. A full in-order sweep under `keyd monitor -t` on 2026-10-08 reproduced all
+twelve, in the table's order, with the codes above.
+
+**`mic` is the exception and cannot be held.** Its press and release arrive in the *same
+millisecond* -- measured independently at two layers: a raw read of `/dev/input/event13` showed down
+and up at an identical timestamp, and `keyd monitor -t` shows `down` followed by `up` at `+0 ms`.
+This is the remote's firmware emitting a *pulse*, not a press-and-hold, and it is not a defect
+anywhere in our stack. The consequence is hard: **`ptt: true` can never work on this button**,
+because `hidPress` and `hidRelease` are indistinguishable in time. Hold-to-talk on the remote's own
+mic button is physically impossible on this model.
 
 ## Consequences for Plan 3
 
@@ -53,10 +63,21 @@ back by the kernel — the engine's tap/hold/repeat discrimination has real edge
   `hl.bind("Up", …)` would hijack the user's keyboard; keyd's `[ids] 2717:32b8` section is what keeps
   the remap confined to the remote. Only `KEY_BACK` (158) and arguably `KEY_COMPOSE` (127) are free
   enough on this host to bind directly, which is why the pre-keyd end-to-end smoke test uses `back`.
-- **`mic` is a real HID key here** (`KEY_F5`), so the spec's "most ATVV remotes have no HID mic key —
-  skipping is normal" prompt does not apply to this model; push-to-talk can be driven by the remote's
-  own microphone button. Note that `F5` unremapped is "reload" in browsers — another argument for
-  keyd rather than direct binds.
+- **`mic` is a real HID key here, but push-to-talk on it is impossible.** ~~push-to-talk can be
+  driven by the remote's own microphone button~~ — **WITHDRAWN 2026-10-08.** The button emits a
+  zero-duration pulse (see above), so there is no hold interval to gate recording with. The spec's
+  "most ATVV remotes have no HID mic key — skipping is normal" prompt does not apply for the reason
+  given (the key exists), but its *conclusion* does: this button cannot drive PTT. A toggle
+  (press to start, press again to stop) is the only interaction a pulse can support.
+  Note that `F5` unremapped is "reload" in browsers — another argument for keyd rather than
+  direct binds.
+- **Unresolved as of 2026-10-08: which code `mic` actually emits.** Two measurements disagree. A raw
+  read of `/dev/input/event13` with keyd stopped reported `KEY_F5` (63). A full `keyd monitor -t`
+  sweep reports `f21` for the mic press — which is what `grave = f21` (the `app` button) produces,
+  while `prog1` never appears at all. If the firmware really sends `grave` for mic, then `app` and
+  `mic` are indistinguishable except by duration (163 ms vs 0 ms), which is not a usable
+  discriminator. A re-read printing *every* event, including `EV_MSC` scancodes, is the outstanding
+  measurement. Do not build on the `KEY_F5` row until it is settled.
 - **`KEY_POWER` passes straight to logind/the compositor while keyd is absent**, so a stray press
   during setup can suspend the host. The learning step should warn before prompting for `power`, and
   the generated keyd conf should be in place before anyone is asked to test that key.

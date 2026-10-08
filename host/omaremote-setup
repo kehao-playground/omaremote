@@ -401,6 +401,12 @@ cmd_verify() {
   # outside a lease its tap blanks the screen, which is why tests/bind-matrix.sh excludes it. The
   # same suppression is what makes a lease unable to observe anything about actions, so this sweep
   # proves the TRANSPORT and nothing about what the keys do. Step 6's real-remote pass covers that.
+  #
+  # It also does NOT cover keyd. Our keyd section is `[ids] 2717:32b8` -- an explicit list -- so the
+  # injector's uinput device is never grabbed, and these keysyms go straight to the compositor. The
+  # `f5 = prog1` style translation in /etc/keyd/omaremote.conf is therefore UNTESTED by this sweep;
+  # a pass here says the bind layer works, not that keyd rewrites anything correctly. Only the real
+  # remote exercises keyd. (Learned 2026-10-08: the mic button failed with this sweep passing.)
   local k neutral seq=""
   for k in "${KEY_ORDER[@]}"; do
     IFS=: read -r _ neutral <<< "${LEARNED_KEYS[$k]}"

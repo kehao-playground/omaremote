@@ -63,8 +63,10 @@ Per-app profiles and "app control mode", window-switcher overlay, mouse mode, la
 - **Repo root is the plugin.** `omarchy plugin add <git url> --enable` installs it directly. `host/`, `tests/`, `docs/` are sidecar directories. No symlinks anywhere in the tree (Omarchy forbids them).
 - **Service.qml hosts the engine** so removing the bar widget does not stop the remote from working. BarWidget/Panel only read state and write config.
 - **The plugin performs no privileged or installing action.** Doctor reports what is missing and the exact command; `host/omaremote-setup` does the work.
-- **No second Quickshell process or plugin-owned systemd unit.** The plugin invokes only documented operations of `wtype`, `wpctl`, `playerctl`, `voxtype`, `busctl`, `hyprctl`, `pw-dump`, `omarchy-lock-screen`, and `systemctl --user` (inspect/restart the existing Voxtype service). Commands use argument arrays, never interpolated shell strings; package installation and unit creation remain in host setup.
-- **Hardware-free testability is a design constraint:** the Service exposes an `IpcHandler` reachable as `omarchy-shell omaremote <verb> …` (`key <name> down|up`, `voice state <state>`, `reset`, `mic remote|system`, `micStatus <operationId>`, `selftest …`) for deterministic event sequences, and `wtype -P F13 … -p F13` exercises the real Hyprland bind → GlobalShortcut path (Hyprland routes virtual-keyboard events through binds). `hyprctl dispatch global` is **not** usable: it forwards the compositor's internal `m_passPressed`, not an explicit down/up.
+- **No second Quickshell process or plugin-owned systemd unit.** The plugin invokes only documented operations of `wpctl`, `playerctl`, `voxtype`, `busctl`, `hyprctl`, `pw-dump`, `omarchy-lock-screen`, and `systemctl --user` (inspect/restart the existing Voxtype service). Commands use argument arrays, never interpolated shell strings; package installation and unit creation remain in host setup.
+- **Hardware-free testability is a design constraint:** the Service exposes an `IpcHandler` reachable as `omarchy-shell omaremote <verb> …` (`key <name> down|up`, `voice state <state>`, `reset`, `mic remote|system`, `micStatus <operationId>`, `selftest …`) for deterministic event sequences, and `tests/inject-key.py` (a temporary uinput device, run under sudo) exercises the real Hyprland bind → GlobalShortcut path (Hyprland routes virtual-keyboard events through binds). `hyprctl dispatch global` is **not** usable: it forwards the compositor's internal `m_passPressed`, not an explicit down/up.
+
+  `wtype` was the original injector and is **no longer used anywhere** (2026-10-07): creating a virtual keyboard while the triggering key is still physically held destroys that key's release edge, so a held remote key never produced an `up`. Note also that an injected uinput device is **not** matched by keyd's `[ids]` list, so injection tests the bind layer and deliberately bypasses keyd's own remapping — only the real remote exercises `/etc/keyd/omaremote.conf`.
 
 ### Verification-first items (Plan task 0)
 
@@ -100,10 +102,21 @@ menu = f20
 volumeup = f22
 volumedown = f23
 power = f24
-<mic key, if any> = prog1   # → XF86Tools; most ATVV remotes have no HID mic key
+<mic key, if any> = prog1   # → XF86Launch1; most ATVV remotes have no HID mic key
 ```
 
-Neutral key pool: F13–F24 (12) + `prog1`/XF86Tools (13th). All keycodes are < 256 so they survive xkb on Wayland.
+Neutral key pool: F13–F24 (12) + `prog1` (13th, keysym `XF86Launch1` — it is `<I156>` in xkb, not a
+function key). All keycodes are < 256 so they survive xkb on Wayland.
+
+**The xkb option `fkeys:basic_13-24` is mandatory, not optional.** `/usr/share/X11/xkb/symbols/pc`
+never maps `<FK13>`–`<FK24>`, so by default `inet(evdev)` names them `XF86Tools`, `XF86Launch5`–
+`Launch9`, `F19`, `XF86AudioMicMute`, `XF86TouchpadToggle/On/Off` and `F24` — only `F19` and `F24`
+keep their own names. Binding `"F13"` then matches nothing and **every remote key silently does
+nothing** (measured 2026-10-06: a 12-key sweep returned `down=0, up=0` for all twelve). Setup must
+add the option to `input.kb_options`, **preserving** Omarchy's existing value rather than replacing
+it (`kb_options` overwrites, it does not append), and it cannot be set with `hyprctl keyword` —
+that answers "keyword can't work with non-legacy parsers" on a Lua config, so the file must be
+edited and reloaded.
 
 ### Hyprland — `~/.config/hypr/omaremote.lua`
 
@@ -114,7 +127,7 @@ Omarchy configures Hyprland in Lua (`~/.config/hypr/hyprland.lua` → `require("
 hl.bind("F13", hl.dsp.global("omaremote:up"),   { description = "omaremote:up" })
 hl.bind("F14", hl.dsp.global("omaremote:down"), { description = "omaremote:down" })
 -- … one line per supported key …
-hl.bind("XF86Tools", hl.dsp.global("omaremote:mic"), { description = "omaremote:mic" })  -- only if the remote has a HID mic key
+hl.bind("XF86Launch1", hl.dsp.global("omaremote:mic"), { description = "omaremote:mic" })  -- only if the remote has a HID mic key
 -- Keyboard-reachable escape hatch, independent of the remote (§4.3):
 o.bind("SUPER + CTRL + ALT + R", "OmaRemote reset", "omarchy-shell omaremote reset")
 ```
@@ -204,20 +217,30 @@ Boundary cases are enumerated in `tests/KeyEngine.test.js`: release exactly at t
 
 `reset()` clears every key's state, calls `VoiceSession.abort()` (§5.2: `voxtype record cancel`, plus `MicClose` only for a plugin-owned remote mic; never `stop`), closes HUD and Panel. This path is hard-coded and cannot be disabled by config. It has two entries that must always exist: at least one **supported** key with `panic: true` (enforced by setup §7 and Doctor), and the IPC verb `omarchy-shell omaremote reset`, which setup binds to `SUPER+CTRL+ALT+R` so a stuck remote can always be cleared from the keyboard.
 
-The engine emits `(keyName, trigger, action)` events; it never touches Hyprland, wtype, or processes.
+The engine emits `(keyName, trigger, action)` events; it never touches Hyprland or processes.
 
 ### 4.4 Actions (closed union — `lib/Actions.js`)
 
 | type | fields | dispatch |
 |---|---|---|
-| `key` | `keys: "ctrl+shift+Return"` | `wtype` — modifiers become `-M mod … -m mod`, final token `-k <keysym>` |
-| `dispatch` | `dispatcher`, `arg` | `Hyprland.dispatch("<dispatcher> <arg>")`, no process spawn |
+| `key` | `keys: "ctrl+shift+Return"` | `hl.dsp.send_key_state({ mods, key, state })` — a `down` dispatch, then an `up` queued 50 ms later (`mods` is required; `""` when none) |
+| `dispatch` | `dispatcher` | `Hyprland.dispatch("<dispatcher>")`, no process spawn. `dispatcher` **must** be a Lua expression starting `hl.` and carries its own arguments; there is no separate `arg` |
 | `volume` | `delta: "+5" \| "-5" \| "mute"` | `wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+` / `set-mute … toggle` |
 | `media` | `cmd: play-pause \| next \| previous` | `playerctl <cmd>` |
-| `screen` | `cmd: off \| lock` | `hyprctl dispatch dpms off` / `omarchy-lock-screen` |
+| `screen` | `cmd: off \| lock` | `hl.dsp.dpms("off")` / `omarchy-lock-screen` |
 | `none` | — | placeholder |
 
-`Actions.toArgv(action)` returns `{ kind: "process", argv: [...] }` or `{ kind: "dispatch", cmd }` so it can be unit-tested without spawning.
+`Actions.toArgv(action)` returns `{ kind: "process", argv: [...] }`, `{ kind: "dispatch", cmd }`, or
+`{ kind: "keyseq", down, up }` so it can be unit-tested without spawning.
+
+**A legacy dispatch string is a config error, not a fallback.** Omarchy's Lua config evaluates a
+dispatch string *as Lua*, so `"exec omarchy-menu"` and `"workspace e+1"` are parse errors rather
+than dispatches (`hyprctl dispatch dpms on` → ``error: ')' expected near 'on'``). This fails
+**silently twice over**: the action still appears in `lastAction` as though it ran, and `hyprctl
+dispatch` answers `ok` even for an argument it cannot use (verified: `hl.dsp.dpms(42)` → `ok`).
+`lib/Config.js` therefore reports a `legacy-dispatcher` problem for any `dispatch` action whose
+`dispatcher` does not start with `hl.`; it reports and never rewrites. Three shipped defaults
+(`home`, `app`, and `power`'s tap) were dead on this host until 2026-10-07 for exactly this reason.
 
 ### 4.5 Default profile (generic ATVV remote)
 
@@ -340,7 +363,7 @@ A `PanelWindow` owned by Service: layer overlay, top-centre, no exclusive zone, 
 
 bash (Omarchy ships bash 5), idempotent, safe to re-run. Steps:
 
-1. `sudo pacman -S --needed keyd wtype playerctl evtest jq psmisc nodejs` (Node.js runs the shared `lib/Doctor.js` rules for `--doctor`); verify the other documented host tools (`pw-dump`, `wpctl`, Voxtype) before dependent steps. `sudo systemctl enable --now keyd` (a host that never ran keyd has nothing to `reload`). Install `rustup` if `cargo` is missing, build ATVVoice with `cargo install --git https://github.com/b0o/ATVVoice` after checking its upstream build prerequisites, write the user unit plus a drop-in with `--mic-on-demand`, `systemctl --user daemon-reload`, then `systemctl --user enable --now atvvoice`.
+1. `sudo pacman -S --needed keyd playerctl evtest jq psmisc nodejs` (Node.js runs the shared `lib/Doctor.js` rules for `--doctor`); verify the other documented host tools (`pw-dump`, `wpctl`, Voxtype) before dependent steps. `sudo systemctl enable --now keyd` (a host that never ran keyd has nothing to `reload`). Install `rustup` if `cargo` is missing, build ATVVoice with `cargo install --git https://github.com/b0o/ATVVoice` after checking its upstream build prerequisites, write the user unit plus a drop-in with `--mic-on-demand`, `systemctl --user daemon-reload`, then `systemctl --user enable --now atvvoice`.
 2. **Detect the remote:** list `/proc/bus/input/devices` entries matching `Remote|RC|G20` (or take `--device vendor:product`). **Learn keys** — skipped when `config.json → device.learned` already exists for this vendor:product unless `--relearn` is given. keyd holds the remote with `EVIOCGRAB`, so on a re-run `evtest` would see nothing: learning runs inside `sudo systemctl stop keyd` … `start keyd`, with a `trap` that terminates/reaps the learning process and restarts keyd on any exit or Ctrl-C. Exclusivity is tested by the grab itself: one `evtest --grab` process holds the selected node throughout learning; a failed grab (`EBUSY`) aborts with the holder list from `fuser -v` as a diagnostic only. Normal readers such as the compositor's libinput keep the node open and coexist with `evtest`, so open handles are never treated as a conflict. Prompt the 13 *logical* keys one at a time; accept a press/release pair before advancing, or `s` / 10 s timeout to mark it `supported: false`. `mic` is last with "most ATVV remotes have no HID mic key — skipping is normal". `up down left right ok back` are required; abort if any is skipped. **Panic guarantee:** if the panic key (default `menu`) was skipped, ask for a supported fallback in the order `home, app, power, back`; the chosen key gets `panic: true` and loses `hold`/`repeat`. Stage the results and generated keyd config; reject duplicate physical-key assignments and validate with `keyd check` before replacing existing files. Persist `device.learned` / `keys.<k>.supported` only after validation. Terminate/reap `evtest` to release its grab, explicitly `sudo systemctl start keyd`, then `sudo keyd reload`. Prompt the user to press a learned key and confirm via a 3 s `keyd -m` capture that the remote emits the expected neutral key; restore the previous config and reload on failure.
 Learning cleanup uses a dedicated process group: the trap sends TERM then KILL, waits for every child, confirms the evdev grab is released, and only then starts keyd. Prior files remain untouched until staged learning passes duplicate-key and `keyd check` validation.
 3. Write `~/.config/hypr/omaremote.lua` (§3); append `require("hypr.omaremote")` to `hyprland.lua` if absent; `hyprctl reload`; verify the description set with `hyprctl binds -j` as in §3, abort on mismatch.
@@ -348,8 +371,9 @@ Learning cleanup uses a dedicated process group: the trap sends TERM then KILL, 
 5. Apply the existing `voice.mic` mode (or `remote` only when no valid config exists); an explicit `--mic remote|system` may select a mode. Obtain the operation ID and poll `micStatus <operationId>` until success/failure (§3). Each IPC call returns promptly; setup treats transport errors, unknown IDs and payload `ok: false` as failure. The overall client budget is 150 s (initial wait, apply, interference wait and rollback bounds); expiry reports an unresolved operation and fails without starting self-test or sending a competing apply.
 6. **Transport self-test:** `omarchy-shell omaremote selftest arm` obtains an exclusive test lease (30 s) and returns an ID. Arming requires VoiceSession idle, fresh backend idle, no held keys or pending key timers/commands, and no mic/recovery operation; otherwise return `busy` without cancelling anything. With the lease active, all normal action dispatch and voice starts (HID, D-Bus, IPC and mic-test UI) are suppressed. Keep the real backend observer attached; if external F9 starts recording, fail the test, clean up its fake state, and resume normal observation of that session without cancelling it. HUD shows `self-test`.
    - Count raw GlobalShortcut press/release events **before** KeyEngine consumes them; track IPC-injected events separately so they cannot pass a GlobalShortcut transport check. A recorder may run a separate KeyEngine instance, but it cannot invoke real actions. Real remote input during the window is counted too and may cause an extra-event failure.
-   - For every supported key run `wtype -P <neutral> -s 100 -p <neutral>`; query `selftest report <id>` for exactly one press and one release per supported key, no extras and no held keys. A report ends the lease, and mismatches name affected keys. If task-0 selects the exec/IPC fallback, tag and test that path separately rather than claiming GlobalShortcut success.
-   - Report, reset, external recording and lease expiry all discard the test engine, timers and queued actions before normal dispatch resumes; held keys are quarantined until release. Expired/invalid IDs return an error, never partial success. The runner bounds each `wtype` call, checks `selftest status <id>` (active + remaining time) before each injection, and stops/reaps its injector on any failure or before the 30 s deadline. Its exit trap sends releases for keys it pressed, then `selftest disarm <id>`. No injections may continue after lease expiry; cleanup releases never trigger tap/hold actions. Explicit reset still invokes the normal voice abort contract; test-generated panic only records an event.
+   - For every supported key inject the neutral key with `tests/inject-key.py` (one `--seq` covering
+     every key is preferred over 13 device create/destroy cycles); query `selftest report <id>` for exactly one press and one release per supported key, no extras and no held keys. A report ends the lease, and mismatches name affected keys. If task-0 selects the exec/IPC fallback, tag and test that path separately rather than claiming GlobalShortcut success.
+   - Report, reset, external recording and lease expiry all discard the test engine, timers and queued actions before normal dispatch resumes; held keys are quarantined until release. Expired/invalid IDs return an error, never partial success. The runner bounds each injector call, checks `selftest status <id>` (active + remaining time) before each injection, and stops/reaps its injector on any failure or before the 30 s deadline. Its exit trap sends releases for keys it pressed, then `selftest disarm <id>`. No injections may continue after lease expiry; cleanup releases never trigger tap/hold actions. Explicit reset still invokes the normal voice abort contract; test-generated panic only records an event.
 
 `omaremote-setup --doctor` performs checks only and prints the same JSON the Panel Doctor renders; both use `lib/Doctor.js` rules so they can never disagree.
 
