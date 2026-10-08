@@ -1878,7 +1878,23 @@ Seven passages in the main spec are now known to be wrong or incomplete. Leaving
 - Modify: `docs/superpowers/specs/2026-09-14-omaremote-design.md` — §2, §3 (Hyprland, Voxtype), §4.1, §4.3, §5.2, §7 steps 2, 5, 6
 - Modify: `docs/superpowers/specs/2026-10-02-omaremote-host-setup-design.md` (mark §9 applied)
 
-- [ ] **Step 1: Apply the seven corrections**
+- [x] **Step 1: Apply the seven corrections** — **DONE 2026-10-08** (commits `6027931`, `feb6e0f`, `c235ef5`)
+
+Applied, with two departures from the list below, both because live measurement contradicted the
+plan rather than the spec:
+
+- **Correction 1 was NOT applied, deliberately.** §3's "`hl.dsp.global` requests the release event
+  itself, so a single bind delivers press and release" is **correct**. Task 6 measured exactly that
+  (one bind, 12/12 clean press+release), and the real remote delivers `mic down=3 up=3`. The plan's
+  premise that measurement had disproved it was itself mistaken. Deleting a true sentence because a
+  stale note said to would have been the worse outcome.
+- **Four corrections were needed that this list does not contain**, all found on 2026-10-08:
+  `wtype` removed everywhere (it destroys the release edge of the key that triggered it);
+  `fkeys:basic_13-24` recorded as mandatory; legacy dispatch strings specified as config errors;
+  and the 13th neutral key changed from `prog1` to `xfer`, because **keyd aliases `prog1`-`prog4`
+  to `f21`-`f24`** so `mic = prog1` emitted `app`'s code.
+
+- [ ] **Step 1 (original list, for reference)**
 
 Work through design spec §9's table, which names each location and the replacement:
 
@@ -1924,3 +1940,46 @@ Also corrects keyd -m (not a 2.6.0 subcommand), the systemctl show key
 order that caused Plan 2's one critical finding, and adds timing.stuckMs
 and the stuckKey effect to §4, which said nothing about a lost release."
 ```
+
+---
+
+## Plan 3 outcome (2026-10-08)
+
+Tasks 1-9 complete. `make check`: 222 unit pass / 0 fail, 46 integration pass / 0 fail.
+
+**Four defects were found that no amount of reading would have produced.** Each was invisible to
+every check that did not go through the layer that was lying:
+
+1. **keyd aliases `prog1` to `KEY_F21`.** keyd's key-name table is not Linux's, so `f5 = prog1`
+   made the mic button emit `app`'s exact code. `keyd check` passes on such a config and reports
+   nothing. It survived two days because every test above keyd used the *Linux* code 148: injecting
+   `prog1` through uinput reached the `XF86Launch1` bind and looked like proof of a path the real
+   system never produces. Fixed by measuring what keyd EMITS (read its own virtual keyboard —
+   `keyd monitor` prints keyd's *names*, which is what hid it) and switching to `xfer`.
+2. **`cmd_keyd` never reloaded keyd.** A re-run wrote the config and left the old mapping live,
+   while `keyd check`, `cat` and `genconf` all agreed with the new file. Only an injection through
+   keyd disagreed.
+3. **A voxtype status line with an empty `class`** was treated as "a class we do not recognise" and
+   so as an unhealthy daemon, calling `toUnconfigured("voxtype not responding")` mid-transition on
+   every mic press.
+4. **The mic button is a ~0 ms pulse.** PTT on it is mechanically correct and useless (voxtype logs
+   `Recording stopped (0.1s)`). Both edges DO arrive at every duration including 0 ms — the
+   "release is dropped" theory was wrong. Fixed with `keys.mic.trigger = "toggle"`, now the default.
+
+**Method note for the next reader.** Three wrong theories were held and discarded here, and the
+common fault in all of them was trusting a layer's output *format* instead of verifying it: reading
+`keyd monitor`'s names as keycodes, reading cumulative `errorCount`/`lastError` as current state,
+and twice drawing conclusions from JSON fields that do not exist (`.voice.gate`, `.voice.backend` —
+both answered `null`, which read as meaningful). When a measurement and a config disagree, the thing
+to check first is what the measuring tool actually reports.
+
+**Carried forward, not done:**
+- `voice.mic = "remote"` (the remote's own microphone over Bluetooth, via ATVVoice) is still
+  unwired. Confirmed on the host 2026-10-08: dictation captures from
+  `alsa_input.pci-0000_00_1b.0.analog-stereo`, i.e. the system mic, which is what `mic: "system"`
+  means. Not a defect — ATVVoice was explicitly out of Plan 3's scope. This is the natural next
+  piece of work, together with Typeless support, which is why `toggle` is the shipped default.
+- `s_mic_apply_second_request_is_busy` is a genuine intermittent, ~6% and not load-induced (it
+  failed with nothing else running). The scenario races by construction: it requires a second
+  `ipc mic remote` to still see `busy`, which only holds while the first apply is in flight.
+  Undiagnosed; unknown whether it is a test bug or a real contract gap.
