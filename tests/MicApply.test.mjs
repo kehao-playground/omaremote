@@ -11,7 +11,12 @@ const cmdId = (fx, kind) => byType(fx, "cmd").find(c => c.kind === kind).id;
 const GET_OUT = JSON.stringify({ key: "audio.device", value: "default", file_value: null });
 
 function ready() {
-  const voice = createVoiceSession(normalizeConfig(DEFAULT_CONFIG).config);
+  // These scenarios drive a session via hidPress/hidRelease, which are the PTT-mode API. The
+  // shipped mic default is "toggle", so ptt must be selected explicitly or every hidPress here is
+  // silently inert and the session never starts.
+  const cfg = normalizeConfig({ ...DEFAULT_CONFIG,
+    keys: { ...DEFAULT_CONFIG.keys, mic: { trigger: "ptt" } } }).config;
+  const voice = createVoiceSession(cfg);
   voice.status("idle", 0, { fresh: true });
   const mic = createMicApply({ voice });
   mic.backend("idle", 0, { fresh: true });

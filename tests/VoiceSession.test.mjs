@@ -6,6 +6,10 @@ import { DEFAULT_CONFIG } from "../lib/Defaults.mjs";
 import { byType, last } from "./helpers.mjs";
 
 const cfg = (over = {}) => normalizeConfig({ ...DEFAULT_CONFIG, ...over }).config;
+// hidPress/hidRelease are the PTT-mode API. The shipped default is now "toggle" (a pulse-type mic
+// button cannot do push-to-talk, and a toggle suits a streaming dictation backend), so every test
+// that exercises them selects ptt explicitly rather than relying on the default.
+const pttCfg = () => cfg({ keys: { ...DEFAULT_CONFIG.keys, mic: { trigger: "ptt" } } });
 const kinds = (fx) => byType(fx, "cmd").map(c => c.kind);
 const stateOf = (fx) => (last(fx, "state") || {}).state;
 const cmdId = (fx, kind) => byType(fx, "cmd").find(c => c.kind === kind).id;
@@ -15,7 +19,7 @@ const A = (vs, state, extra = {}) => ({ state, requestId: vs.snapshot().atvReque
 
 // Bring a session to confirmed recording via the HID key.
 function hidRecording() {
-  const vs = createVoiceSession(cfg());
+  const vs = createVoiceSession(pttCfg());
   vs.status("idle", 0, { fresh: true });
   const fx = vs.hidPress(10);
   vs.cmdExit(cmdId(fx, "start"), 0, 20);
@@ -24,7 +28,7 @@ function hidRecording() {
 }
 
 test("HID press from idle issues record start and enters starting with a 1500ms deadline", () => {
-  const vs = createVoiceSession(cfg());
+  const vs = createVoiceSession(pttCfg());
   const fx = vs.hidPress(10);
   assert.deepEqual(kinds(fx), ["start"]);
   assert.deepEqual(byType(fx, "cmd")[0].argv, ["voxtype", "record", "start"]);
@@ -52,7 +56,7 @@ test("session is confirmed only by observed recording; release then issues exact
 });
 
 test("release while starting is remembered: no stop before confirmation, one stop on confirmation", () => {
-  const vs = createVoiceSession(cfg());
+  const vs = createVoiceSession(pttCfg());
   vs.hidPress(0);
   assert.deepEqual(kinds(vs.hidRelease(50)), []);
   const fx = vs.status("recording", 200);
@@ -61,7 +65,7 @@ test("release while starting is remembered: no stop before confirmation, one sto
 });
 
 test("start never confirms: at 1500ms cancel is issued and state is recovering, not idle", () => {
-  const vs = createVoiceSession(cfg());
+  const vs = createVoiceSession(pttCfg());
   vs.hidPress(0);
   const fx = vs.advance(1500);
   assert.deepEqual(kinds(fx), ["cancel"]);
@@ -71,7 +75,7 @@ test("start never confirms: at 1500ms cancel is issued and state is recovering, 
 });
 
 test("record start exiting non-zero enters recovering", () => {
-  const vs = createVoiceSession(cfg());
+  const vs = createVoiceSession(pttCfg());
   const fx = vs.hidPress(0);
   const r = vs.cmdExit(cmdId(fx, "start"), 1, 30);
   assert.deepEqual(kinds(r), ["cancel"]);
@@ -93,7 +97,7 @@ test("maxSessionSec forces a stop with a warning", () => {
 });
 
 test("stopped/unknown status makes the session unconfigured; healthy idle restores it", () => {
-  const vs = createVoiceSession(cfg());
+  const vs = createVoiceSession(pttCfg());
   const fx = vs.status("stopped", 0, { fresh: true });
   assert.equal(stateOf(fx), "unconfigured");
   assert.deepEqual(vs.hidPress(10), []);
@@ -113,7 +117,7 @@ test("stop exiting non-zero enters recovering regardless of cancel exit code", (
 });
 
 test("gate: acquire only from idle, blocks HID start, release restores", () => {
-  const vs = createVoiceSession(cfg());
+  const vs = createVoiceSession(pttCfg());
   assert.equal(vs.gate.acquire("selftest"), true);
   assert.equal(vs.gate.acquire("mic-apply"), false);
   assert.deepEqual(kinds(vs.hidPress(0)), []);
@@ -124,7 +128,7 @@ test("gate: acquire only from idle, blocks HID start, release restores", () => {
 
 // ---- D-Bus arbitration (§5.2) ----
 function idleSession() {
-  const vs = createVoiceSession(cfg());
+  const vs = createVoiceSession(pttCfg());
   vs.setDbusSource({ sender: ":1.42", generation: 0 });
   vs.status("idle", 0, { fresh: true });
   return vs;
@@ -360,7 +364,7 @@ test("recovery settles after fresh idle + reaped cancel + quiet settle window", 
 });
 
 test("a non-fresh idle with no transition does not settle; a fresh poll does", () => {
-  const vs = createVoiceSession(cfg());
+  const vs = createVoiceSession(pttCfg());
   vs.status("idle", 0, { fresh: true });
   vs.hidPress(10);
   const fx = vs.advance(1510);                                   // start-timeout -> recovering, cancel issued
@@ -381,7 +385,7 @@ test("a recording->idle transition observed after the cancel counts as fresh evi
 });
 
 test("phantom recording after an unconfirmed start is re-cancelled up to three times, then escalates to a restart once quiet", () => {
-  const vs = createVoiceSession(cfg());
+  const vs = createVoiceSession(pttCfg());
   vs.status("idle", 0, { fresh: true });
   vs.hidPress(10);
   const fx = vs.advance(1510);                                    // start-timeout: cancel #1, recovering from `starting`
@@ -509,7 +513,7 @@ test("an unanswered D-Bus end re-read is bounded and forces the stop", () => {
 });
 
 test("stale command callbacks from before recovery are ignored", () => {
-  const vs = createVoiceSession(cfg());
+  const vs = createVoiceSession(pttCfg());
   const fx = vs.hidPress(0);
   const startId = cmdId(fx, "start");
   vs.abort(100);
@@ -541,7 +545,7 @@ test("dl.settle is cleared by maybeRestart; recovery stays under a pending resta
 });
 
 test("a second abort() during recovery-from-starting preserves phantom classification: a late recording is re-cancelled, not external", () => {
-  const vs = createVoiceSession(cfg());
+  const vs = createVoiceSession(pttCfg());
   vs.status("idle", 0, { fresh: true });
   vs.hidPress(10);
   const fx = vs.advance(1510);                         // start-timeout -> recovering (unconfirmedEntry = true)
@@ -590,7 +594,7 @@ test("the recovery budget pauses across external dictation instead of escalating
 });
 
 test("a signal is dropped when no setDbusSource has been called yet (fails closed, not open)", () => {
-  const vs = createVoiceSession(cfg());
+  const vs = createVoiceSession(pttCfg());
   vs.status("idle", 0, { fresh: true });
   assert.deepEqual(vs.dbus(D("streaming"), 0), []);
   assert.equal(vs.snapshot().state, "idle");
@@ -605,7 +609,7 @@ test("a signal missing the generation field is dropped even from the correct sen
 });
 
 test("after a successful restart, a later recording following an accepted idle is treated as external, not phantom", () => {
-  const vs = createVoiceSession(cfg());
+  const vs = createVoiceSession(pttCfg());
   vs.status("idle", 0, { fresh: true });
   vs.hidPress(10);
   const fx = vs.advance(1510);                          // start-timeout -> recovering, unconfirmedEntry = true
@@ -710,7 +714,7 @@ test("toggle never steals a session another owner holds, and respects gates", ()
 });
 
 test("toggle is inert unless the mic trigger selects it", () => {
-  const ptt = createVoiceSession(cfg());            // default trigger is ptt
+  const ptt = createVoiceSession(pttCfg());            // ptt selected explicitly
   ptt.status("idle", 0, { fresh: true });
   assert.deepEqual(ptt.hidToggle(10), [], "ptt mode ignores a toggle");
   const asKey = createVoiceSession(cfg({ keys: { ...DEFAULT_CONFIG.keys, mic: { trigger: "key" } } }));

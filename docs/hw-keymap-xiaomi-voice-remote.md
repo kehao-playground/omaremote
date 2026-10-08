@@ -80,10 +80,11 @@ mic button is physically impossible on this model.
   hold duration including 0 ms.
 
   `trigger: "toggle"` drives the session from the **press edge alone** — press to start, press
-  again to stop — which is the only interaction a pulse supports. Set it in
-  `~/.config/omaremote/config.json` under `keys.mic`; the shipped default stays `"ptt"` for generic
-  remotes, so a host with this remote must opt in. `omaremote status` publishes the active value as
-  `micTrigger`.
+  again to stop — which is the only interaction a pulse supports. It is the **shipped default**, so
+  this remote needs no opt-in: a pulse button cannot do push-to-talk, and an explicit start/stop
+  also suits a streaming dictation backend (Typeless is an intended future target). A remote whose
+  mic button genuinely holds can set `trigger: "ptt"`. `omaremote status` publishes the active value
+  as `micTrigger`.
 
 - **RESOLVED 2026-10-08: keyd aliases `prog1` to `KEY_F21`, so `mic` emitted `app`'s code.**
   The remote is blameless. An unfiltered read of `/dev/input/event13` shows mic sending `KEY_F5`

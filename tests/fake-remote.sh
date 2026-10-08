@@ -186,8 +186,19 @@ ready() {   # Task 8 addition: also settle a fresh idle poll so selftestArm's 50
   ipc voice poll - > /dev/null
   wait_for '.voice.backendFresh' true 3
 }
+# These scenarios drive a session with `ipc key mic down/up`, which is the PTT interaction. The
+# shipped mic default is "toggle" (a pulse-type mic button cannot hold; see spec §5.1), where the
+# release is ignored -- so ptt must be selected explicitly or the `up` never stops the session and
+# every one of them hangs on its first wait_for.
+use_ptt() {
+  local f=$XDG_CONFIG_HOME/omaremote/config.json
+  jq '.keys.mic.trigger = "ptt"' "$f" > "$F/ptt.json" && cat "$F/ptt.json" > "$f"
+  wait_for '.micTrigger' ptt 5
+}
+
 s_hid_session() {
   ready || return 1
+  use_ptt || return 1
   ipc key mic down > /dev/null
   wait_for '.voice.state' recording 3 || return 1
   [[ $(jget '.voice.owner') == hid ]] || return 1
@@ -200,6 +211,7 @@ s_hid_session() {
 }
 s_hid_release_while_starting() {          # §9: no stop before confirmed recording; exactly one stop on confirmation
   ready || return 1
+  use_ptt || return 1
   echo 0.4 > "$F/vox.start-delay"
   ipc key mic down > /dev/null; sleep 0.1; ipc key mic up > /dev/null; sleep 0.1
   no_line "$F/vox.log" "voxtype record stop" || return 1
@@ -288,6 +300,7 @@ s_voxtype_absent_is_unconfigured() {      # §5.4: stopped → unconfigured, sta
 }
 s_remote_warning_disables_dbus_path() {   # §5.4: audio.device ≠ NodeName in remote mode → warning, D-Bus start path off, HID still works
   ready || return 1
+  use_ptt || return 1
   printf 'default' > "$F/vox.config"
   ipc voice audioDevice - > /dev/null
   wait_for '.remote.warning' true 3 || return 1
@@ -340,6 +353,7 @@ s_mic_apply_second_request_is_busy() {
 s_mic_apply_unknown_id_is_failure() { ready || return 1; [[ $(ipc micStatus mic-99 | jq -r .ok) == false ]]; }
 s_mic_apply_waits_for_session() {         # §3 step 1: no mutation while a session runs; HUD explains; applies afterwards
   ready || return 1
+  use_ptt || return 1
   ipc key mic down > /dev/null; wait_for '.voice.state' recording 3 || return 1
   local id; id=$(ipc mic system | jq -r .operationId)
   sleep 0.6
@@ -388,6 +402,7 @@ s_recovery_restart_bounded() {             # §5.3/§9: daemon hangs after abort
 }
 s_stats_and_capture() {                    # §5.5 + §3 capture verification
   ready || return 1
+  use_ptt || return 1
   ipc key mic down > /dev/null; wait_for '.voice.state' recording 3 || return 1
   sleep 0.6
   ipc key mic up > /dev/null; wait_for '.voice.state' idle 5 || return 1
@@ -448,6 +463,7 @@ s_selftest_counts_shortcut_not_ipc() {   # §7 step 6: IPC-injected events are t
 }
 s_selftest_busy_during_session() {       # §9: arm returns busy without cancelling the session
   ready || return 1
+  use_ptt || return 1
   ipc key mic down > /dev/null; wait_for '.voice.state' recording 3 || return 1
   [[ $(ipc selftestArm | jq -r .reason) == busy ]] || return 1
   [[ $(jget '.voice.state') == recording ]] || return 1

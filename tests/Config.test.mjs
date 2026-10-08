@@ -143,18 +143,36 @@ test("mic trigger: ptt | toggle | key, migrating the legacy ptt boolean", () => 
 
   // Legacy configs on disk carry `ptt`. ptt:false meant "mic is an ordinary key, let the engine
   // handle tap/hold", which is now spelled "key" -- so the migration must not turn it into "ptt".
-  assert.equal(trig({ ptt: true }), "ptt");
+  // The normalizer always wrote `ptt: true` (it was `src.ptt !== false`), so `true` is
+  // indistinguishable from unset: it records no choice and must not pin a config to ptt forever.
+  assert.equal(trig({ ptt: true }), "toggle");
+  // `ptt: false` required a deliberate edit and meant "mic is an ordinary key" -- a real choice,
+  // preserved. This is the one asymmetry in the migration and the reason it is not a blanket reset.
   assert.equal(trig({ ptt: false }), "key");
-  assert.equal(trig({}), "ptt", "an unspecified mic trigger keeps the spec default");
+  assert.equal(trig({}), "toggle", "an unspecified mic trigger takes the shipped default");
 
   // Garbage falls back to the default rather than disabling the mic silently.
-  assert.equal(trig({ trigger: "nonsense" }), "ptt");
-  assert.equal(trig({ trigger: 7 }), "ptt");
+  assert.equal(trig({ trigger: "nonsense" }), "toggle");
+  assert.equal(trig({ trigger: 7 }), "toggle");
   // An explicit trigger wins over a stale ptt left beside it by an older writer.
-  assert.equal(trig({ trigger: "toggle", ptt: true }), "toggle");
+  assert.equal(trig({ trigger: "ptt", ptt: false }), "ptt", "an explicit trigger wins over a stale ptt");
   assert.equal(trig({ trigger: "key", ptt: true }), "key");
 
-  // The boolean is gone from the normalized shape: a derived duplicate is what let the keyd/xkb
-  // tables drift apart, so there is exactly one source of truth.
-  assert.equal(normalizeConfig({ version: 1 }).config.keys.mic.ptt, undefined);
+  // The legacy boolean must be REMOVED, not merely superseded. Unknown fields are preserved on
+  // write (spec §4.2), so without an explicit delete a migrated config keeps `ptt: true` sitting
+  // next to `trigger: "toggle"` and a reader cannot tell which one the plugin obeys -- the exact
+  // duplicate-source-of-truth drift this enum exists to end.
+  //
+  // This must be asserted on a config that ACTUALLY CARRIES `ptt`. The earlier version of this
+  // assertion used `normalizeConfig({ version: 1 })`, which has no `ptt` at all, so it passed
+  // vacuously and could never have caught the leak.
+  const migrated = normalizeConfig({ version: 1, keys: { mic: { ptt: true } } }).config.keys.mic;
+  assert.equal(migrated.trigger, "toggle");
+  assert.equal(migrated.ptt, undefined, "the legacy ptt boolean must not survive migration");
+  const migratedOff = normalizeConfig({ version: 1, keys: { mic: { ptt: false } } }).config.keys.mic;
+  assert.equal(migratedOff.trigger, "key");
+  assert.equal(migratedOff.ptt, undefined);
+  // A genuinely unknown field is still preserved -- the delete is targeted, not a purge.
+  const kept = normalizeConfig({ version: 1, keys: { mic: { ptt: true, mystery: 42 } } }).config.keys.mic;
+  assert.equal(kept.mystery, 42);
 });
