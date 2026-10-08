@@ -33,3 +33,25 @@ test("stream buffers partial lines", () => {
   assert.deepEqual(s.feed(l.slice(0, 5)), []);
   assert.equal(s.feed(l.slice(5))[0].cls, "transcribing");
 });
+
+test("a line carrying no class at all is no information, not an unhealthy daemon", () => {
+  // Measured on the host 2026-10-08 against voxtype 1.1.0: its `status --follow` stream emits a
+  // line with an EMPTY class as a normal part of the recording -> idle transition:
+  //     class=recording
+  //     class=              <-- this one
+  //     class=idle
+  // Mapping that to "unknown" made isHealthy() reject it, and VoiceSession.status() then called
+  // toUnconfigured("voxtype not responding") on a daemon that was alive and merely mid-transition.
+  // Every mic press therefore incremented errorCount and knocked the session out of its state.
+  //
+  // An absent class is NOT the same as a class we do not recognise: "weird" means the daemon told
+  // us something we cannot interpret, while "" means it told us nothing. Only the former is a
+  // health signal, so a classless line must be dropped by the caller (`if (!r) return`).
+  assert.equal(parseStatusLine('{"class":""}'), null);
+  assert.equal(parseStatusLine('{"class":"","alt":""}'), null);
+  assert.equal(parseStatusLine('{"text":"x"}'), null);                 // no class and no alt
+  // An unrecognised but non-empty class stays "unknown" -- that distinction is the whole point.
+  assert.equal(parseStatusLine('{"class":"weird"}').cls, "unknown");
+  // `alt` still backstops a missing `class`, which is how the existing fallback is specified.
+  assert.equal(parseStatusLine('{"alt":"recording"}').cls, "recording");
+});
