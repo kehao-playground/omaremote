@@ -31,7 +31,7 @@ declare -A LEARNED_KEYS=(
   [right]="right:f16"      [ok]="enter:f17"        [back]="back:f18"
   [home]="home:f19"        [menu]="compose:f20"    [app]="grave:f21"
   [volup]="volumeup:f22"   [voldown]="volumedown:f23"
-  [power]="power:f24"      [mic]="f5:prog1"
+  [power]="power:f24"      [mic]="f5:xfer"
 )
 # Deterministic order, so a regenerated conf is byte-identical and stage_file sees no change.
 KEY_ORDER=(up down left right ok back home menu app volup voldown power mic)
@@ -157,7 +157,7 @@ cmd_keyd() {
   say "  * removing $KEYD_CONF and running 'sudo keyd reload' reverts"
   say ""
   say "    Terminal A:  sudo /usr/bin/keyd"
-  say "    Terminal B:  sudo keyd monitor -t      # press remote buttons; expect f13..f24 / prog1"
+  say "    Terminal B:  sudo keyd monitor -t      # press remote buttons; expect f13..f24 / xfer"
   say ""
   say "Confirm the remote now emits the neutral keys AND that your keyboard is unaffected."
   if (( ! ASSUME_YES )); then
@@ -187,12 +187,17 @@ cmd_keyd() {
 # The keysym for each neutral key. This table is duplicated from lib/Defaults.mjs NEUTRAL_KEYS
 # because bash cannot import an ES module; tests/setup-helpers.sh asserts the two agree, which is
 # the only thing stopping them drifting apart.
-neutral_keysym() {   # neutral_keysym <logical> -> F13..F24 / XF86Launch1
+neutral_keysym() {   # neutral_keysym <logical> -> F13..F24 / XF86Xfer
   local neutral; IFS=: read -r _ neutral <<< "${LEARNED_KEYS[$1]}"
-  # prog1 is <I156>, which symbols/inet maps to XF86Launch1 -- NOT XF86Tools, which is what <FK13>
-  # (our `up`) produces. Measured 2026-10-07 by injecting prog1 against binds on both names. The
-  # old wrong value made `up` and `mic` resolve to the same keysym, so one of them could never fire.
-  if [[ $neutral == prog1 ]]; then printf 'XF86Launch1'; else printf '%s' "${neutral^^}"; fi
+  # The 13th neutral key is NOT prog1. keyd's key-name table is not Linux's: keyd emits KEY_F21 for
+  # the name `prog1` and KEY_F22 for `prog2` -- they alias f21..f24. `mic = prog1` therefore emitted
+  # `app`'s exact code, so pressing mic fired omaremote:app and omaremote:mic never fired. `keyd
+  # check` passes on that config and says nothing. Measured on the host 2026-10-08 by reading keyd's
+  # own virtual keyboard; keyd monitor prints keyd's NAMES, which hid it.
+  #
+  # `xfer` was measured emitting its Linux code 147 = <I155> -> XF86Xfer: outside F13-F24, and with
+  # no application meaning that could act if it ever escaped a bind.
+  if [[ $neutral == xfer ]]; then printf 'XF86Xfer'; else printf '%s' "${neutral^^}"; fi
 }
 
 gen_lua() {
@@ -404,7 +409,7 @@ cmd_verify() {
   #
   # It also does NOT cover keyd. Our keyd section is `[ids] 2717:32b8` -- an explicit list -- so the
   # injector's uinput device is never grabbed, and these keysyms go straight to the compositor. The
-  # `f5 = prog1` style translation in /etc/keyd/omaremote.conf is therefore UNTESTED by this sweep;
+  # `f5 = xfer` style translation in /etc/keyd/omaremote.conf is therefore UNTESTED by this sweep;
   # a pass here says the bind layer works, not that keyd rewrites anything correctly. Only the real
   # remote exercises keyd. (Learned 2026-10-08: the mic button failed with this sweep passing.)
   local k neutral seq=""

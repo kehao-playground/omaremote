@@ -64,11 +64,27 @@ test("keyClass classifies keys", () => {
 test("neutral key table covers all 13 keys with unique keyd names and keysyms", () => {
   const names = KEY_NAMES.map(k => NEUTRAL_KEYS[k].keyd);
   assert.equal(new Set(names).size, 13);
-  // Measured on the host 2026-10-07, not assumed: KEY_PROG1 is <I156>, which symbols/inet maps to
-  // XF86Launch1. The table said XF86Tools, which is what <FK13> (keyd f13, our `up`) produces --
-  // so before this was corrected, `up` and `mic` resolved to the SAME keysym and one of them could
-  // never fire. Verified by injecting prog1 against binds on both names: XF86Launch1 fired.
-  assert.equal(NEUTRAL_KEYS.mic.keysym, "XF86Launch1");
+  // Measured on the host 2026-10-08, not looked up: **keyd's key-name table is not Linux's.**
+  // keyd's `prog1` emits KEY_F21 (191) and `prog2` emits KEY_F22 (192) -- they are aliases for
+  // f21..f24, not the KEY_PROG1 (148) that input-event-codes.h defines. So `mic = prog1` made the
+  // mic button emit `app`'s exact code: pressing mic fired omaremote:app and omaremote:mic could
+  // never fire at all. `keyd check` passes on such a config and reports nothing.
+  //
+  // This was invisible for two days because every check above keyd used the LINUX code: injecting
+  // `prog1` through uinput sends 148 -> XF86Launch1 -> the bind fires, which "proved" a path the
+  // real system never produces. keyd is the only thing that emits 191 there.
+  //
+  // `xfer` (147 -> <I155> -> XF86Xfer) was measured emitting its Linux code, is outside the
+  // F13-F24 range, and has no application meaning that could act if it ever leaked past a bind.
+  assert.equal(NEUTRAL_KEYS.mic.keyd, "xfer");
+  assert.equal(NEUTRAL_KEYS.mic.keysym, "XF86Xfer");
+  // No neutral key may use a keyd name that aliases another code. prog1..prog4 are the known trap;
+  // they are *valid* keyd names, so only this assertion stops one coming back.
+  for (const k of KEY_NAMES) {
+    assert.ok(!/^prog[1-4]$/.test(NEUTRAL_KEYS[k].keyd),
+      `NEUTRAL_KEYS.${k}.keyd is "${NEUTRAL_KEYS[k].keyd}": keyd aliases prog1-prog4 to f21-f24, ` +
+      `so this silently collides with another key's code`);
+  }
   // The collision above is the reason this is asserted at all: every keysym must be distinct, or
   // two logical keys fight over one bind.
   const syms = KEY_NAMES.map(k => NEUTRAL_KEYS[k].keysym);

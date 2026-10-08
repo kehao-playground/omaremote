@@ -41,7 +41,7 @@ keysym a Hyprland bind uses. The `F13`–`F24` column holds **only** with the xk
 | volup | volume up | `KEY_VOLUMEUP` | 115 | `f22` | `F22` |
 | voldown | volume down | `KEY_VOLUMEDOWN` | 114 | `f23` | `F23` |
 | power | power symbol | `KEY_POWER` | 116 | `f24` | `F24` |
-| mic | microphone icon | `KEY_F5` (disputed, see below) | 63 | `prog1` | `XF86Launch1` |
+| mic | microphone icon | `KEY_F5` | 63 | `xfer` | `XF86Xfer` |
 
 The **twelve non-mic buttons** each delivered a clean press **and** release pair (~0.11--0.19 s
 apart), with no autorepeat held back by the kernel — the engine's tap/hold/repeat discrimination has
@@ -71,13 +71,25 @@ mic button is physically impossible on this model.
   (press to start, press again to stop) is the only interaction a pulse can support.
   Note that `F5` unremapped is "reload" in browsers — another argument for keyd rather than
   direct binds.
-- **Unresolved as of 2026-10-08: which code `mic` actually emits.** Two measurements disagree. A raw
-  read of `/dev/input/event13` with keyd stopped reported `KEY_F5` (63). A full `keyd monitor -t`
-  sweep reports `f21` for the mic press — which is what `grave = f21` (the `app` button) produces,
-  while `prog1` never appears at all. If the firmware really sends `grave` for mic, then `app` and
-  `mic` are indistinguishable except by duration (163 ms vs 0 ms), which is not a usable
-  discriminator. A re-read printing *every* event, including `EV_MSC` scancodes, is the outstanding
-  measurement. Do not build on the `KEY_F5` row until it is settled.
+- **RESOLVED 2026-10-08: keyd aliases `prog1` to `KEY_F21`, so `mic` emitted `app`'s code.**
+  The remote is blameless. An unfiltered read of `/dev/input/event13` shows mic sending `KEY_F5`
+  (63, HID scancode `0x7003E`) and app sending `KEY_GRAVE` (41, `0x70035`) — two distinct codes.
+  But **keyd's key-name table is not Linux's**: measured by reading keyd's own virtual keyboard,
+  the output name `prog1` emits `KEY_F21` (191) and `prog2` emits `KEY_F22` (192), so
+  `prog1`–`prog4` alias `f21`–`f24` rather than the `KEY_PROG1` (148) of `input-event-codes.h`.
+  With `f5 = prog1`, pressing mic emitted exactly `app`'s code: `omaremote:app` fired and
+  `omaremote:mic` never could. `keyd check` passes on that config and reports nothing.
+
+  Why it survived two days of checking: every test above keyd used the *Linux* code. Injecting
+  `prog1` through uinput sends 148 → `XF86Launch1` → the bind fires, which looks like proof but
+  exercises a code the real system never emits. And `keyd monitor` prints keyd's **names**, so its
+  output read as a plausible `f21` collision rather than as the alias it was.
+
+  Fixed by making the 13th neutral key `xfer` (measured emitting its own Linux code 147 = `<I155>`
+  → `XF86Xfer`, outside the F13–F24 range, with no application meaning). `tests/Config.test.mjs`
+  pins the name and keysym and rejects `prog1`–`prog4` outright. `tests/inject-key.py
+  --vendor/--product` makes keyd's own remapping testable: claiming the remote's `vendor:product`
+  gets the virtual device grabbed, so no human has to press buttons.
 - **`KEY_POWER` passes straight to logind/the compositor while keyd is absent**, so a stray press
   during setup can suspend the host. The learning step should warn before prompting for `power`, and
   the generated keyd conf should be in place before anyone is asked to test that key.
@@ -100,7 +112,7 @@ mic button is physically impossible on this model.
   volumeup = f22
   volumedown = f23
   power = f24
-  f5 = prog1
+  f5 = xfer
   ```
 
   keyd's own key names are assumed to be the lowercased `KEY_*` stems; `keyd check` must validate the

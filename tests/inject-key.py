@@ -48,7 +48,13 @@ def key_codes():
 
 
 class Injector:
-    def __init__(self, codes, name="omaremote-inject", settle_s=SETTLE_S):
+    # The default vendor:product is deliberately NOT the remote's. keyd matches devices by
+    # `[ids] <vendor>:<product>`, so a default-id injector is never grabbed and its keys go straight
+    # to the compositor -- which is what the bind-layer tests want. Pass --vendor/--product to
+    # impersonate the remote and exercise keyd's own remapping instead; that path is otherwise
+    # untestable without a human pressing buttons.
+    def __init__(self, codes, name="omaremote-inject", settle_s=SETTLE_S,
+                 vendor=0x1234, product=0x5678):
         self.codes = codes
         self.fd = os.open("/dev/uinput", os.O_WRONLY | os.O_NONBLOCK)
         fcntl.ioctl(self.fd, UI_SET_EVBIT, EV_KEY)
@@ -56,7 +62,7 @@ class Injector:
             fcntl.ioctl(self.fd, UI_SET_KEYBIT, code)
         # struct uinput_setup { struct input_id id; char name[80]; __u32 ff_effects_max; }
         # struct input_id { __u16 bustype, vendor, product, version; }
-        setup = struct.pack(SETUP_FMT, 0x03, 0x1234, 0x5678, 1, name.encode(), 0)
+        setup = struct.pack(SETUP_FMT, 0x03, vendor, product, 1, name.encode(), 0)
         fcntl.ioctl(self.fd, UI_DEV_SETUP, setup)
         fcntl.ioctl(self.fd, UI_DEV_CREATE)
         time.sleep(settle_s)
@@ -96,6 +102,10 @@ def main():
     ap.add_argument("--seq", help="comma-separated name:hold_ms pairs, e.g. f13:120,f18:3000")
     ap.add_argument("--gap-ms", type=int, default=300, help="pause between sequence entries")
     ap.add_argument("--settle-ms", type=int, default=int(SETTLE_S * 1000))
+    ap.add_argument("--vendor", type=lambda v: int(v, 16), default=0x1234,
+                    help="hex vendor id for the virtual device; use the remote's to make keyd grab it")
+    ap.add_argument("--product", type=lambda v: int(v, 16), default=0x5678,
+                    help="hex product id for the virtual device")
     ap.add_argument("--linger-ms", type=int, default=0,
                     help="keep the virtual device alive this long AFTER the last release. "
                          "Without it the device is destroyed immediately, and a compositor that "
@@ -122,7 +132,8 @@ def main():
     if unknown:
         sys.exit(f"inject-key: unknown key name(s): {', '.join(unknown)}")
 
-    inj = Injector(codes, settle_s=args.settle_ms / 1000.0)
+    inj = Injector(codes, settle_s=args.settle_ms / 1000.0,
+                   vendor=args.vendor, product=args.product)
     try:
         for i, (name, ms) in enumerate(plan):
             if i:

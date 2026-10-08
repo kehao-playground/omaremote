@@ -102,11 +102,26 @@ menu = f20
 volumeup = f22
 volumedown = f23
 power = f24
-<mic key, if any> = prog1   # → XF86Launch1; most ATVV remotes have no HID mic key
+<mic key, if any> = xfer    # → XF86Xfer; most ATVV remotes have no HID mic key
 ```
 
-Neutral key pool: F13–F24 (12) + `prog1` (13th, keysym `XF86Launch1` — it is `<I156>` in xkb, not a
-function key). All keycodes are < 256 so they survive xkb on Wayland.
+Neutral key pool: F13–F24 (12) + `xfer` (13th, keysym `XF86Xfer` — `<I155>` in xkb, not a function
+key). All keycodes are < 256 so they survive xkb on Wayland.
+
+**The 13th key must not be `prog1`.** keyd's key-name table is **not** Linux's: keyd emits `KEY_F21`
+(191) for the output name `prog1` and `KEY_F22` (192) for `prog2`, so `prog1`–`prog4` are aliases
+for `f21`–`f24` rather than the `KEY_PROG1` (148) that `input-event-codes.h` defines. `mic = prog1`
+therefore made the mic button emit **`app`'s exact code**: pressing mic fired `omaremote:app`, and
+`omaremote:mic` could never fire. `keyd check` passes on such a config and reports nothing.
+
+This stayed hidden for two days because every layer above keyd was tested with the *Linux* code:
+injecting `prog1` through uinput sends 148 → `XF86Launch1` → the bind fires, which appears to prove
+a path the real system never produces, since keyd is the only thing that emits 191 there. Two
+lessons, both now enforced in `tests/Config.test.mjs`: **a keyd output name's code must be measured,
+not looked up** (read keyd's own virtual keyboard — `keyd monitor` prints keyd's *names*, which is
+what hid this), and no neutral key may use `prog1`–`prog4`. `tests/inject-key.py --vendor/--product`
+exists for exactly this: claiming the remote's `vendor:product` makes keyd grab the virtual device,
+so keyd's own remapping becomes testable without a human pressing buttons.
 
 **The xkb option `fkeys:basic_13-24` is mandatory, not optional.** `/usr/share/X11/xkb/symbols/pc`
 never maps `<FK13>`–`<FK24>`, so by default `inet(evdev)` names them `XF86Tools`, `XF86Launch5`–
@@ -127,7 +142,7 @@ Omarchy configures Hyprland in Lua (`~/.config/hypr/hyprland.lua` → `require("
 hl.bind("F13", hl.dsp.global("omaremote:up"),   { description = "omaremote:up" })
 hl.bind("F14", hl.dsp.global("omaremote:down"), { description = "omaremote:down" })
 -- … one line per supported key …
-hl.bind("XF86Launch1", hl.dsp.global("omaremote:mic"), { description = "omaremote:mic" })  -- only if the remote has a HID mic key
+hl.bind("XF86Xfer", hl.dsp.global("omaremote:mic"), { description = "omaremote:mic" })  -- only if the remote has a HID mic key
 -- Keyboard-reachable escape hatch, independent of the remote (§4.3):
 o.bind("SUPER + CTRL + ALT + R", "OmaRemote reset", "omarchy-shell omaremote reset")
 ```
