@@ -407,17 +407,23 @@ cmd_verify() {
   # same suppression is what makes a lease unable to observe anything about actions, so this sweep
   # proves the TRANSPORT and nothing about what the keys do. Step 6's real-remote pass covers that.
   #
-  # It also does NOT cover keyd. Our keyd section is `[ids] 2717:32b8` -- an explicit list -- so the
-  # injector's uinput device is never grabbed, and these keysyms go straight to the compositor. The
-  # `f5 = xfer` style translation in /etc/keyd/omaremote.conf is therefore UNTESTED by this sweep;
-  # a pass here says the bind layer works, not that keyd rewrites anything correctly. Only the real
-  # remote exercises keyd. (Learned 2026-10-08: the mic button failed with this sweep passing.)
-  local k neutral seq=""
+  # The sweep injects the remote's SOURCE keys while claiming the remote's vendor:product, so keyd
+  # grabs the virtual device and its own remapping is under test too. Injecting the neutral keys
+  # instead (the obvious shape, and what this did until 2026-10-08) bypasses keyd entirely: the
+  # `[ids] <vendor>:<product>` list does not match a default-id uinput device, so those keysyms go
+  # straight to the compositor. That gap hid a dead mic button through a passing sweep -- keyd
+  # aliases the name `prog1` to KEY_F21, so `f5 = prog1` emitted `app`'s code and omaremote:mic
+  # could never fire, while an injected `prog1` (Linux code 148) reached the bind and looked fine.
+  #
+  # A side benefit: because keyd grabs the device, the source keys cannot leak to the desktop.
+  local k src seq=""
   for k in "${KEY_ORDER[@]}"; do
-    IFS=: read -r _ neutral <<< "${LEARNED_KEYS[$k]}"
-    seq+="${seq:+,}$neutral:120"
+    IFS=: read -r src _ <<< "${LEARNED_KEYS[$k]}"
+    seq+="${seq:+,}$src:120"
   done
-  sudo "$inject" --seq "$seq" --gap-ms 250 >/dev/null
+  local vid pid
+  IFS=: read -r vid pid <<< "$DEVICE_ID"
+  sudo "$inject" --seq "$seq" --gap-ms 250 --vendor "$vid" --product "$pid" >/dev/null
   sleep 0.5
 
   local rep; rep=$(ipc selftestReport "$id")

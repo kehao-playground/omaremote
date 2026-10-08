@@ -168,9 +168,17 @@ required before any matrix result is trusted:
    and nothing on this host binds it. The temporary bind is removed afterwards. This proves the events
    reach the compositor's bind layer, separately from whether `GlobalShortcut` then reaches the plugin.
 
-Safety: it emits only F13–F24 and `prog1`, which nothing on this host binds by default, so a stray
-injection is inert. It never injects modifiers. Releases are sent from a `finally` block, and the
-device is destroyed on every exit path.
+Safety: by default it emits only F13–F24 and the 13th neutral key, which nothing on this host binds
+by default, so a stray injection is inert. It never injects modifiers. Releases are sent from a
+`finally` block, and the device is destroyed on every exit path.
+
+`--vendor`/`--product` set the virtual device's ids. Passing the remote's makes keyd's
+`[ids] <vendor>:<product>` section grab the device, which is the only way to test keyd's own
+remapping without a human pressing buttons — and with it, injected source keys cannot leak to the
+desktop, because keyd consumes them. Without it the device is unmatched and injected keys reach the
+compositor directly, which tests the bind layer and **skips keyd**. That distinction is not academic:
+a sweep of the neutral keys passed for two days while the mic button was dead, because keyd aliases
+the output name `prog1` to `KEY_F21` and the sweep never asked keyd to translate anything.
 
 Placement: `tests/`, because this round it is a measurement tool, not a shipped artifact. Promotion to
 a product component belongs to the round that automates the §7 step 6 self-test.
