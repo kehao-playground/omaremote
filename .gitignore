@@ -1,3 +1,7 @@
 node_modules/
 *.log
 .DS_Store
+
+# Python bytecode from tests/inject-key.py when imported
+__pycache__/
+*.pyc
