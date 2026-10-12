@@ -425,6 +425,35 @@ scenario atvvoice_owner_replaced s_atvvoice_owner_replaced
 scenario atvvoice_appears_late s_atvvoice_appears_late
 scenario atvvoice_departure_stops_session s_atvvoice_departure_stops_session
 scenario atvvoice_stale_property_reply s_atvvoice_stale_property_reply
+s_atvvoice_source_before_config() {       # an org.atvvoice name announced before config load (login) must still drive voice
+  wait_for '.config' true 5 || return 1     # the scenario's own harness wrote config.json; restart with config load held back
+  stop_harness
+  # Config load waits for the `mkdir -p` Process (Service.qml mkdirs); a PATH-first mkdir that blocks on a gate file
+  # holds the harness in the window where the NameOwnerChanged monitor runs but `voice` does not exist yet.
+  mkdir -p "$F/slowbin"; rm -f "$F/mkdir.go"
+  printf '#!/bin/bash\nfor _ in $(seq 1 200); do [[ -e %q ]] && break; sleep 0.05; done\nexec /usr/bin/mkdir "$@"\n' "$F/mkdir.go" > "$F/slowbin/mkdir"
+  chmod +x "$F/slowbin/mkdir"
+  : > "$F/atv.log"
+  HARNESS_PATH="$F/slowbin:$ROOT/tests/fakes/bin:$SYS_PATH" start_harness || { : > "$F/mkdir.go"; return 1; }
+  local i
+  for i in $(seq 1 60); do grep -q NameOwnerChanged "$F/atv.log" && break; sleep 0.05; done
+  grep -q NameOwnerChanged "$F/atv.log" || { echo "    the NameOwnerChanged monitor never started"; : > "$F/mkdir.go"; return 1; }
+  for i in 1 2 3 4 5; do                    # the fake's tail may attach a moment after it logs; a repeated arrival of the same owner is ignored
+    echo "org.atvvoice.fake - :1.99" >> "$F/atv.owners"
+    wait_for '.remote.sender' ":1.99" 1 >/dev/null && break
+  done
+  [[ $(jget '.remote.sender') == ":1.99" ]] || { echo "    the arrival was never noticed"; : > "$F/mkdir.go"; return 1; }
+  [[ $(jget '.config') == false && $(jget '.voice') == null ]] || { echo "    config loaded before the arrival; the ordering under test did not happen"; : > "$F/mkdir.go"; return 1; }
+  : > "$F/mkdir.go"                         # now let config load create `voice`
+  ready || return 1
+  echo streaming >> "$F/atv.signals"
+  wait_for '.voice.state' recording 3 || return 1
+  [[ $(jget '.voice.owner') == dbus ]] || return 1
+  echo connected >> "$F/atv.signals"
+  wait_for '.voice.state' idle 5 || return 1
+  has_line "$F/vox.log" "voxtype record stop"
+}
+scenario atvvoice_source_before_config s_atvvoice_source_before_config
 scenario voice_state_verb s_voice_state_verb
 scenario keyboard_session_observed s_keyboard_session_observed
 scenario panic_during_recording s_panic_during_recording

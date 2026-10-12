@@ -197,6 +197,11 @@ Item {
   function startModules(now) {
     engine = KeyEngine.createKeyEngine(configStore.config)
     voice = VoiceSession.createVoiceSession(configStore.config)
+    // The NameOwnerChanged monitor runs from creation, so an org.atvvoice name that appeared before config load
+    // was announced while `voice` was null and skipped by onSource; atv.start() will not announce it again
+    // (AtvSource treats a discovery while connected as redundant). Seed the session from the current source.
+    voice.setDbusSource({ sender: atv.sender || null, generation: atv.generation })
+    root.updateRemoteWarning()                                     // and push the warning computed meanwhile (onSource does both)
     vox.start()
     atv.start()
     root.refreshAudioDevice()
