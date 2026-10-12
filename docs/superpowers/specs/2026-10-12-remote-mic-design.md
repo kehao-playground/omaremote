@@ -39,12 +39,18 @@ All measured on 2026-10-09..12 against the Xiaomi Bluetooth Remote 2 Pro / RC003
    registration fails. `--name xiaomi` avoids this (`org.atvvoice.xiaomi`, node `atvvoice-xiaomi`).
 8. An earlier conclusion, "the mic button is a ~0 ms pulse and push-to-talk is impossible",
    referred to the HID layer only. Some early ATVV runs showed ~0.1 s streams on what were reported
-   as holds. They did not reproduce, and neither keyd nor Voxtype start explains them. Under (3),
-   they are treated as short presses.
+   as holds. Their cause is still unexplained: they did not reproduce, and neither keyd nor
+   Voxtype start accounts for them. Every later long hold streamed continuously, so this design
+   adopts HoldToTalk as measured in (3).
 
 ## 3. Host (setup)
 
-New `omaremote-setup atvvoice` step, run after `keyd`/`hypr` and before the mic apply:
+New `omaremote-setup atvvoice` subcommand. The default flow (`cmd_all`) becomes
+`deps → keyd → binds → plugin → atvvoice → mic remote → verify`. A new option `--mic system`
+skips the `atvvoice` step and ends with `mic system`, which is today's flow, for hosts that use an
+external microphone. `--mic remote` is the default. Any other value is a usage error.
+
+The `atvvoice` step:
 
 - **Toolchain.** If `cargo` is missing, print `sudo pacman -S rustup && rustup default stable`
   and stop. This is the only step needing root; the user runs it, as with every other `sudo`.
@@ -58,9 +64,13 @@ New `omaremote-setup atvvoice` step, run after `keyd`/`hypr` and before the mic 
 - **Unit.** Write `~/.config/systemd/user/atvvoice.service` with
   `ExecStart=%h/.cargo/bin/atvvoice --device <addr> --name xiaomi`. Do **not** pass
   `--mic-on-demand` (§2.4). `--frame-timeout` and `--keep-alive` keep their defaults.
-- **Idempotence.** If the unit content is unchanged, do nothing. Otherwise write it,
-  `systemctl --user daemon-reload`, and `enable --now`, or `restart` if it was already active.
-  This follows the same rule as the keyd step's reload fix.
+- **Idempotence.** Three separate rules:
+  - Unit content changed: write it and run `systemctl --user daemon-reload`. Unchanged: neither
+    rewrite nor reload.
+  - Always ensure the service is enabled and active (`enable --now`), whatever the unit content.
+    A re-run therefore repairs a stopped or disabled service.
+  - Restart the service when the unit changed or the build step installed a new binary, and it was
+    already active, so the running process uses the new unit or binary.
 - **Config.** Write `voice.remoteOnDemand: false` into omaremote's `config.json`. This is the only
   config edit this step makes, and the step announces it.
 - **Mic apply.** The existing `omaremote mic remote` sets Voxtype `audio.device` to
@@ -102,7 +112,9 @@ is unavailable.
 
 No change. When the owner is `dbus` and the remote leaves `streaming`, the existing re-read runs and
 the stop follows. A release during `starting` latches a stop that fires on confirmation. A very
-short accidental press yields a ~0.1 s session, which Voxtype handles. A minimum-hold threshold is
+short accidental press gives a ~0.1 s ATVV stream. The resulting Voxtype session is longer, because
+it includes the start command, the wait for `recording` confirmation and the stop. Voxtype handles
+that short, mostly silent session. A minimum-hold threshold is
 deliberately left out until use shows a need.
 
 ### 4.4 Faster discovery
@@ -154,8 +166,11 @@ Integration (`tests/fake-remote.sh`, fake `busctl`):
   `connected` returns to `idle`.
 - `s_remote_mode_ignores_hid_mic`: in `remote` mode, `ipc key mic down/up` leaves voice `idle` and
   writes nothing to `actions.log`.
-- `s_atvvoice_appears_late`: start with no daemon, let the fake daemon appear and emit
-  `NameOwnerChanged`, and require `remote.state == connected` within 2 s.
+- `s_atvvoice_appears_late`: start with no daemon and wait until the monitor's backoff exceeds
+  2 s (at least two failed discoveries, so the next retry is ≥ 4 s away). Then let the fake daemon
+  appear and emit `NameOwnerChanged`, and require `remote.state == connected` within 2 s. Without
+  the `NameOwnerChanged` handling this must fail, which the test verifies by asserting that the
+  backoff interval at the time of the emit is greater than 2 s.
 - Existing scenarios keep passing, including the six `use_ptt` scenarios, `mic_toggle_session` and
   the arbitration scenarios. Scenarios that rely on arbitration set `remoteOnDemand: true`
   explicitly.
@@ -163,22 +178,31 @@ Integration (`tests/fake-remote.sh`, fake `busctl`):
 Setup (`atvvoice` step, fake `cargo`, `systemctl` and `bluetoothctl` on `PATH`):
 
 - The generated unit has the address and `--name xiaomi`, and no `--mic-on-demand`.
-- A re-run with unchanged content does not rewrite or restart.
+- Re-run with unchanged unit and binary: no rewrite, no `daemon-reload`, no restart, but
+  `enable --now` is still issued.
+- Re-run after the service was stopped or disabled: `enable --now` brings it back.
+- Re-run where only the binary changed: restart, no rewrite.
+- Default flow ends with `mic remote`; `--mic system` skips `atvvoice` and ends with `mic system`;
+  `--mic bogus` is a usage error.
 - Zero or two ATVV candidates stop the step with their names.
 
 Hardware acceptance (user):
 
-1. After setup, `omaremote-setup --doctor` passes every row.
+1. After `omaremote-setup`, check the configuration rows in the Setup tab (or
+   `omarchy-shell omaremote doctor`): Voxtype healthy, `atvvoice` unit active, an
+   `org.atvvoice.*` name present, `NodeName` equal to `audio.device`, and on-demand consistent.
+   The last-capture row may still be unknown at this point. That is expected before the first
+   session.
 2. Hold the remote's mic and speak for 3 s or more, then release. Text appears without a second press.
 3. The Status tab's "Last capture" row shows `atvvoice-xiaomi · remote`.
-4. After `omaremote mic system`, the toggle behaves as before.
+4. After `omarchy-shell omaremote mic system`, the toggle behaves as before.
 
 ## 7. Documentation changes
 
 - Base spec §2 diagram (`atvvoice … --mic-on-demand`), §3 ATVVoice, the §5.1 D-Bus bullet and the
   pulse paragraph, and the §5.2 mode table are updated to this design, citing §2 here.
 - `docs/hw-keymap-xiaomi-voice-remote.md` gains an ATVV section with facts 1–8.
-- The host-setup spec lists the new step.
+- The host-setup spec lists the new step, the new default flow and the `--mic` option.
 
 ## 8. Out of scope
 
