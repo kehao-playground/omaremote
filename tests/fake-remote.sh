@@ -617,6 +617,7 @@ s_doctor_rows() {                          # §6.2 item 4 through host/omaremote
   [[ $(jq -r '.rows | length' <<<"$d") == 15 ]] || { echo "    $d"; return 1; }
   [[ $(jq -r '.summary' <<<"$d") == ready ]] || { echo "    $d"; return 1; }
   [[ $(jq -r '.rows[] | select(.id == "voxtype-device") | .status' <<<"$d") == pass ]] || return 1
+  [[ $(jq -r '.rows[] | select(.id == "atvvoice-ondemand") | .status' <<<"$d") == pass ]] || { echo "    $d"; return 1; }   # a loaded unit is judged
   [[ $(jq -r '.rows[] | select(.id == "last-capture") | .detail' <<<"$d") == "not yet verified" ]] || return 1
   [[ $(jq -r '.rows[] | select(.id == "config-valid") | .status' <<<"$d") == pass ]]
 }

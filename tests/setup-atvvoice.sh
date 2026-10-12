@@ -185,5 +185,28 @@ out=$(NODE_AFTER=never OMAREMOTE_NODE_WAIT_MS=1000 OMAREMOTE_NODE_POLL_MS=100 mi
 check "system mode: never waits for a node"    "0"   "$(grep -c '^ipc status' <<<"$out")"
 check "system mode: mic system applied"        "yes" "$(has "$out" "ipc mic system")"
 
+# ---- host/omaremote-facts: atvvoice.micOnDemand is unknown (null) when the unit is not loaded ----
+# A PATH holding only the tools the script needs plus stubs: no real systemctl/busctl/voxtype/hyprctl/pw-dump
+# is reachable, and HOME is a temp dir. `systemctl show` on a missing unit really prints nothing and exits 0.
+FACTS=$(dirname "$SRC")/omaremote-facts
+FB=$T/fbin; mkdir -p "$FB" "$T/home"
+for t in bash env jq awk grep sed timeout cat; do ln -sf "$(type -P "$t")" "$FB/$t"; done
+cat > "$FB/systemctl" <<'STUB'
+#!/bin/bash
+case " $* " in
+  *" show atvvoice "*"--property=LoadState"*) [[ -n ${FAKE_LOADSTATE:-} ]] && echo "$FAKE_LOADSTATE" ;;
+  *" show atvvoice "*"--property=ExecStart"*) [[ ${FAKE_LOADSTATE:-} == loaded ]] && echo "{ path=/x/atvvoice ; argv[]=/x/atvvoice ${FAKE_EXEC:-"--device A --name xiaomi"} ; }" ;;
+  *" is-active "*) exit 3 ;;
+esac
+exit 0
+STUB
+printf '#!/bin/bash\nexit 0\n' > "$FB/busctl"
+chmod +x "$FB/systemctl" "$FB/busctl"
+facts() { env -i PATH="$FB" HOME="$T/home" FAKE_LOADSTATE="${FAKE_LOADSTATE:-}" FAKE_EXEC="${FAKE_EXEC:-}" "$FB/bash" "$FACTS" | "$FB/jq" -c '.atvvoice.micOnDemand'; }
+check "facts: missing unit -> micOnDemand null"     "null"  "$(FAKE_LOADSTATE=not-found facts)"
+check "facts: no LoadState at all -> null"          "null"  "$(FAKE_LOADSTATE= facts)"
+check "facts: loaded, button only -> false"         "false" "$(FAKE_LOADSTATE=loaded facts)"
+check "facts: loaded, --mic-on-demand -> true"      "true"  "$(FAKE_LOADSTATE=loaded FAKE_EXEC='--mic-on-demand' facts)"
+
 printf '\n%s\n' "$([[ $fail == 0 ]] && echo 'RESULT: PASS' || echo 'RESULT: FAIL')"
 exit $fail

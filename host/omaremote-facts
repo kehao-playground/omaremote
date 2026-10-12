@@ -41,7 +41,14 @@ else
 fi
 
 atv_active=$(jbool_bounded systemctl --user is-active atvvoice)
-atv_ondemand=$(jbool_bounded bash -c 'systemctl --user show atvvoice --property=ExecStart --value 2>/dev/null | grep -q -- "--mic-on-demand"')
+# `systemctl show` on a unit that does not exist prints an empty ExecStart and exits 0, which would read as
+# "button only" and pass the doctor row. Only a loaded unit has an ExecStart to judge; anything else is unknown.
+atv_load=$(bounded systemctl --user show atvvoice --property=LoadState --value) || atv_load=""
+if [[ $atv_load == loaded ]]; then
+  atv_ondemand=$(jbool_bounded bash -c 'systemctl --user show atvvoice --property=ExecStart --value 2>/dev/null | grep -q -- "--mic-on-demand"')
+else
+  atv_ondemand=null
+fi
 if raw=$(bounded busctl --user list --no-legend); then
   atv_names=$(awk '$1 ~ /^org\.atvvoice\./ { print $1 }' <<<"$raw" | jq -R . | jq -sc .)
 else

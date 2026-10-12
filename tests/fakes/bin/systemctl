@@ -6,6 +6,7 @@
 #          sysd.restart-hangs (leaves a job pending, no restart), vox.stopped (voxtype inactive)
 #   `show --property=ExecStart --value` (host/omaremote-facts) answers a button-only ExecStart line, or an
 #   on-demand one while the knob atv.ondemand exists -- independent of the Job/ActiveState/InvocationID
+#   `show --property=LoadState --value` answers loaded, or not-found while the knob atv.missing exists
 #   That triple is requested without --value and printed as Key=Value lines in systemd's own order
 #   (ActiveState, Job, InvocationID — not the requested order), matching real `systemctl --user show` output.
 set -u
@@ -16,7 +17,9 @@ unit=""; for a in "${args[@]:1}"; do case $a in --*) ;; *) unit=$a; break ;; esa
 prop=""; for a in "${args[@]:1}"; do case $a in --property=*) prop=${a#--property=} ;; esac; done
 case "${args[0]:-}" in
   show)
-    if [[ $prop == ExecStart ]]; then
+    if [[ $prop == LoadState ]]; then
+      if [[ -e $d/atv.missing ]]; then echo not-found; else echo loaded; fi
+    elif [[ $prop == ExecStart ]]; then
       if [[ -e $d/atv.ondemand ]]; then
         echo '{ path=/usr/bin/atvvoice ; argv[]=/usr/bin/atvvoice --mic-on-demand ; ignore_errors=no }'
       else
