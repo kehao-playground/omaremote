@@ -4,8 +4,8 @@
 #   sysd.log          every invocation                        sysd.restart-count
 #   knobs: sysd.restart-fails (exit 1), sysd.restart-fails-once (first restart exits 1 and removes the knob),
 #          sysd.restart-hangs (leaves a job pending, no restart), vox.stopped (voxtype inactive)
-#   `show --property=ExecStart --value` (host/omaremote-facts) always answers as an on-demand ExecStart line,
-#   independent of the Job/ActiveState/InvocationID triple the mic-apply verifier reads via the same subcommand.
+#   `show --property=ExecStart --value` (host/omaremote-facts) answers a button-only ExecStart line, or an
+#   on-demand one while the knob atv.ondemand exists -- independent of the Job/ActiveState/InvocationID
 #   That triple is requested without --value and printed as Key=Value lines in systemd's own order
 #   (ActiveState, Job, InvocationID — not the requested order), matching real `systemctl --user show` output.
 set -u
@@ -17,7 +17,11 @@ prop=""; for a in "${args[@]:1}"; do case $a in --property=*) prop=${a#--propert
 case "${args[0]:-}" in
   show)
     if [[ $prop == ExecStart ]]; then
-      echo '{ path=/usr/bin/atvvoice ; argv[]=/usr/bin/atvvoice --mic-on-demand ; ignore_errors=no }'
+      if [[ -e $d/atv.ondemand ]]; then
+        echo '{ path=/usr/bin/atvvoice ; argv[]=/usr/bin/atvvoice --mic-on-demand ; ignore_errors=no }'
+      else
+        echo '{ path=/usr/bin/atvvoice ; argv[]=/usr/bin/atvvoice --device AA:BB:CC:DD:EE:FF --name fake ; ignore_errors=no }'
+      fi
     else
       if [[ $unit == voxtype && -e $d/vox.stopped ]]; then echo 'ActiveState=inactive'; else echo 'ActiveState=active'; fi
       printf 'Job=%s\n' "$(cat "$d/sysd.job" 2>/dev/null)"

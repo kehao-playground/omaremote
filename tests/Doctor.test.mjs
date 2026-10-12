@@ -11,7 +11,7 @@ const good = () => ({
   keyd: { enabled: true, active: true, checkOk: true, grabbed: true },
   hypr: { required: true, descriptions: supported.map(k => `omaremote:${k}`) },
   voxtype: { version: "0.8.1", statusClass: "idle", outputMode: "type", audioDevice: "G20S PRO" },
-  atvvoice: { active: true, micOnDemand: true, nodeName: "G20S PRO", busNames: ["org.atvvoice.G20SPRO"] },
+  atvvoice: { active: true, micOnDemand: false, nodeName: "G20S PRO", busNames: ["org.atvvoice.G20SPRO"] },
   pipewire: { sources: ["alsa_input.pci", "G20S PRO"] },
   lastCapture: { node: "G20S PRO", at: 1000 },
   configProblems: [],
@@ -147,4 +147,32 @@ test("summarize: voxtype binary missing marks summary unconfigured", () => {
   const rows = evaluate(f, config);
   assert.equal(row(rows, "voxtype-version").status, "fail");
   assert.equal(summarize(rows, config), "unconfigured");
+});
+
+test("atvvoice-ondemand passes when the unit and voice.remoteOnDemand agree (both off)", () => {
+  assert.equal(row(evaluate(good(), config), "atvvoice-ondemand").status, "pass");
+});
+
+test("atvvoice-ondemand fails when the unit has --mic-on-demand but the config says false", () => {
+  const f = good(); f.atvvoice.micOnDemand = true;
+  const rows = evaluate(f, config);
+  const r = row(rows, "atvvoice-ondemand");
+  assert.equal(r.status, "fail");
+  assert.match(r.detail, /unit: on-demand, config: false/);
+  assert.equal(summarize(rows, config), "remoteWarning");
+});
+
+test("atvvoice-ondemand fails in the other direction too, and passes when both are on", () => {
+  const onCfg = normalizeConfig({ ...DEFAULT_CONFIG, keys: { ...DEFAULT_CONFIG.keys, mic: { supported: false } }, voice: { ...DEFAULT_CONFIG.voice, remoteOnDemand: true } }).config;
+  assert.equal(row(evaluate(good(), onCfg), "atvvoice-ondemand").status, "fail");
+  const f = good(); f.atvvoice.micOnDemand = true;
+  assert.equal(row(evaluate(f, onCfg), "atvvoice-ondemand").status, "pass");
+});
+
+test("atvvoice-ondemand is unknown without the fact and info in system mode", () => {
+  const f = good(); delete f.atvvoice.micOnDemand;
+  assert.equal(row(evaluate(f, config), "atvvoice-ondemand").status, "unknown");
+  const sys = normalizeConfig({ ...DEFAULT_CONFIG, voice: { ...DEFAULT_CONFIG.voice, mic: "system" } }).config;
+  const g = good(); g.atvvoice.micOnDemand = true;
+  assert.equal(row(evaluate(g, sys), "atvvoice-ondemand").status, "info");
 });
