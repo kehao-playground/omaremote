@@ -176,3 +176,23 @@ test("mic trigger: ptt | toggle | key, migrating the legacy ptt boolean", () => 
   const kept = normalizeConfig({ version: 1, keys: { mic: { ptt: true, mystery: 42 } } }).config.keys.mic;
   assert.equal(kept.mystery, 42);
 });
+
+test("voice.remoteOnDemand defaults to false: the shipped ATVVoice unit has no --mic-on-demand", () => {
+  const { config } = normalizeConfig(DEFAULT_CONFIG);
+  assert.equal(config.voice.remoteOnDemand, false);
+  const { config: bare } = normalizeConfig({});
+  assert.equal(bare.voice.remoteOnDemand, false);
+});
+
+test("voice.remoteOnDemand keeps a real true and normalizes every non-boolean to false", () => {
+  const n = (v) => normalizeConfig({ ...DEFAULT_CONFIG, voice: { ...DEFAULT_CONFIG.voice, remoteOnDemand: v } }).config.voice.remoteOnDemand;
+  assert.equal(n(true), true);
+  assert.equal(n(false), false);
+  for (const junk of ["true", 1, null, {}, []]) assert.equal(n(junk), false, `input ${JSON.stringify(junk)}`);
+});
+
+test("unknown voice fields survive normalization next to remoteOnDemand", () => {
+  const { config } = normalizeConfig({ ...DEFAULT_CONFIG, voice: { ...DEFAULT_CONFIG.voice, futureKnob: "x", remoteOnDemand: true } });
+  assert.equal(config.voice.futureKnob, "x");
+  assert.equal(config.voice.remoteOnDemand, true);
+});
