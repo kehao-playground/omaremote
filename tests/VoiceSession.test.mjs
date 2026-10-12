@@ -13,7 +13,7 @@ const pttCfg = () => cfg({ keys: { ...DEFAULT_CONFIG.keys, mic: { trigger: "ptt"
 // Arbitration (§5.2) only exists when ATVVoice runs with --mic-on-demand. The shipped default is
 // remoteOnDemand=false (plan 4: the Xiaomi remote yields no audio for a host MIC_OPEN), where a
 // streaming signal can only be the button and starts at once -- so arbitration tests opt in.
-const onDemandCfg = () => cfg({ keys: { ...DEFAULT_CONFIG.keys, mic: { trigger: "ppt" } }, voice: { ...DEFAULT_CONFIG.voice, remoteOnDemand: true } });
+const onDemandCfg = () => cfg({ keys: { ...DEFAULT_CONFIG.keys, mic: { trigger: "ptt" } }, voice: { ...DEFAULT_CONFIG.voice, remoteOnDemand: true } });
 const kinds = (fx) => byType(fx, "cmd").map(c => c.kind);
 const stateOf = (fx) => (last(fx, "state") || {}).state;
 const cmdId = (fx, kind) => byType(fx, "cmd").find(c => c.kind === kind).id;
@@ -334,7 +334,6 @@ test("arbitration still runs in system mode: streaming, then recording at 100ms 
   assert.equal(vs.snapshot().owner, "keyboard");
 });
 
-
 // ---- direct D-Bus start, no on-demand (plan 4 §4.1) ----
 function directIdle() {
   const vs = createVoiceSession(cfg());                     // remoteOnDemand defaults to false
@@ -414,6 +413,7 @@ test("without on-demand, the remote disconnecting mid-hold stops the session aft
   assert.equal(byType(drop, "readAtv").length, 1);
   assert.deepEqual(kinds(vs.atvRead(A(vs, "disconnected"), 910)), ["stop"]);
 });
+
 // ---- recovery (§5.3) ----
 test("abort from recording cancels (never stops), closes no mic unless plugin-owned, enters recovering", () => {
   const vs = hidRecording();
