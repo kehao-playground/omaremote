@@ -389,6 +389,16 @@ s_atvvoice_appears_late() {               # plan 4 §4.4: an arrival is noticed 
   (( $(date +%s%3N) < at )) || { echo "    connected only after the backoff deadline"; return 1; }
   [[ $(jget '.remote.retryAt') == 0 ]]
 }
+s_atvvoice_departure_stops_session() {    # plan 4 §4.5: ATVVoice exiting mid-hold must not leave Voxtype recording
+  ready || return 1
+  echo streaming >> "$F/atv.signals"
+  wait_for '.voice.state' recording 3 || return 1
+  [[ $(jget '.voice.owner') == dbus ]] || return 1
+  rm -f "$F/atv.present"
+  echo "org.atvvoice.fake :1.99 -" >> "$F/atv.owners"
+  wait_for '.voice.state' idle 5 || return 1
+  has_line "$F/vox.log" "voxtype record stop"
+}
 s_atvvoice_stale_property_reply() {       # plan 4 §4.4: a departed owner's late `streaming` must not start a session
   ready || return 1
   wait_for '.remote.sender' ":1.99" 3 || return 1
@@ -413,6 +423,7 @@ s_atvvoice_stale_property_reply() {       # plan 4 §4.4: a departed owner's lat
 scenario atvvoice_departure_noticed s_atvvoice_departure_noticed
 scenario atvvoice_owner_replaced s_atvvoice_owner_replaced
 scenario atvvoice_appears_late s_atvvoice_appears_late
+scenario atvvoice_departure_stops_session s_atvvoice_departure_stops_session
 scenario atvvoice_stale_property_reply s_atvvoice_stale_property_reply
 scenario voice_state_verb s_voice_state_verb
 scenario keyboard_session_observed s_keyboard_session_observed

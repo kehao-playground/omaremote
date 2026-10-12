@@ -414,6 +414,52 @@ test("without on-demand, the remote disconnecting mid-hold stops the session aft
   assert.deepEqual(kinds(vs.atvRead(A(vs, "disconnected"), 910)), ["stop"]);
 });
 
+// ---- source lost mid-session (plan 4 §4.5) ----
+test("sourceLost stops a dbus-owned recording at once, with no re-read", () => {
+  const vs = directRecording();
+  const fx = vs.sourceLost(500);
+  assert.deepEqual(kinds(fx), ["stop"]);
+  assert.equal(byType(fx, "readAtv").length, 0);
+  assert.equal(stateOf(fx), "stopping");
+});
+
+test("sourceLost while a dbus session is starting latches the stop until recording is confirmed", () => {
+  const vs = directIdle();
+  const fx = vs.dbus(D("streaming"), 0);
+  assert.deepEqual(kinds(vs.sourceLost(30)), []);
+  vs.cmdExit(cmdId(fx, "start"), 0, 40);
+  assert.deepEqual(kinds(vs.status("recording", 100)), ["stop"]);
+});
+
+test("sourceLost abandons arbitration without any command", () => {
+  const vs = idleSession();                                  // on-demand: arbitration exists
+  vs.dbus(D("streaming"), 0);
+  const fx = vs.sourceLost(100);
+  assert.deepEqual(kinds(fx), []);
+  assert.equal(stateOf(fx), "idle");
+});
+
+test("sourceLost leaves keyboard and hid sessions alone", () => {
+  const kb = directIdle();
+  kb.status("recording", 0);
+  assert.deepEqual(kinds(kb.sourceLost(50)), []);
+  assert.equal(kb.snapshot().state, "recording");
+  const hid = hidRecording();
+  assert.deepEqual(kinds(hid.sourceLost(200)), []);
+  assert.equal(hid.snapshot().state, "recording");
+});
+
+test("after sourceLost the next daemon's first streaming is a transition and starts a session", () => {
+  const vs = directIdle();
+  assert.equal(vs.gate.acquire("mic-apply"), true);
+  vs.dbus(D("streaming"), 0);                                // remembered as streaming, no start (gate held)
+  vs.sourceLost(10);
+  vs.gate.release("mic-apply");
+  vs.setDbusSource({ sender: ":1.77", generation: 1 });
+  const fx = vs.dbus(D("streaming", { sender: ":1.77", generation: 1 }), 20);
+  assert.deepEqual(kinds(fx), ["start"]);
+});
+
 // ---- recovery (§5.3) ----
 test("abort from recording cancels (never stops), closes no mic unless plugin-owned, enters recovering", () => {
   const vs = hidRecording();

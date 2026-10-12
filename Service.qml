@@ -400,8 +400,13 @@ Item {
     onSource: function(sender, generation, busName) {
       root.atvBusName = busName
       if (!busName) root.remoteState = "absent"
-      if (root.voice) root.voice.setDbusSource({ sender: sender || null, generation: generation })
+      if (root.voice) {
+        root.voice.setDbusSource({ sender: sender || null, generation: generation })
+        // Plan 4 §4.5: a revoked/lost source can never send the `connected` that ends a dbus session.
+        if (!sender) root.dispatch(root.guarded("voice.sourceLost", function() { return root.voice.sourceLost(Date.now()) }), "voice")
+      }
       root.updateRemoteWarning()
+      root.rearm()
     }
     onSignalEvent: function(ev) {
       root.remoteState = ev.state
