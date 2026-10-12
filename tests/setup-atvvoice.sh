@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# Plan 4 §3: host/omaremote-setup's atvvoice step and --mic flow against stubbed cargo, systemctl and
+# bluetoothctl. Nothing here builds, installs, or touches a real unit.
+# Usage: bash tests/setup-atvvoice.sh [path to omaremote-setup]
+set -uo pipefail
+SRC=${1:-$(dirname "$0")/../host/omaremote-setup}
+T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+fail=0
+check() { if [[ $2 == "$3" ]]; then printf '  ok    %-58s\n' "$1"; else printf '  FAIL  %-58s expected [%s] got [%s]\n' "$1" "$2" "$3"; fail=1; fi; }
+
+# Everything up to main "$@" -- functions and constants, never the call itself.
+LIB=$T/lib.sh
+sed '/^main "\$@"$/d' "$SRC" > "$LIB"
+
+ADDR=C0:5D:39:C3:45:D1
+UUID=ab5e0001-5a21-4f05-bc7d-af01f617b664
+REV=0e8f6413dc4bad7a04e3c6b648945439d7a22fac
+
+# run <scenario-env...> : source the script in a subshell with stubs; prints the call log and the exit code
+run() {
+  (
+    export OMAREMOTE_ATV_UNIT=$T/unit/atvvoice.service
+    # shellcheck disable=SC1090
+    source "$LIB"
+    set +e                                 # the script sets -e; the stubs and this harness must not inherit it
+    LOG=$T/calls.log; : > "$LOG"
+    cargo() {
+      printf 'cargo %s\n' "$*" >> "$LOG"
+      if [[ $1 == install && ${2:-} == --list ]]; then
+        [[ -n ${INSTALLED_REV:-} ]] && printf 'atvvoice v0.2.0 (https://github.com/b0o/ATVVoice?rev=%s#%s):\n    atvvoice\n' "$INSTALLED_REV" "${INSTALLED_REV:0:8}"
+        return 0
+      fi
+      [[ -n ${CARGO_FAILS:-} ]] && { echo "error: failed to fetch" >&2; return 101; }
+      return 0
+    }
+    bluetoothctl() {
+      printf 'bluetoothctl %s\n' "$*" >> "$LOG"
+      [[ -n ${BT_FAILS:-} ]] && return 1
+      case $1 in
+        devices) for a in ${BT_ATV:-} ${BT_OTHER:-}; do echo "Device $a Some Name"; done ;;
+        info) [[ " ${BT_ATV:-} " == *" $2 "* ]] && echo "	UUID: Vendor specific           ($UUID)"; echo "	UUID: Human Interface Device    (00001812-0000-1000-8000-00805f9b34fb)" ;;
+      esac
+    }
+    systemctl() {
+      printf 'systemctl %s\n' "$*" >> "$LOG"
+      [[ " $* " == *" is-active "* ]] && { [[ -n ${WAS_ACTIVE:-} ]]; return; }
+      return 0
+    }
+    command() { if [[ $1 == -v && $2 == cargo ]]; then [[ -z ${NO_CARGO:-} ]]; return; fi; builtin command "$@"; }
+    ( cmd_atvvoice ) > "$T/out.log" 2>&1   # die() exits: run it in its own subshell so the code is still recorded
+    echo "exit=$?" >> "$LOG"
+  )
+  cat "$T/calls.log"
+}
+has() { grep -qF -- "$2" <<<"$1" && echo yes || echo no; }
+
+# 1. fresh host: builds, writes the unit, reloads, enables; no restart (was not active)
+rm -rf "$T/unit"
+out=$(BT_ATV=$ADDR run)
+check "fresh: exits 0"                         "yes" "$(has "$out" "exit=0")"
+check "fresh: cargo install at the pinned rev" "yes" "$(has "$out" "cargo install --git https://github.com/b0o/ATVVoice --rev $REV --locked atvvoice")"
+check "fresh: daemon-reload"                   "yes" "$(has "$out" "systemctl --user daemon-reload")"
+check "fresh: enable --now"                    "yes" "$(has "$out" "systemctl --user enable --now atvvoice")"
+check "fresh: no restart"                      "no"  "$(has "$out" "systemctl --user restart atvvoice")"
+unit=$(cat "$T/unit/atvvoice.service" 2>/dev/null)
+check "unit: ExecStart with address and name"  "yes" "$(has "$unit" "ExecStart=%h/.cargo/bin/atvvoice --device $ADDR --name xiaomi")"
+check "unit: ExecStart never --mic-on-demand"  "no"  "$(has "$(grep '^ExecStart=' <<<"$unit")" "--mic-on-demand")"   # comments may mention it
+
+# 2. re-run, nothing changed, service active: no build, no rewrite, no reload, no restart, still enable --now
+out=$(BT_ATV=$ADDR INSTALLED_REV=$REV WAS_ACTIVE=1 run)
+check "rerun: no build"                        "no"  "$(has "$out" "--locked atvvoice")"
+check "rerun: no daemon-reload"                "no"  "$(has "$out" "daemon-reload")"
+check "rerun: no restart"                      "no"  "$(has "$out" "restart atvvoice")"
+check "rerun: enable --now still issued"       "yes" "$(has "$out" "enable --now atvvoice")"
+
+# 3. re-run after the service was stopped/disabled: enable --now brings it back, no restart
+out=$(BT_ATV=$ADDR INSTALLED_REV=$REV run)
+check "stopped: enable --now"                  "yes" "$(has "$out" "enable --now atvvoice")"
+check "stopped: no restart"                    "no"  "$(has "$out" "restart atvvoice")"
+
+# 4. only the binary changed (older rev installed), service active: rebuild + restart, no rewrite
+out=$(BT_ATV=$ADDR INSTALLED_REV=1111111111111111111111111111111111111111 WAS_ACTIVE=1 run)
+check "binary: rebuilt"                        "yes" "$(has "$out" "--locked atvvoice")"
+check "binary: no daemon-reload"               "no"  "$(has "$out" "daemon-reload")"
+check "binary: restart"                        "yes" "$(has "$out" "systemctl --user restart atvvoice")"
+
+# 5. unit changed (remote re-paired at a new address), service active: rewrite + reload + restart
+out=$(BT_ATV=AA:AA:AA:AA:AA:AA INSTALLED_REV=$REV WAS_ACTIVE=1 run)
+check "unit changed: daemon-reload"            "yes" "$(has "$out" "daemon-reload")"
+check "unit changed: restart"                  "yes" "$(has "$out" "systemctl --user restart atvvoice")"
+check "unit changed: new address written"      "yes" "$(has "$(cat "$T/unit/atvvoice.service")" "--device AA:AA:AA:AA:AA:AA")"
+
+# 6. no ATVV remote paired (Review focus 5): stops, names the problem, writes nothing
+rm -rf "$T/unit"
+out=$(BT_OTHER=11:22:33:44:55:66 INSTALLED_REV=$REV run)
+check "none: exits non-zero"                   "no"  "$(has "$out" "exit=0")"
+check "none: no unit written"                  "no"  "$([[ -e $T/unit/atvvoice.service ]] && echo yes || echo no)"
+check "none: message names the cause"          "yes" "$(has "$(cat "$T/out.log")" "no paired ATVV remote")"
+check "none: no enable"                        "no"  "$(has "$out" "enable --now")"
+
+# 7. bluetoothctl fails (Bluetooth off): same as none
+out=$(BT_FAILS=1 INSTALLED_REV=$REV run)
+check "bt off: exits non-zero"                 "no"  "$(has "$out" "exit=0")"
+check "bt off: message names the cause"        "yes" "$(has "$(cat "$T/out.log")" "no paired ATVV remote")"
+
+# 8. two ATVV remotes: stops and names both
+out=$(BT_ATV="$ADDR AA:AA:AA:AA:AA:AA" INSTALLED_REV=$REV run)
+check "two: exits non-zero"                    "no"  "$(has "$out" "exit=0")"
+check "two: both named"                        "yes" "$(has "$(cat "$T/out.log")" "$ADDR AA:AA:AA:AA:AA:AA")"
+
+# 9. cargo install fails (Review focus 4): stops with the error; existing unit and service untouched
+mkdir -p "$T/unit"; printf 'EXISTING\n' > "$T/unit/atvvoice.service"
+out=$(BT_ATV=$ADDR CARGO_FAILS=1 WAS_ACTIVE=1 run)
+check "cargo fails: exits non-zero"            "no"  "$(has "$out" "exit=0")"
+check "cargo fails: unit untouched"            "EXISTING" "$(cat "$T/unit/atvvoice.service")"
+check "cargo fails: no systemctl mutation"     "no"  "$(grep -qE 'systemctl --user (daemon-reload|enable|restart)' <<<"$out" && echo yes || echo no)"
+
+# 10. no cargo: prints the rustup command for the user and stops before anything else
+out=$(NO_CARGO=1 BT_ATV=$ADDR run)
+check "no cargo: exits non-zero"               "no"  "$(has "$out" "exit=0")"
+check "no cargo: prints the rustup command"    "yes" "$(has "$(cat "$T/out.log")" "sudo pacman -S rustup && rustup default stable")"
+
+# ---- --mic and the default flow ----
+flow() {   # flow <args...>: run main with every cmd_* stubbed; prints the call order and exit code
+  (
+    source "$LIB"
+    set +e
+    for c in cmd_deps cmd_keyd cmd_binds cmd_plugin cmd_atvvoice cmd_verify; do eval "$c() { echo $c; }"; done
+    cmd_mic() { echo "cmd_mic $1"; }
+    ( main "$@" ) 2>&1; echo "exit=$?"
+  ) | tr '\n' ' '
+}
+check "default flow ends with mic remote"  "cmd_deps cmd_keyd cmd_binds cmd_plugin cmd_atvvoice cmd_mic remote cmd_verify exit=0 " "$(flow)"
+check "--mic system skips atvvoice"        "cmd_deps cmd_keyd cmd_binds cmd_plugin cmd_mic system cmd_verify exit=0 " "$(flow --mic system)"
+check "--mic remote is the default flow"   "cmd_deps cmd_keyd cmd_binds cmd_plugin cmd_atvvoice cmd_mic remote cmd_verify exit=0 " "$(flow --mic remote)"
+check "--mic bogus is a usage error"       "yes" "$(flow --mic bogus | grep -q 'exit=1' && echo yes || echo no)"
+check "bare --mic is a usage error, no hang" "yes" "$(timeout 5 bash -c "$(declare -f flow); LIB=$LIB; flow --mic" | grep -q 'exit=1' && echo yes || echo no)"
+check "atvvoice subcommand dispatches"     "cmd_atvvoice exit=0 " "$(flow atvvoice)"
+
+printf '\n%s\n' "$([[ $fail == 0 ]] && echo 'RESULT: PASS' || echo 'RESULT: FAIL')"
+exit $fail
