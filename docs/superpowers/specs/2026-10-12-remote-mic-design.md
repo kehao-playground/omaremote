@@ -142,7 +142,17 @@ connection nor triggers a backoff. Two orders must work:
 - A direct owner replacement: a non-empty old owner and a different non-empty new owner in one
   signal.
 
-An owner result that arrives after its name was revoked is ignored. This logic is a pure module,
+While connected, only the current name's own owner change matters. Another `org.atvvoice.*` name
+appearing or leaving leaves the current source alone; before a connection exists, any arrival
+triggers discovery.
+
+Every owner lookup carries a request id, and only the latest lookup's result is accepted. A result
+from a lookup started before a revocation or a newer discovery is stale, even when the bus name has
+been filled in again since. A source *epoch* advances on every change of source. Each property read
+(`NodeName`, the initial `State`, explicit `State` re-reads) records the epoch at launch, and a reply
+from an older epoch is dropped. Otherwise a departed daemon's `streaming` could be taken as the new
+daemon's signal and start a session. A read requested while the same read is still in flight runs
+again after it, rather than being lost. This logic is a pure module,
 `lib/AtvSource.mjs`, driven by `AtvvoiceMonitor.qml`, so the orderings are unit-tested
 deterministically rather than raced in integration.
 
