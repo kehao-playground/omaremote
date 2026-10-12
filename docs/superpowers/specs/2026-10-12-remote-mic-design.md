@@ -124,6 +124,9 @@ deliberately left out until use shows a need.
 it rediscovers immediately and resets the backoff. Today a daemon that starts after the Service can
 take up to 30 s to be noticed.
 
+The status JSON's `remote` object gains `retryMs`, the current backoff interval (0 while a daemon
+is connected), so the late-discovery test can prove the backoff alone could not have found it.
+
 ### 4.5 Consequence: F9 in `remote` mode
 
 Without on-demand, a keyboard (F9) session in `remote` mode captures from the ATVVoice node and
@@ -169,8 +172,8 @@ Integration (`tests/fake-remote.sh`, fake `busctl`):
 - `s_atvvoice_appears_late`: start with no daemon and wait until the monitor's backoff exceeds
   2 s (at least two failed discoveries, so the next retry is ≥ 4 s away). Then let the fake daemon
   appear and emit `NameOwnerChanged`, and require `remote.state == connected` within 2 s. Without
-  the `NameOwnerChanged` handling this must fail, which the test verifies by asserting that the
-  backoff interval at the time of the emit is greater than 2 s.
+  the `NameOwnerChanged` handling this must fail, which the test verifies by asserting that
+  `remote.retryMs` at the time of the emit is greater than 2000.
 - Existing scenarios keep passing, including the six `use_ptt` scenarios, `mic_toggle_session` and
   the arbitration scenarios. Scenarios that rely on arbitration set `remoteOnDemand: true`
   explicitly.
