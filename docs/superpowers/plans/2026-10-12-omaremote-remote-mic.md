@@ -256,6 +256,11 @@ Expected: the first new test FAILS. `kinds(fx)` is `[]` because the state is `ar
 hold, latch, transcribing and disconnect tests fail for the same reason. Every pre-existing test
 PASSES, which confirms that Step 1 moved them to on-demand.
 
+Two of the new tests already PASS at this point, by design: "streaming while a gate is held starts
+nothing" and "a keyboard session observed first…". They assert that nothing happens, which the old
+code also guarantees. Step 6 proves the gate test discriminates. Measured on a scratch copy while
+reviewing this plan: 10 new tests fail, and all 58 others pass.
+
 - [ ] **Step 4: Implement**
 
 In `lib/VoiceSession.mjs`, in `dbus()`, replace the start branch:
@@ -293,7 +298,13 @@ Expected: PASS, all tests. If any other pre-existing test that sends `D("streami
 now fails, it relied on arbitration. Give it `onDemandCfg()` and note it in the commit message. Do
 not change its assertions.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Mutation check on the gate guard**
+
+In `dbus()`, temporarily change `if (st === "idle" && dbusEnabled && gates.size === 0) {` to
+`if (st === "idle" && dbusEnabled) {`. Then run `node --test tests/VoiceSession.test.mjs`: "without
+on-demand, streaming while a gate is held starts nothing" must FAIL. Revert and confirm PASS.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add lib/VoiceSession.mjs tests/VoiceSession.test.mjs
