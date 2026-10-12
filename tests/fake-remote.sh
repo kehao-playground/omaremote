@@ -186,15 +186,19 @@ ready() {   # Task 8 addition: also settle a fresh idle poll so selftestArm's 50
   ipc voice poll - > /dev/null
   wait_for '.voice.backendFresh' true 3
 }
-# These scenarios drive a session with `ipc key mic down/up`, which is the PTT interaction. The
-# shipped mic default is "toggle" (a pulse-type mic button cannot hold; see spec §5.1), where the
-# release is ignored -- so ptt must be selected explicitly or the `up` never stops the session and
-# every one of them hangs on its first wait_for.
-use_ptt() {
+set_cfg() {   # set_cfg <jq-filter> <status-expr> <want>: edit config.json, then wait for the reload to land
   local f=$XDG_CONFIG_HOME/omaremote/config.json
-  jq '.keys.mic.trigger = "ptt"' "$f" > "$F/ptt.json" && cat "$F/ptt.json" > "$f"
-  wait_for '.micTrigger' ptt 5
+  jq "$1" "$f" > "$F/cfg.json" && cat "$F/cfg.json" > "$f"
+  wait_for "$2" "$3" 5
 }
+# Plan 4 §4.2: in remote mode -- the harness default -- the HID mic key is dropped before voice and
+# engine, because the remote's own ATVV stream is the trigger there. Every scenario that drives a
+# session with `ipc key mic` therefore selects system mode first. use_ptt also selects ptt: the
+# shipped trigger is "toggle", where the release is ignored and the `up` would never stop anything.
+use_system() { set_cfg '.voice.mic = "system"' '.voiceMode' system; }
+use_ptt() { set_cfg '.voice.mic = "system" | .keys.mic.trigger = "ptt"' '.micTrigger' ptt && wait_for '.voiceMode' system 2; }
+# Arbitration (§5.2) exists only with --mic-on-demand; the default remoteOnDemand=false starts at once.
+use_ondemand() { set_cfg '.voice.remoteOnDemand = true' '.remoteOnDemand' true; }
 
 s_hid_session() {
   ready || return 1
@@ -220,6 +224,7 @@ s_hid_release_while_starting() {          # §9: no stop before confirmed record
 }
 s_start_never_confirms() {                # §9: 1500 ms without recording → cancel + recovering; settles without a daemon restart
   ready || return 1
+  use_system || return 1
   : > "$F/vox.no-confirm"
   ipc key mic down > /dev/null
   wait_for '.voice.state' recovering 3 || return 1
@@ -230,6 +235,7 @@ s_start_never_confirms() {                # §9: 1500 ms without recording → c
 }
 s_dbus_arbitration_short_tap() {          # §9: release before 250 ms → no plugin start
   ready || return 1
+  use_ondemand || return 1
   echo streaming >> "$F/atv.signals"
   wait_for '.voice.state' arbitrating 2 || return 1
   echo connected >> "$F/atv.signals"
@@ -248,6 +254,7 @@ s_dbus_session() {                        # button held: fresh re-reads at 250 m
 }
 s_voice_state_verb() {                    # §2: `voice state <state>` injects a D-Bus state for deterministic tests
   ready || return 1
+  use_ondemand || return 1
   ipc voice state streaming > /dev/null
   wait_for '.voice.state' arbitrating 2 || return 1
   ipc voice state connected > /dev/null
@@ -267,6 +274,7 @@ s_keyboard_session_observed() {           # F9 elsewhere: recording not requeste
 }
 s_panic_during_recording() {              # §9: reset cancels (never stops) and recovers
   ready || return 1
+  use_system || return 1
   ipc key mic down > /dev/null
   wait_for '.voice.state' recording 3 || return 1
   ipc reset > /dev/null
@@ -279,6 +287,7 @@ s_panic_during_recording() {              # §9: reset cancels (never stops) and
 }
 s_config_reload_aborts_session() {        # §5.2: abort on config reload; keys still hot-reload
   ready || return 1
+  use_system || return 1
   ipc key mic down > /dev/null
   wait_for '.voice.state' recording 3 || return 1
   local f=$XDG_CONFIG_HOME/omaremote/config.json
@@ -290,6 +299,7 @@ s_config_reload_aborts_session() {        # §5.2: abort on config reload; keys 
 }
 s_voxtype_absent_is_unconfigured() {      # §5.4: stopped → unconfigured, starts refused; healthy again → idle
   ready || return 1
+  use_system || return 1
   : > "$F/vox.stopped"
   ipc voice poll - > /dev/null
   wait_for '.voice.state' unconfigured 3 || return 1
@@ -298,25 +308,51 @@ s_voxtype_absent_is_unconfigured() {      # §5.4: stopped → unconfigured, sta
   rm "$F/vox.stopped"; ipc voice poll - > /dev/null
   wait_for '.voice.state' idle 3
 }
-s_remote_warning_disables_dbus_path() {   # §5.4: audio.device ≠ NodeName in remote mode → warning, D-Bus start path off, HID still works
-  ready || return 1
-  use_ptt || return 1
+s_remote_warning_disables_dbus_path() {   # §5.4 + plan 4 §4.2: remote mode with audio.device ≠ NodeName → warning, D-Bus start
+  ready || return 1                       # path off, and the HID mic key is still dropped (it would record silence)
   printf 'default' > "$F/vox.config"
   ipc voice audioDevice - > /dev/null
   wait_for '.remote.warning' true 3 || return 1
   echo streaming >> "$F/atv.signals"; sleep 0.4
   [[ $(jget '.voice.state') == idle ]] || return 1
   echo connected >> "$F/atv.signals"
-  ipc key mic down > /dev/null
-  wait_for '.voice.state' recording 3 || return 1
-  ipc key mic up > /dev/null
-  wait_for '.voice.state' idle 5
+  ipc key mic down > /dev/null; sleep 0.2; ipc key mic up > /dev/null; sleep 0.2
+  [[ $(jget '.voice.state') == idle ]] || return 1
+  no_line "$F/vox.log" "voxtype record start"
+}
+s_remote_hold_session() {                 # plan 4 §4.1: no on-demand → streaming starts at once, never arbitrating
+  ready || return 1
+  [[ $(jget '.remoteOnDemand') == false ]] || return 1
+  echo streaming >> "$F/atv.signals"
+  local seen="" st i
+  for i in $(seq 1 60); do                # sample every state from the press until recording (≤ 3 s)
+    st=$(jget '.voice.state'); seen+=" $st"
+    [[ $st == recording ]] && break
+    sleep 0.05
+  done
+  [[ $st == recording ]] || { echo "    never recorded; states:$seen"; return 1; }
+  [[ $seen != *arbitrating* ]] || { echo "    passed through arbitrating:$seen"; return 1; }
+  [[ $(jget '.voice.owner') == dbus ]] || return 1
+  echo connected >> "$F/atv.signals"
+  wait_for '.voice.state' idle 5 || return 1
+  has_line "$F/vox.log" "voxtype record stop"
+}
+s_remote_mode_ignores_hid_mic() {         # plan 4 §4.2: remote mode drops both mic edges before voice and engine
+  ready || return 1
+  [[ $(jget '.voiceMode') == remote ]] || return 1
+  ipc key mic down > /dev/null; sleep 0.2; ipc key mic up > /dev/null; sleep 0.3
+  [[ $(jget '.voice.state') == idle ]] || return 1
+  no_line "$F/vox.log" "voxtype record start" || return 1
+  # actions.log also holds the startup probes (hyprctl binds, pw-dump); only a dispatched action counts.
+  ! grep -qvE '^(hyprctl binds|pw-dump)' "$F/actions.log" || { echo "    actions.log:"; sed 's/^/      /' "$F/actions.log"; return 1; }
 }
 scenario hid_session s_hid_session
 scenario hid_release_while_starting s_hid_release_while_starting
 scenario start_never_confirms s_start_never_confirms
 scenario dbus_arbitration_short_tap s_dbus_arbitration_short_tap
 scenario dbus_session s_dbus_session
+scenario remote_hold_session s_remote_hold_session
+scenario remote_mode_ignores_hid_mic s_remote_mode_ignores_hid_mic
 scenario voice_state_verb s_voice_state_verb
 scenario keyboard_session_observed s_keyboard_session_observed
 scenario panic_during_recording s_panic_during_recording
@@ -386,6 +422,7 @@ s_mic_apply_job_pending_blocks() {         # §3: a live systemd job (any origin
 }
 s_recovery_restart_bounded() {             # §5.3/§9: daemon hangs after abort (cancel ignored, polls unanswered) → one bounded restart → verified → idle
   ready || return 1
+  use_system || return 1
   ipc key mic down > /dev/null; wait_for '.voice.state' recording 3 || return 1
   : > "$F/vox.cancel-ignored"; : > "$F/vox.hang"
   ipc reset > /dev/null
@@ -414,6 +451,7 @@ s_stats_and_capture() {                    # §5.5 + §3 capture verification
 scenario mic_apply_system s_mic_apply_system
 s_mic_toggle_session() {   # a pulse-type mic button: press starts, next press stops, release ignored
   ready || return 1
+  use_system || return 1
   local f=$XDG_CONFIG_HOME/omaremote/config.json
   jq '.keys.mic.trigger = "toggle"' "$f" > "$F/c.json" && cat "$F/c.json" > "$f"
   wait_for '.micTrigger' toggle 5 || return 1
@@ -491,6 +529,7 @@ s_selftest_unknown_or_used_id() {
 }
 s_selftest_blocks_voice_starts() {       # §7 step 6: HID and D-Bus starts suppressed while the lease is active
   ready || return 1
+  use_system || return 1
   local id; id=$(ipc selftestArm | jq -r .id)
   ipc key mic down > /dev/null; sleep 0.1; ipc key mic up > /dev/null
   echo streaming >> "$F/atv.signals"; sleep 0.4; echo connected >> "$F/atv.signals"; sleep 0.2

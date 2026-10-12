@@ -71,8 +71,8 @@ Item {
       textFormat: Text.PlainText; width: parent.width; wrapMode: Text.WordWrap
       text: !root.s ? "" :
         "remote button (D-Bus): " + (root.s.atvBusName ? (root.s.remoteWarning ? "disabled — remote mic not ready" : "active · " + root.s.remoteState) : "ATVVoice not on the bus") +
-        "\nHID mic key: " + (root.cfg && root.cfg.keys.mic.supported !== false && root.cfg.keys.mic.trigger !== "key" ? (root.cfg.keys.mic.trigger === "toggle" ? "toggle (press to start, press again to stop)" : "push-to-talk") : "not available") +
-        "\nkeyboard (F9): observed" +
+        "\nHID mic key: " + Presentation.hidMicLine(root.cfg) +
+        "\nkeyboard (F9): " + Presentation.keyboardSourceLine(root.cfg) +
         (root.s.voiceState !== "idle" ? "\ncurrent session: " + root.s.voiceState + " · owner " + root.s.voiceOwner + (root.s.voiceInferred ? " (inferred attribution)" : "") : "")
       color: root.fg; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall
     }

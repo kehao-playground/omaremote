@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { elapsedText, keyLabel, flashText, glyphLook, hudLine, micStatusLine, keysFromQtEvent } from "../lib/Presentation.mjs";
+import { elapsedText, keyLabel, flashText, glyphLook, hudLine, micStatusLine, keysFromQtEvent, hidMicLine, keyboardSourceLine } from "../lib/Presentation.mjs";
+import { normalizeConfig } from "../lib/Config.mjs";
+import { DEFAULT_CONFIG } from "../lib/Defaults.mjs";
 
 test("elapsedText formats mm:ss and clamps negatives", () => {
   assert.equal(elapsedText(4000), "00:04");
@@ -58,4 +60,22 @@ test("keysFromQtEvent maps Qt key codes and modifiers to wtype keysyms", () => {
   assert.equal(keysFromQtEvent(0x01000020, SHIFT, ""), null);      // bare Shift
   assert.equal(keysFromQtEvent(0x2e, 0, "."), ".");
   assert.equal(keysFromQtEvent(0x01ffffff, 0, ""), null);          // Key_unknown
+});
+
+const pcfg = (voice = {}, mic = {}) => normalizeConfig({ ...DEFAULT_CONFIG, voice: { ...DEFAULT_CONFIG.voice, ...voice }, keys: { ...DEFAULT_CONFIG.keys, mic: { ...DEFAULT_CONFIG.keys.mic, ...mic } } }).config;
+
+test("hidMicLine: remote mode ignores the key whatever its trigger; system mode reports the trigger", () => {
+  assert.equal(hidMicLine(pcfg({ mic: "remote" })), "ignored in remote mode — hold the remote's mic button to talk");
+  assert.equal(hidMicLine(pcfg({ mic: "remote" }, { trigger: "ptt" })), "ignored in remote mode — hold the remote's mic button to talk");
+  assert.equal(hidMicLine(pcfg({ mic: "system" })), "toggle (press to start, press again to stop)");
+  assert.equal(hidMicLine(pcfg({ mic: "system" }, { trigger: "ptt" })), "push-to-talk");
+  assert.equal(hidMicLine(pcfg({ mic: "system" }, { trigger: "key" })), "not available");
+  assert.equal(hidMicLine(pcfg({ mic: "system" }, { supported: false })), "not available");
+  assert.equal(hidMicLine(null), "");
+});
+
+test("keyboardSourceLine warns that F9 is silent in remote mode without on-demand", () => {
+  assert.equal(keyboardSourceLine(pcfg({ mic: "remote" })), "observed — no audio in remote mode unless the remote's mic button is held; use system mode for F9");
+  assert.equal(keyboardSourceLine(pcfg({ mic: "remote", remoteOnDemand: true })), "observed");
+  assert.equal(keyboardSourceLine(pcfg({ mic: "system" })), "observed");
 });

@@ -226,6 +226,11 @@ Item {
       root.rearm()
       return true
     }
+    // Plan 4 §4.2: in remote mode the mic key reaches neither voice nor engine. The remote's own ATVV
+    // stream (D-Bus) is the trigger there, and the HID key is a press-time pulse from the same press:
+    // acting on it too would start a second session. Dropped even under remoteWarning, because
+    // Voxtype's device is then the ATVVoice node and an HID-started session would record silence.
+    if (name === "mic" && root.config.voice.mic === "remote") { root.rearm(); return true }
     var micTrigger = root.config.keys.mic.trigger                              // §5.1 HID mic key
     if (name === "mic" && micTrigger === "toggle") {
       // Press edge only. This mode exists for buttons whose firmware sends press and release in the
@@ -589,6 +594,10 @@ Item {
       // (engine configured yes/no), so a caller cannot tell ptt from toggle, and an integration
       // test has no deterministic way to wait for a config reload to take effect.
       micTrigger: root.config ? root.config.keys.mic.trigger : null,
+      // Published for the same reason as micTrigger: `config` is a boolean, so tests and the panel
+      // cannot otherwise wait for a voice.mic / remoteOnDemand reload to take effect.
+      voiceMode: root.config ? root.config.voice.mic : null,
+      remoteOnDemand: root.config ? root.config.voice.remoteOnDemand : null,
       heldKeys: root.heldKeys, lastStuckKey: root.lastStuckKey, stuckKeyCount: root.stuckKeyCount, lastAction: root.lastAction, hud: root.hudLine, flash: root.flash,
       errorCount: root.errorCount, lastError: root.lastError
       , voice: voice ? (function(s) { return { state: s.state, owner: s.owner, inferred: s.inferred, pendingCmds: s.pendingCmds, gates: s.gates, backendFresh: s.backendFresh } })(voice.snapshot()) : null
