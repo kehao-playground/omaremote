@@ -71,8 +71,9 @@ The `atvvoice` step:
     A re-run therefore repairs a stopped or disabled service.
   - Restart the service when the unit changed or the build step installed a new binary, and it was
     already active, so the running process uses the new unit or binary.
-- **Config.** Write `voice.remoteOnDemand: false` into omaremote's `config.json`. This is the only
-  config edit this step makes, and the step announces it.
+- **Config.** No omaremote config edit: `voice.remoteOnDemand` defaults to `false`, which matches
+  the unit this step writes. A user who later adds `--mic-on-demand` must also set the field to
+  `true`. Doctor (§5) reports a mismatch.
 - **Mic apply.** The existing `omaremote mic remote` sets Voxtype `audio.device` to
   `atvvoice-xiaomi`. No new code.
 
@@ -123,6 +124,13 @@ deliberately left out until use shows a need.
 `NameOwnerChanged` on the session bus. When a name with the `org.atvvoice.` prefix gains an owner,
 it rediscovers immediately and resets the backoff. Today a daemon that starts after the Service can
 take up to 30 s to be noticed.
+
+The same signal reports a departure: the name, the old owner, and an empty new owner. When the name
+being used loses its owner, the monitor stops the `MicStateChanged` monitor process. Its exit then
+runs the existing `_lost()` path, and Status reports `absent`. Today a stopped daemon goes unnoticed,
+because `busctl monitor` filters by match rule and keeps running after the sender disappears.
+Measured signal shape:
+`{"sender":"org.freedesktop.DBus","member":"NameOwnerChanged","payload":{"type":"sss","data":["org.atvvoice.xiaomi","",":1.66819"]}}`.
 
 The status JSON's `remote` object gains two fields:
 
