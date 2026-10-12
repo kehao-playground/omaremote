@@ -29,6 +29,14 @@ ATV_REPO=https://github.com/b0o/ATVVoice
 ATV_REV=0e8f6413dc4bad7a04e3c6b648945439d7a22fac
 ATV_UUID=ab5e0001-5a21-4f05-bc7d-af01f617b664
 ATV_UNIT=${OMAREMOTE_ATV_UNIT:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/atvvoice.service}
+# One name for the unit's --name, the PipeWire node ATVVoice then creates, and the ALSA PCM we define for it.
+# Voxtype 1.1.0 captures only through ALSA (cpal), which lists PCMs, not PipeWire nodes -- so the PCM must be
+# named exactly like the node, which also keeps MicApply's `audio.device = <node>` and the doctor unchanged.
+ATV_NAME=xiaomi
+ATV_NODE=atvvoice-$ATV_NAME
+ALSA_RC=${OMAREMOTE_ALSA_RC:-${XDG_CONFIG_HOME:-$HOME/.config}/alsa/asoundrc}
+ALSA_BEGIN='# BEGIN omaremote atvvoice (managed by omaremote-setup; do not edit)'
+ALSA_END='# END omaremote atvvoice'
 
 # Learned on 2026-10-02 from the real remote; see docs/hw-keymap-xiaomi-voice-remote.md.
 # TODO(plan4): replace this table with the interactive learning step of main spec §7 step 2.
@@ -512,13 +520,46 @@ Description=ATVVoice: Bluetooth voice remote as a PipeWire microphone
 After=pipewire.service bluetooth.target
 
 [Service]
-ExecStart=%h/.cargo/bin/atvvoice --device $1 --name xiaomi
+ExecStart=%h/.cargo/bin/atvvoice --device $1 --name $ATV_NAME
 Restart=on-failure
 RestartSec=3
 
 [Install]
 WantedBy=default.target
 EOF
+}
+
+gen_alsa_block() {
+  cat <<EOF
+$ALSA_BEGIN
+pcm.$ATV_NODE {
+  type pipewire
+  capture_node "$ATV_NODE"
+  hint { show on description "ATVVoice remote ($ATV_NODE)" }
+}
+$ALSA_END
+EOF
+}
+
+# gen_alsa_rc <existing file> > new content: the managed block replaced in place, or appended; every line
+# outside the markers is kept as is. Unbalanced markers are refused rather than guessed at.
+gen_alsa_rc() {
+  local f=$1 b e
+  if [[ ! -s $f ]]; then gen_alsa_block; return; fi
+  b=$(grep -cxF -- "$ALSA_BEGIN" "$f"); e=$(grep -cxF -- "$ALSA_END" "$f")
+  if (( b == 0 && e == 0 )); then
+    cat "$f"
+    [[ $(tail -c1 "$f" | wc -l) -eq 1 ]] || echo
+    echo
+    gen_alsa_block
+  elif (( b == 1 && e == 1 )); then
+    awk -v blk="$(gen_alsa_block)" -v beg="$ALSA_BEGIN" -v end="$ALSA_END" '
+      $0 == beg { print blk; skip = 1; next }
+      skip && $0 == end { skip = 0; next }
+      !skip { print }' "$f"
+  else
+    return 1
+  fi
 }
 
 cmd_atvvoice() {
@@ -531,6 +572,12 @@ cmd_atvvoice() {
   local cands; mapfile -t cands < <(atv_candidates)
   (( ${#cands[@]} > 0 )) || die "no paired ATVV remote found (is Bluetooth on and the remote paired?)"
   (( ${#cands[@]} == 1 )) || die "several ATVV remotes are paired: ${cands[*]} -- unpair all but one"
+
+  # Likewise the ALSA plugin the PCM below needs, so a missing package fails before a multi-minute build.
+  local pwprobe=${OMAREMOTE_PW_ALSA_PROBE:-}
+  if [[ -n $pwprobe ]]; then [[ -e $pwprobe ]]
+  else [[ -e /usr/share/alsa/alsa.conf.d/50-pipewire.conf || -e /usr/lib/alsa-lib/libasound_module_pcm_pipewire.so ]]
+  fi || die "the PipeWire ALSA plugin is missing (Voxtype can only open ALSA devices). Run:  sudo pacman -S --needed pipewire-alsa  -- then re-run this step."
 
   local built=0
   if [[ $(atv_installed_rev) != "$ATV_REV" ]]; then
@@ -549,13 +596,27 @@ cmd_atvvoice() {
     say "wrote $ATV_UNIT (device ${cands[0]})"
   fi
 
+  # The ALSA PCM: written after the build and the unit, so a failed build leaves this file alone too.
+  gen_alsa_rc "$ALSA_RC" > "$WORKDIR/asoundrc" || die "$ALSA_RC has unbalanced '$ALSA_BEGIN' / '$ALSA_END' markers; fix it by hand, nothing was changed"
+  local alsa_changed=0
+  if ! cmp -s "$WORKDIR/asoundrc" "$ALSA_RC"; then
+    mkdir -p "$(dirname "$ALSA_RC")"
+    cp "$WORKDIR/asoundrc" "$ALSA_RC"
+    alsa_changed=1
+    say "wrote $ALSA_RC (ALSA PCM $ATV_NODE)"
+  else
+    say "ALSA PCM $ATV_NODE: unchanged"
+  fi
+  # A running Voxtype read ALSA's config at start; make it re-read.
+  if (( alsa_changed )) && systemctl --user is-active --quiet voxtype; then systemctl --user try-restart voxtype; fi
+
   # Three separate rules (spec §3): rewrite only on change; always ensure enabled+active, which repairs a
   # stopped or disabled service; restart a running service only when its unit or binary changed.
   local was_active=0
   systemctl --user is-active --quiet atvvoice && was_active=1
   systemctl --user enable --now atvvoice
   if (( was_active && (changed || built) )); then systemctl --user restart atvvoice; fi
-  say "ATVVoice: node atvvoice-xiaomi, D-Bus org.atvvoice.xiaomi"
+  say "ATVVoice: node $ATV_NODE, D-Bus org.atvvoice.$ATV_NAME"
 }
 
 cmd_all() {
@@ -579,7 +640,8 @@ usage: omaremote-setup [--yes] [--mic remote|system] <subcommand>
   keyd     stage and validate /etc/keyd/omaremote.conf, then guide enabling the service
   binds    ensure the xkb option, generate ~/.config/hypr/omaremote.lua, reload and verify
   plugin   check the Omarchy plugin is installed and the service answers
-  atvvoice build ATVVoice (pinned), write its user unit for the paired remote, enable it
+  atvvoice build ATVVoice (pinned), write its user unit for the paired remote, enable it, and
+           define the ALSA PCM atvvoice-xiaomi that Voxtype opens (managed block in the ALSA file below)
   mic      apply a mic mode (remote|system) through the mic-apply contract
   verify   verify the loaded binds and sweep the transport with the injector
   genconf  print the generated keyd config to stdout and exit (writes nothing)
@@ -591,6 +653,7 @@ and applies the system/external mic.
 
 Environment:
   OMAREMOTE_DEVICE   vendor:product of the remote (default 2717:32b8)
+  OMAREMOTE_ALSA_RC  ALSA user config the atvvoice step edits (default ~/.config/alsa/asoundrc)
   OMAREMOTE_NODE_WAIT_MS  how long `mic remote` waits for the remote's audio node (default 30000)
 USAGE
 }

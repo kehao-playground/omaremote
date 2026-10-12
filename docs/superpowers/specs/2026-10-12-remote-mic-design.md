@@ -42,6 +42,16 @@ All measured on 2026-10-09..12 against the Xiaomi Bluetooth Remote 2 Pro / RC003
    as holds. Their cause is still unexplained: they did not reproduce, and neither keyd nor
    Voxtype start accounts for them. Every later long hold streamed continuously, so this design
    adopts HoldToTalk as measured in (3).
+9. Voxtype 1.1.0 captures only through cpal's ALSA host (it links libasound only). `audio.device`
+   must be an ALSA PCM name that ALSA lists through its hints. A PipeWire node name is not one:
+   with `audio.device = atvvoice-xiaomi` every start logged `Audio device not found:
+   'atvvoice-xiaomi'. Available devices: pipewire, default, sysdefault:CARD=PCH` and the session
+   ended in `start-timeout` (hardware acceptance, 2026-10-12). Defining
+   `pcm.atvvoice-xiaomi { type pipewire; capture_node "atvvoice-xiaomi"; hint { show on ... } }`
+   makes `arecord -L` list it and `arecord -D atvvoice-xiaomi` capture from the remote's node
+   (`pw-link` shows the stream linked to `atvvoice-xiaomi:capture_MONO`). Hyphens are fine in the
+   PCM id. Naming the PCM exactly like the node means `audio.device = <NodeName>` and the doctor's
+   equality check need no change.
 
 ## 3. Host (setup)
 
@@ -74,6 +84,19 @@ The `atvvoice` step:
 - **Config.** No omaremote config edit: `voice.remoteOnDemand` defaults to `false`, which matches
   the unit this step writes. A user who later adds `--mic-on-demand` must also set the field to
   `true`. Doctor (§5) reports a mismatch.
+- **ALSA PCM.** (§2.9) Maintain a marker block in `${OMAREMOTE_ALSA_RC:-~/.config/alsa/asoundrc}`
+  (alsa.conf loads this XDG path):
+  `# BEGIN omaremote atvvoice (managed by omaremote-setup; do not edit)` ... `# END omaremote atvvoice`
+  around `pcm.atvvoice-xiaomi { type pipewire; capture_node "atvvoice-xiaomi"; hint { show on
+  description "ATVVoice remote (atvvoice-xiaomi)" } }`. The PCM name, the node and the unit's
+  `--name` derive from one constant. The block is replaced in place or appended; every line outside
+  the markers is preserved, unbalanced markers stop the step, and the file is written only when the
+  result differs. **Prerequisite:** the PipeWire ALSA plugin
+  (`/usr/share/alsa/alsa.conf.d/50-pipewire.conf` or `libasound_module_pcm_pipewire.so`), checked
+  with the device resolution, before the build; if absent the step stops with
+  `sudo pacman -S --needed pipewire-alsa`. When the block changed and the `voxtype` user service is
+  active it is `try-restart`ed so it re-reads ALSA's config. Order: resolve device and prerequisite,
+  build, unit, ALSA block, enable/restart.
 - **Mic apply.** The existing `omaremote mic remote` sets Voxtype `audio.device` to
   `atvvoice-xiaomi`. The plugin refuses it until it has read ATVVoice's `NodeName`, and
   `enable --now` returns before ATVVoice has connected to the remote, so setup first polls
@@ -198,6 +221,10 @@ New rows, informational in `system` mode as today:
 - `atvvoice` user unit active.
 - An `org.atvvoice.*` name on the bus, with `NodeName` equal to Voxtype `audio.device` (existing
   remote checks).
+- **Voxtype device (remote mode).** `audio.device` must equal the node, **and** `arecord -L`
+  (fact `alsa.pcms`) must list a PCM of that name: Voxtype cannot open a bare node (§2.9). If ALSA
+  lacks it the row fails with fix `omaremote-setup atvvoice`; if the list is unavailable it is
+  `unknown`.
 - **On-demand consistency.** The unit's `ExecStart` contains `--mic-on-demand` exactly when
   `voice.remoteOnDemand` is `true`. A mismatch is an error. With on-demand running but the config
   saying `false`, an on-demand open would start an unarbitrated session.

@@ -265,3 +265,4 @@ Measured against this remote (`bluetooth:v2717p32B8d00A4`, RC003) with b0o/ATVVo
    were reported as holds. Their cause is still unexplained: they did not reproduce, and neither keyd
    nor Voxtype start accounts for them. Every later long hold streamed continuously, so the design
    adopts HoldToTalk as measured in (3).
+9. Voxtype 1.1.0 opens only ALSA PCM names, not PipeWire nodes: `omaremote-setup atvvoice` defines an ALSA PCM `atvvoice-xiaomi` (type pipewire, `capture_node "atvvoice-xiaomi"`) in `~/.config/alsa/asoundrc` so `audio.device = atvvoice-xiaomi` resolves (spec §2.9).

@@ -20,6 +20,8 @@ REV=0e8f6413dc4bad7a04e3c6b648945439d7a22fac
 run() {
   (
     export OMAREMOTE_ATV_UNIT=$T/unit/atvvoice.service
+    export OMAREMOTE_ALSA_RC=$T/alsa/asoundrc                  # never the user's ~/.config/alsa
+    : > "$T/pw-present"; export OMAREMOTE_PW_ALSA_PROBE=${PW_PROBE:-$T/pw-present}
     # shellcheck disable=SC1090
     source "$LIB"
     set +e                                 # the script sets -e; the stubs and this harness must not inherit it
@@ -43,6 +45,7 @@ run() {
     }
     systemctl() {
       printf 'systemctl %s\n' "$*" >> "$LOG"
+      [[ " $* " == *" is-active "*" voxtype"* ]] && { [[ -n ${VOX_ACTIVE:-} ]]; return; }
       [[ " $* " == *" is-active "* ]] && { [[ -n ${WAS_ACTIVE:-} ]]; return; }
       return 0
     }
@@ -110,15 +113,72 @@ check "two: both named"                        "yes" "$(has "$(cat "$T/out.log")
 
 # 9. cargo install fails (Review focus 4): stops with the error; existing unit and service untouched
 mkdir -p "$T/unit"; printf 'EXISTING\n' > "$T/unit/atvvoice.service"
+rm -rf "$T/alsa"
 out=$(BT_ATV=$ADDR CARGO_FAILS=1 WAS_ACTIVE=1 run)
 check "cargo fails: exits non-zero"            "no"  "$(has "$out" "exit=0")"
 check "cargo fails: unit untouched"            "EXISTING" "$(cat "$T/unit/atvvoice.service")"
 check "cargo fails: no systemctl mutation"     "no"  "$(grep -qE 'systemctl --user (daemon-reload|enable|restart)' <<<"$out" && echo yes || echo no)"
+check "cargo fails: ALSA file not created"     "no"  "$([[ -e $T/alsa/asoundrc ]] && echo yes || echo no)"
 
 # 10. no cargo: prints the rustup command for the user and stops before anything else
 out=$(NO_CARGO=1 BT_ATV=$ADDR run)
 check "no cargo: exits non-zero"               "no"  "$(has "$out" "exit=0")"
 check "no cargo: prints the rustup command"    "yes" "$(has "$(cat "$T/out.log")" "sudo pacman -S rustup && rustup default stable")"
+
+# ---- ALSA PCM bridge: Voxtype 1.1.0 opens only ALSA PCM names, so the node needs a PCM of the same name ----
+BEGIN_M='# BEGIN omaremote atvvoice (managed by omaremote-setup; do not edit)'
+END_M='# END omaremote atvvoice'
+BLOCK="$BEGIN_M
+pcm.atvvoice-xiaomi {
+  type pipewire
+  capture_node \"atvvoice-xiaomi\"
+  hint { show on description \"ATVVoice remote (atvvoice-xiaomi)\" }
+}
+$END_M"
+rm -rf "$T/unit" "$T/alsa"
+out=$(BT_ATV=$ADDR INSTALLED_REV=$REV run)
+check "alsa fresh: file is exactly the block"  "$BLOCK" "$(cat "$T/alsa/asoundrc" 2>/dev/null)"
+check "alsa fresh: reports the write"          "yes" "$(has "$(cat "$T/out.log")" "wrote $T/alsa/asoundrc (ALSA PCM atvvoice-xiaomi)")"
+check "alsa fresh: voxtype try-restart"        "no"  "$(has "$out" "try-restart voxtype")"   # inactive stub: see below for the active case
+
+# rerun: unchanged, and not rewritten (mtime pinned in the past would move on any rewrite)
+touch -d '2001-01-01 00:00:00' "$T/alsa/asoundrc"
+out=$(BT_ATV=$ADDR INSTALLED_REV=$REV VOX_ACTIVE=1 run)
+check "alsa rerun: says unchanged"             "yes" "$(has "$(cat "$T/out.log")" "ALSA PCM atvvoice-xiaomi: unchanged")"
+check "alsa rerun: mtime untouched"            "2001-01-01" "$(date -r "$T/alsa/asoundrc" +%F)"
+check "alsa rerun: voxtype not restarted"      "no"  "$(has "$out" "voxtype")"
+
+# existing unrelated content is preserved byte-for-byte; the block is appended
+rm -rf "$T/alsa"; mkdir -p "$T/alsa"
+printf '# my own config\npcm.foo {\n  type null\n}\n' > "$T/alsa/asoundrc"
+before=$(cat "$T/alsa/asoundrc")
+out=$(BT_ATV=$ADDR INSTALLED_REV=$REV VOX_ACTIVE=1 run)
+check "alsa append: original lines kept first" "$before" "$(head -n 4 "$T/alsa/asoundrc")"
+check "alsa append: block present once"        "1"   "$(grep -c -F "$BEGIN_M" "$T/alsa/asoundrc")"
+check "alsa append: block text exact"          "$BLOCK" "$(sed -n "/^# BEGIN omaremote/,/^# END omaremote/p" "$T/alsa/asoundrc")"
+check "alsa changed + voxtype active: try-restart" "yes" "$(has "$out" "systemctl --user try-restart voxtype")"
+
+# stale block replaced in place; text before and after it preserved
+printf '# top\npcm.foo {}\n%s\npcm.stale {\n  type null\n}\n%s\n# bottom\npcm.bar {}\n' "$BEGIN_M" "$END_M" > "$T/alsa/asoundrc"
+out=$(BT_ATV=$ADDR INSTALLED_REV=$REV VOX_ACTIVE=1 run)
+want=$(printf '# top\npcm.foo {}\n%s\n# bottom\npcm.bar {}' "$BLOCK")
+check "alsa stale: block replaced, rest kept"  "$want" "$(cat "$T/alsa/asoundrc")"
+check "alsa stale: voxtype try-restart"        "yes" "$(has "$out" "systemctl --user try-restart voxtype")"
+
+# an unterminated marker is never guessed at: the file is left alone and the step stops
+printf '# top\n%s\npcm.mine {}\n' "$BEGIN_M" > "$T/alsa/asoundrc"; before=$(cat "$T/alsa/asoundrc")
+out=$(BT_ATV=$ADDR INSTALLED_REV=$REV run)
+check "alsa broken markers: exits non-zero"    "no"  "$(has "$out" "exit=0")"
+check "alsa broken markers: file untouched"    "$before" "$(cat "$T/alsa/asoundrc")"
+
+# PipeWire ALSA plugin missing: dies with the pacman hint before cargo, the unit or the ALSA file
+rm -rf "$T/unit" "$T/alsa"
+out=$(BT_ATV=$ADDR PW_PROBE=$T/absent run)
+check "no pw plugin: exits non-zero"           "no"  "$(has "$out" "exit=0")"
+check "no pw plugin: pacman hint"              "yes" "$(has "$(cat "$T/out.log")" "sudo pacman -S --needed pipewire-alsa")"
+check "no pw plugin: no cargo install"         "no"  "$(has "$out" "cargo install --git")"
+check "no pw plugin: no unit, no alsa file"    "no no" "$([[ -e $T/unit/atvvoice.service ]] && echo yes || echo no) $([[ -e $T/alsa/asoundrc ]] && echo yes || echo no)"
+check "no pw plugin: no systemctl at all"      "no"  "$(has "$out" "systemctl")"
 
 # ---- --mic and the default flow ----
 flow() {   # flow <args...>: run main with every cmd_* stubbed; prints the call order and exit code

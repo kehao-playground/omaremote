@@ -1904,3 +1904,28 @@ including any acceptance step that did not behave as written, and commit:
 git add docs/superpowers/plans/2026-10-12-omaremote-remote-mic.md
 git commit -m "docs(plan): record Plan 4 outcome"
 ```
+
+## Hardware acceptance finding (2026-10-12) and Task 10
+
+**Finding.** On the real machine every remote-mode press ran plugin → `voxtype record start`, and
+Voxtype logged
+
+```
+ERROR Failed to start audio: Audio device not found: 'atvvoice-xiaomi'. Available devices: pipewire, default, sysdefault:CARD=PCH
+```
+
+followed by omaremote's `start-timeout` after 1.5 s and no text. Voxtype 1.1.0 captures only through
+cpal's ALSA host, so `audio.device` must be an ALSA PCM name listed through hints; a PipeWire node
+name is not one. The design (§2.9) wrongly assumed it was. The doctor's `voxtype-device` row passed
+(`audio.device == node`) while capture was broken.
+
+**Task 10.** `omaremote-setup atvvoice` now maintains a marker block in
+`${OMAREMOTE_ALSA_RC:-~/.config/alsa/asoundrc}` defining `pcm.atvvoice-xiaomi` (type pipewire,
+`capture_node "atvvoice-xiaomi"`), named exactly like the node so MicApply and the equality check are
+unchanged. It is idempotent, preserves everything outside the markers, requires the PipeWire ALSA plugin
+(checked before the build; hint `sudo pacman -S --needed pipewire-alsa`) and `try-restart`s an active
+voxtype when the block changed. `omaremote-facts` reports `alsa.pcms` (`arecord -L`), and the remote
+`voxtype-device` row now fails when ALSA lacks the node's PCM (`unknown` when the list is unavailable).
+
+**Second observation, not investigated.** Of 6 presses, 3 streamed only 0.13-0.19 s (`AUDIO_STOP`
+`HttButtonRelease`) and 3 streamed 2.9-3.9 s.
