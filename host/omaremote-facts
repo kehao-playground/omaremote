@@ -65,11 +65,19 @@ if has pw-dump && raw=$(bounded pw-dump); then
 fi
 pw_sources=${pw_sources:-null}
 
+# ALSA PCM names (`arecord -L`: names start in column 0, descriptions are indented). Voxtype 1.1.0 can open only
+# these, never a bare PipeWire node name, so the doctor compares audio.device against this list.
+if has arecord && raw=$(timeout "$TO" arecord -L 2>/dev/null); then   # not bounded(): a plain failure must read as null too
+  alsa_pcms=$(awk '/^[^[:space:]]/ { print $1 }' <<<"$raw" | jq -R . | jq -sc .)
+fi
+alsa_pcms=${alsa_pcms:-null}
+
 cat <<JSON
 {"tools":$tools,
  "keyd":{"enabled":$keyd_enabled,"active":$keyd_active,"checkOk":$keyd_check,"grabbed":$keyd_grab},
  "hypr":{"required":$hypr_required,"descriptions":$hypr_desc},
  "voxtype":{"version":$vox_version,"statusClass":$vox_class,"outputMode":$vox_out,"audioDevice":$vox_dev},
  "atvvoice":{"active":$atv_active,"micOnDemand":$atv_ondemand,"busNames":$atv_names,"nodeName":$atv_node},
- "pipewire":{"sources":$pw_sources}}
+ "pipewire":{"sources":$pw_sources},
+ "alsa":{"pcms":$alsa_pcms}}
 JSON

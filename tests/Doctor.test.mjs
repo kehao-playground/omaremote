@@ -13,6 +13,7 @@ const good = () => ({
   voxtype: { version: "0.8.1", statusClass: "idle", outputMode: "type", audioDevice: "G20S PRO" },
   atvvoice: { active: true, micOnDemand: false, nodeName: "G20S PRO", busNames: ["org.atvvoice.G20SPRO"] },
   pipewire: { sources: ["alsa_input.pci", "G20S PRO"] },
+  alsa: { pcms: ["null", "default", "G20S PRO"] },
   lastCapture: { node: "G20S PRO", at: 1000 },
   configProblems: [],
   now: 2000,
@@ -175,4 +176,38 @@ test("atvvoice-ondemand is unknown without the fact and info in system mode", ()
   const sys = normalizeConfig({ ...DEFAULT_CONFIG, voice: { ...DEFAULT_CONFIG.voice, mic: "system" } }).config;
   const g = good(); g.atvvoice.micOnDemand = true;
   assert.equal(row(evaluate(g, sys), "atvvoice-ondemand").status, "info");
+});
+
+// Voxtype 1.1.0 opens audio only through ALSA: audio.device == node name passed while capture was broken
+// (measured 2026-10-12) because ALSA had no PCM of that name. The remote row must see the ALSA list.
+test("remote voxtype-device: device equals node but ALSA lacks that PCM -> fail with the setup fix", () => {
+  const f = good(); f.alsa.pcms = ["null", "default"];
+  const r = row(evaluate(f, config), "voxtype-device");
+  assert.equal(r.status, "fail");
+  assert.equal(r.detail, "audio.device: G20S PRO, but ALSA has no PCM named G20S PRO");
+  assert.equal(r.fix, "bash <plugin-dir>/host/omaremote-setup atvvoice");
+});
+
+test("remote voxtype-device: ALSA PCM list unavailable -> unknown", () => {
+  for (const v of [null, undefined]) {
+    const f = good(); if (v === undefined) delete f.alsa; else f.alsa.pcms = v;
+    const r = row(evaluate(f, config), "voxtype-device");
+    assert.equal(r.status, "unknown");
+    assert.equal(r.detail, "audio.device: G20S PRO; ALSA PCM list unavailable");
+  }
+});
+
+test("remote voxtype-device: device differing from the node still fails as before", () => {
+  const f = good(); f.voxtype.audioDevice = "default";
+  assert.equal(row(evaluate(f, config), "voxtype-device").status, "fail");
+});
+
+test("remote voxtype-device: passes when ALSA lists the node", () => {
+  assert.equal(row(evaluate(good(), config), "voxtype-device").status, "pass");
+});
+
+test("system voxtype-device ignores the ALSA list", () => {
+  const sys = normalizeConfig({ ...DEFAULT_CONFIG, voice: { ...DEFAULT_CONFIG.voice, mic: "system" } }).config;
+  const f = good(); f.voxtype.audioDevice = "default"; delete f.alsa;
+  assert.equal(row(evaluate(f, sys), "voxtype-device").status, "pass");
 });

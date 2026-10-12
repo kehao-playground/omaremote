@@ -208,5 +208,19 @@ check "facts: no LoadState at all -> null"          "null"  "$(FAKE_LOADSTATE= f
 check "facts: loaded, button only -> false"         "false" "$(FAKE_LOADSTATE=loaded facts)"
 check "facts: loaded, --mic-on-demand -> true"      "true"  "$(FAKE_LOADSTATE=loaded FAKE_EXEC='--mic-on-demand' facts)"
 
+# alsa.pcms: names from `arecord -L` (unindented lines). Stubbed arecord; absent from FB by default.
+cat > "$FB/arecord-stub" <<'STUB'
+#!/bin/bash
+[[ -n ${FAKE_ARECORD_FAIL:-} ]] && exit 1
+printf 'null\n    Discard all samples (playback) or generate zero samples (capture)\natvvoice-xiaomi\n    ATVVoice remote (atvvoice-xiaomi)\nsysdefault:CARD=PCH\n    HDA Intel PCH\n'
+STUB
+chmod +x "$FB/arecord-stub"
+pcms() { env -i PATH="$FB" HOME="$T/home" FAKE_ARECORD_FAIL="${FAKE_ARECORD_FAIL:-}" "$FB/bash" "$FACTS" | "$FB/jq" -c '.alsa.pcms'; }
+check "facts: no arecord -> alsa.pcms null"         "null"  "$(pcms)"
+ln -sf "$FB/arecord-stub" "$FB/arecord"
+check "facts: arecord -L names only, no descriptions" '["null","atvvoice-xiaomi","sysdefault:CARD=PCH"]' "$(pcms)"
+check "facts: arecord fails -> alsa.pcms null"      "null"  "$(FAKE_ARECORD_FAIL=1 pcms)"
+rm -f "$FB/arecord"
+
 printf '\n%s\n' "$([[ $fail == 0 ]] && echo 'RESULT: PASS' || echo 'RESULT: FAIL')"
 exit $fail
