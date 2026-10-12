@@ -353,6 +353,67 @@ scenario dbus_arbitration_short_tap s_dbus_arbitration_short_tap
 scenario dbus_session s_dbus_session
 scenario remote_hold_session s_remote_hold_session
 scenario remote_mode_ignores_hid_mic s_remote_mode_ignores_hid_mic
+s_atvvoice_departure_noticed() {          # plan 4 §4.4: a stopped daemon is reported absent; busctl monitor alone never exits
+  ready || return 1
+  wait_for '.remote.state' connected 3 || return 1
+  rm -f "$F/atv.present"
+  echo "org.atvvoice.fake :1.99 -" >> "$F/atv.owners"
+  wait_for '.remote.state' absent 3 || return 1
+  [[ $(jget '.remote.sender') == "" ]]
+}
+s_atvvoice_owner_replaced() {             # plan 4 §4.4: one signal, old owner → new owner; the race orderings are unit-tested
+  ready || return 1
+  wait_for '.remote.sender' ":1.99" 3 || return 1
+  echo ":1.77" > "$F/atv.owner"
+  echo "org.atvvoice.fake :1.99 :1.77" >> "$F/atv.owners"
+  wait_for '.remote.sender' ":1.77" 3
+}
+s_atvvoice_appears_late() {               # plan 4 §4.4: an arrival is noticed at once, not at the next backoff retry
+  ready || return 1                       # the harness starts with the fake daemon present: make it leave first
+  wait_for '.remote.state' connected 3 || return 1
+  rm -f "$F/atv.present"
+  echo "org.atvvoice.fake :1.99 -" >> "$F/atv.owners"
+  wait_for '.remote.state' absent 3 || return 1
+  wait_for '.remote.retryMs' 4000 12 || return 1          # backoff 1 s, 2 s, then 4 s: the third failed discovery
+  local now at
+  for _ in 1 2 3 4; do                                    # the retry deadline, not the interval, must be > 2 s away
+    now=$(date +%s%3N); at=$(jget '.remote.retryAt')
+    (( at - now > 2000 )) && break
+    sleep 1
+  done
+  now=$(date +%s%3N); at=$(jget '.remote.retryAt')
+  (( at - now > 2000 )) || { echo "    retryAt only $((at - now)) ms away"; return 1; }
+  : > "$F/atv.present"
+  echo "org.atvvoice.fake - :1.99" >> "$F/atv.owners"
+  wait_for '.remote.state' connected 2 || return 1
+  (( $(date +%s%3N) < at )) || { echo "    connected only after the backoff deadline"; return 1; }
+  [[ $(jget '.remote.retryAt') == 0 ]]
+}
+s_atvvoice_stale_property_reply() {       # plan 4 §4.4: a departed owner's late `streaming` must not start a session
+  ready || return 1
+  wait_for '.remote.sender' ":1.99" 3 || return 1
+  echo 1.5 > "$F/atv.prop-delay"
+  echo streaming > "$F/atv.state"                         # what :1.99 will answer to the State read below
+  local n; n=$(grep -c ' State$' "$F/atv.log")
+  rm -f "$F/atv.present"; echo "org.atvvoice.fake :1.99 -" >> "$F/atv.owners"
+  : > "$F/atv.present"; echo "org.atvvoice.fake - :1.99" >> "$F/atv.owners"    # :1.99 returns: a slow initial State read starts
+  local i
+  for i in $(seq 1 40); do (( $(grep -c ' State$' "$F/atv.log") > n )) && break; sleep 0.05; done
+  (( $(grep -c ' State$' "$F/atv.log") > n )) || { echo "    no State read was issued"; return 1; }
+  echo connected > "$F/atv.state"; echo ":1.77" > "$F/atv.owner"
+  echo "org.atvvoice.fake :1.99 :1.77" >> "$F/atv.owners"  # replaced while :1.99's `streaming` reply is still in flight
+  for i in $(seq 1 60); do                                 # 3 s: the stale reply lands ~1.5 s in
+    [[ $(jget '.voice.state') == idle ]] || { echo "    a session started from a stale reply: $(jget '.voice.state')"; return 1; }
+    sleep 0.05
+  done
+  no_line "$F/vox.log" "voxtype record start" || return 1
+  wait_for '.remote.sender' ":1.77" 3 || return 1
+  wait_for '.remote.state' connected 4                     # :1.77's own read runs after the stale one exits
+}
+scenario atvvoice_departure_noticed s_atvvoice_departure_noticed
+scenario atvvoice_owner_replaced s_atvvoice_owner_replaced
+scenario atvvoice_appears_late s_atvvoice_appears_late
+scenario atvvoice_stale_property_reply s_atvvoice_stale_property_reply
 scenario voice_state_verb s_voice_state_verb
 scenario keyboard_session_observed s_keyboard_session_observed
 scenario panic_during_recording s_panic_during_recording

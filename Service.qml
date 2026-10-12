@@ -602,7 +602,7 @@ Item {
       errorCount: root.errorCount, lastError: root.lastError
       , voice: voice ? (function(s) { return { state: s.state, owner: s.owner, inferred: s.inferred, pendingCmds: s.pendingCmds, gates: s.gates, backendFresh: s.backendFresh } })(voice.snapshot()) : null
       , backend: root.backendClass
-      , remote: { state: root.remoteState, node: root.remoteNode, bus: root.atvBusName, sender: atv.sender, warning: root.remoteWarning }
+      , remote: { state: root.remoteState, node: root.remoteNode, bus: root.atvBusName, sender: atv.sender, warning: root.remoteWarning, retryMs: atv.retryMs, retryAt: atv.retryAt }
       , audioDevice: root.voxAudioDevice
       , mic: { pending: root.micPending, current: root.micCurrentId ? root.micStatusOf(root.micCurrentId) : null, last: root.micLast, conflict: root.micConflict }
       , stats: root.statsSummary

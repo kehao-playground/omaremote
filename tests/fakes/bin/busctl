@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
 # Spec §9: fake busctl for ATVVoice. State files in $OMAREMOTE_FAKE_DIR:
-#   atv.present  exists → org.atvvoice.fake owned by :1.99      atv.state   connected|streaming|disconnected
-#   atv.signals  append a state per line to emit MicStateChanged from `monitor`      atv.log  every invocation
+#   atv.present  exists → org.atvvoice.fake is owned            atv.state   connected|streaming|disconnected
+#   atv.owner    the owner's unique name (default :1.99)        atv.log     every invocation
+#   atv.signals  append a state per line to emit MicStateChanged from `monitor`
+#   atv.owners   append "<name> <old> <new>" per line (- for empty) to emit NameOwnerChanged from a
+#                `monitor` whose match names NameOwnerChanged
 set -u
 d=${OMAREMOTE_FAKE_DIR:?}
 printf '%s\n' "busctl $*" >> "$d/atv.log"
 sub=""; for a in "$@"; do case $a in --*) ;; *) sub=$a; break ;; esac; done
 present() { [[ -e $d/atv.present ]]; }
+owner() { cat "$d/atv.owner" 2>/dev/null || echo ":1.99"; }
 case "$sub" in
   list)
     echo ":1.1 858 dbus-broker kehao :1.1 user@1000.service - -"
-    present && echo "org.atvvoice.fake 4242 atvvoice kehao :1.99 user@1000.service - -" ;;
+    present && echo "org.atvvoice.fake 4242 atvvoice kehao $(owner) user@1000.service - -" ;;
   call)
     if [[ " $* " == *" GetNameOwner "* ]]; then
-      present && { echo 's ":1.99"'; exit 0; }
+      present && { printf 's "%s"\n' "$(owner)"; exit 0; }
       echo "Call failed: The name is not activatable" >&2; exit 1
     fi
     [[ " $* " == *" MicClose "* ]] && printf 'connected\n' > "$d/atv.state"
@@ -23,15 +27,30 @@ case "$sub" in
   get-property)
     present || { echo "Failed to get property: no such name" >&2; exit 1; }
     case "${*: -1}" in
-      State) printf 's "%s"\n' "$(cat "$d/atv.state" 2>/dev/null || echo connected)" ;;
-      NodeName) echo 's "atvvoice_mic"' ;;
-      DeviceAddress) echo 's "AA:BB:CC:DD:EE:FF"' ;;
-    esac ;;
+      State) ans=$(printf 's "%s"' "$(cat "$d/atv.state" 2>/dev/null || echo connected)") ;;
+      NodeName) ans='s "atvvoice_mic"' ;;
+      DeviceAddress) ans='s "AA:BB:CC:DD:EE:FF"' ;;
+      *) ans="" ;;
+    esac
+    [[ -s $d/atv.prop-delay ]] && sleep "$(cat "$d/atv.prop-delay")"   # answer as of the call, delivered late
+    [[ -n $ans ]] && printf '%s\n' "$ans" ;;
   monitor)
+    if [[ " $* " == *NameOwnerChanged* ]]; then
+      : >> "$d/atv.owners"
+      tail -n 0 -F "$d/atv.owners" 2>/dev/null | while read -r n o w; do
+        [[ $o == - ]] && o=""; [[ $w == - ]] && w=""
+        printf '{"type":"signal","sender":"org.freedesktop.DBus","path":"/org/freedesktop/DBus","interface":"org.freedesktop.DBus","member":"NameOwnerChanged","payload":{"type":"sss","data":["%s","%s","%s"]}}\n' "$n" "$o" "$w"
+      done &
+      tp=$!
+      cleanup() { pkill -P $$ 2>/dev/null; exit 0; }
+      trap cleanup TERM INT
+      while kill -0 "$tp" 2>/dev/null && [[ -d $d ]] && kill -0 "$PPID" 2>/dev/null; do sleep 0.2; done
+      cleanup
+    fi
     : >> "$d/atv.signals"
     tail -n 0 -F "$d/atv.signals" 2>/dev/null | while read -r s; do
       printf '%s\n' "$s" > "$d/atv.state"
-      printf '{"type":"signal","sender":":1.99","destination":null,"path":"/org/atvvoice/Daemon","interface":"org.atvvoice.Daemon","member":"MicStateChanged","payload":{"signature":"s","data":["%s"]}}\n' "$s"
+      printf '{"type":"signal","sender":"'"$(owner)"'","destination":null,"path":"/org/atvvoice/Daemon","interface":"org.atvvoice.Daemon","member":"MicStateChanged","payload":{"signature":"s","data":["%s"]}}\n' "$s"
     done &
     tp=$!
     cleanup() { pkill -P $$ 2>/dev/null; exit 0; }          # the tail and the reader are both our children; reap both

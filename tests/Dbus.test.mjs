@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createSignalParser, parseProperty, atvvoiceNames } from "../lib/Dbus.mjs";
+import { createSignalParser, parseProperty, atvvoiceNames, parseNameOwnerChanged } from "../lib/Dbus.mjs";
 
 const line = (state, sender = ":1.42", extra = {}) => JSON.stringify({
   type: "signal", endian: "l", flags: 1, version: 1, cookie: 7, sender,
@@ -56,4 +56,22 @@ test("atvvoiceNames extracts org.atvvoice.* from busctl list output", () => {
               "org.atvvoice.G20SPRO 123 atvvoice k  :1.42 - - -\n" +
               "org.freedesktop.DBus 1 dbus-broker k :1.0 - - -\n";
   assert.deepEqual(atvvoiceNames(out), ["org.atvvoice.G20SPRO"]);
+});
+
+// Shape measured 2026-10-12 with `busctl --user --json=short monitor` while ATVVoice started and stopped.
+const noc = (data, extra = {}) => JSON.stringify({ type: "signal", sender: "org.freedesktop.DBus", path: "/org/freedesktop/DBus",
+  interface: "org.freedesktop.DBus", member: "NameOwnerChanged", payload: { type: "sss", data }, ...extra });
+
+test("parseNameOwnerChanged reads an org.atvvoice arrival and departure", () => {
+  assert.deepEqual(parseNameOwnerChanged(noc(["org.atvvoice.xiaomi", "", ":1.66819"])), { name: "org.atvvoice.xiaomi", oldOwner: "", newOwner: ":1.66819" });
+  assert.deepEqual(parseNameOwnerChanged(noc(["org.atvvoice.xiaomi", ":1.66819", ""])), { name: "org.atvvoice.xiaomi", oldOwner: ":1.66819", newOwner: "" });
+});
+
+test("parseNameOwnerChanged rejects other names, other senders, other members and junk", () => {
+  assert.equal(parseNameOwnerChanged(noc(["org.other.x", "", ":1.5"])), null);
+  assert.equal(parseNameOwnerChanged(noc(["org.atvvoice.x", "", ":1.5"], { sender: ":1.9" })), null);
+  assert.equal(parseNameOwnerChanged(noc(["org.atvvoice.x", "", ":1.5"], { member: "NameLost" })), null);
+  assert.equal(parseNameOwnerChanged(noc(["org.atvvoice.x"])), null);
+  assert.equal(parseNameOwnerChanged("not json"), null);
+  assert.equal(parseNameOwnerChanged(""), null);
 });
