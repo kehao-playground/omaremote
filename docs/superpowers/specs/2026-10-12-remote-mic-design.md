@@ -124,8 +124,15 @@ deliberately left out until use shows a need.
 it rediscovers immediately and resets the backoff. Today a daemon that starts after the Service can
 take up to 30 s to be noticed.
 
-The status JSON's `remote` object gains `retryMs`, the current backoff interval (0 while a daemon
-is connected), so the late-discovery test can prove the backoff alone could not have found it.
+The status JSON's `remote` object gains two fields:
+
+- `retryMs`: the current backoff interval, kept for diagnosis.
+- `retryAt`: the epoch-millisecond deadline of the next scheduled rediscovery, or 0 while a daemon
+  is connected or no retry is pending.
+
+The interval alone does not say how soon the next retry fires: with `retryMs = 4000` and the timer
+3 s in, the backoff would still find a daemon 1 s later. The late-discovery test therefore reads
+`retryAt`.
 
 ### 4.5 Consequence: F9 in `remote` mode
 
@@ -169,11 +176,13 @@ Integration (`tests/fake-remote.sh`, fake `busctl`):
   `connected` returns to `idle`.
 - `s_remote_mode_ignores_hid_mic`: in `remote` mode, `ipc key mic down/up` leaves voice `idle` and
   writes nothing to `actions.log`.
-- `s_atvvoice_appears_late`: start with no daemon and wait until the monitor's backoff exceeds
-  2 s (at least two failed discoveries, so the next retry is ≥ 4 s away). Then let the fake daemon
-  appear and emit `NameOwnerChanged`, and require `remote.state == connected` within 2 s. Without
-  the `NameOwnerChanged` handling this must fail, which the test verifies by asserting that
-  `remote.retryMs` at the time of the emit is greater than 2000.
+- `s_atvvoice_appears_late`: start with no daemon. The backoff schedules 1 s, 2 s and then 4 s, so
+  wait for the third failed discovery, when `remote.retryMs` reaches 4000. Immediately before the
+  emit, read `remote.retryAt` and require `retryAt - now > 2000`; if not, wait for the next
+  failure, which doubles the interval, and check again. Then let the fake daemon appear, emit
+  `NameOwnerChanged`, and require `remote.state == connected` within 2 s and before `retryAt`.
+  Since the next backoff retry is provably more than 2 s away at the emit, only the
+  `NameOwnerChanged` handling can satisfy the assertion.
 - Existing scenarios keep passing, including the six `use_ptt` scenarios, `mic_toggle_session` and
   the arbitration scenarios. Scenarios that rely on arbitration set `remoteOnDemand: true`
   explicitly.
