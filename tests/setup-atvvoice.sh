@@ -18,9 +18,13 @@ REV=0e8f6413dc4bad7a04e3c6b648945439d7a22fac
 
 # run <scenario-env...> : source the script in a subshell with stubs; prints the call log and the exit code
 run() {
+  unstamp                                  # each scenario starts from "nothing installed" unless it asks for a stamp
+  if [[ -n ${STAMPED:-} ]]; then stamp "${STAMP_TEXT:-}"; [[ -z ${NOBIN:-} ]] || rm -f "$T/bin/atvvoice"; fi
   (
     export OMAREMOTE_ATV_UNIT=$T/unit/atvvoice.service
     export OMAREMOTE_ALSA_RC=$T/alsa/asoundrc                  # never the user's ~/.config/alsa
+    export OMAREMOTE_ATV_STAMP=$T/state/atvvoice.build         # never ~/.local/state
+    export OMAREMOTE_ATV_BIN=$T/bin/atvvoice                   # never ~/.cargo/bin
     : > "$T/pw-present"; export OMAREMOTE_PW_ALSA_PROBE=${PW_PROBE:-$T/pw-present}
     # shellcheck disable=SC1090
     source "$LIB"
@@ -28,11 +32,15 @@ run() {
     LOG=$T/calls.log; : > "$LOG"
     cargo() {
       printf 'cargo %s\n' "$*" >> "$LOG"
-      if [[ $1 == install && ${2:-} == --list ]]; then
-        [[ -n ${INSTALLED_REV:-} ]] && printf 'atvvoice v0.2.0 (https://github.com/b0o/ATVVoice?rev=%s#%s):\n    atvvoice\n' "$INSTALLED_REV" "${INSTALLED_REV:0:8}"
-        return 0
-      fi
       [[ -n ${CARGO_FAILS:-} ]] && { echo "error: failed to fetch" >&2; return 101; }
+      return 0
+    }
+    git() {
+      printf 'git %s\n' "$*" >> "$LOG"
+      case " $* " in
+        *" apply "*) [[ -z ${GIT_APPLY_FAIL:-} ]] || { echo "error: patch failed" >&2; return 1; } ;;
+        *" fetch "*) [[ -z ${GIT_FETCH_FAIL:-} ]] || { echo "fatal: unable to access" >&2; return 128; } ;;
+      esac
       return 0
     }
     bluetoothctl() {
@@ -49,19 +57,31 @@ run() {
       [[ " $* " == *" is-active "* ]] && { [[ -n ${WAS_ACTIVE:-} ]]; return; }
       return 0
     }
-    command() { if [[ $1 == -v && $2 == cargo ]]; then [[ -z ${NO_CARGO:-} ]]; return; fi; builtin command "$@"; }
+    command() { if [[ $1 == -v && $2 == cargo ]]; then [[ -z ${NO_CARGO:-} ]]; return; fi; if [[ $1 == -v && $2 == git ]]; then [[ -z ${NO_GIT:-} ]]; return; fi; builtin command "$@"; }
     ( cmd_atvvoice ) > "$T/out.log" 2>&1   # die() exits: run it in its own subshell so the code is still recorded
     echo "exit=$?" >> "$LOG"
   )
   cat "$T/calls.log"
 }
+PATCH=$(dirname "$SRC")/patches/atvvoice-reset-decoder.patch
+PSHA=$(sha256sum "$PATCH" 2>/dev/null | cut -d' ' -f1)
+STAMP_LINE="rev=$REV patch=$PSHA"
+# stamp [line]: the build is recorded as installed (stamp + binary present); no argument = the matching stamp
+stamp() { mkdir -p "$T/state" "$T/bin"; printf '%s\n' "${1:-$STAMP_LINE}" > "$T/state/atvvoice.build"; : > "$T/bin/atvvoice"; chmod +x "$T/bin/atvvoice"; }
+unstamp() { rm -rf "$T/state" "$T/bin"; }
 has() { grep -qF -- "$2" <<<"$1" && echo yes || echo no; }
 
 # 1. fresh host: builds, writes the unit, reloads, enables; no restart (was not active)
 rm -rf "$T/unit"
 out=$(BT_ATV=$ADDR run)
 check "fresh: exits 0"                         "yes" "$(has "$out" "exit=0")"
-check "fresh: cargo install at the pinned rev" "yes" "$(has "$out" "cargo install --git https://github.com/b0o/ATVVoice --rev $REV --locked atvvoice")"
+check "fresh: git fetch of the pinned rev"    "yes" "$(grep -qE "^git .*fetch --depth 1 https://github.com/b0o/ATVVoice $REV\$" <<<"$out" && echo yes || echo no)"
+check "fresh: git apply of the repo patch"     "yes" "$(grep -qE "^git .*apply .*/host/patches/atvvoice-reset-decoder.patch\$|^git .*apply .*/tests/\.\./host/patches/atvvoice-reset-decoder.patch\$" <<<"$out" && echo yes || echo no)"
+check "fresh: cargo install --path --locked"   "yes" "$(grep -qE '^cargo install --locked --path [^ ]+ --force$' <<<"$out" && echo yes || echo no)"
+check "fresh: no cargo --git install"          "no"  "$(has "$out" "--git")"
+check "fresh: order fetch, apply, install"     "fetch apply install" "$(grep -oE 'fetch|apply|cargo install' <<<"$out" | sed 's/cargo //' | tr '\n' ' ' | sed 's/ $//')"
+check "fresh: stamp holds rev and patch sha"   "$STAMP_LINE" "$(cat "$T/state/atvvoice.build" 2>/dev/null)"
+check "fresh: says built"                      "yes" "$(has "$(cat "$T/out.log")" "built atvvoice ${REV:0:7} + reset-decoder patch")"
 check "fresh: daemon-reload"                   "yes" "$(has "$out" "systemctl --user daemon-reload")"
 check "fresh: enable --now"                    "yes" "$(has "$out" "systemctl --user enable --now atvvoice")"
 check "fresh: no restart"                      "no"  "$(has "$out" "systemctl --user restart atvvoice")"
@@ -70,44 +90,56 @@ check "unit: ExecStart with address and name"  "yes" "$(has "$unit" "ExecStart=%
 check "unit: ExecStart never --mic-on-demand"  "no"  "$(has "$(grep '^ExecStart=' <<<"$unit")" "--mic-on-demand")"   # comments may mention it
 
 # 2. re-run, nothing changed, service active: no build, no rewrite, no reload, no restart, still enable --now
-out=$(BT_ATV=$ADDR INSTALLED_REV=$REV WAS_ACTIVE=1 run)
-check "rerun: no build"                        "no"  "$(has "$out" "--locked atvvoice")"
+out=$(BT_ATV=$ADDR STAMPED=1 WAS_ACTIVE=1 run)
+check "rerun: no build"                        "no"  "$(has "$out" "--locked")"
+check "rerun: no git, no cargo at all"         "no"  "$(grep -qE '^(git|cargo) ' <<<"$out" && echo yes || echo no)"
+check "rerun: says up to date"                 "yes" "$(has "$(cat "$T/out.log")" "atvvoice ${REV:0:7} + patch: up to date")"
 check "rerun: no daemon-reload"                "no"  "$(has "$out" "daemon-reload")"
 check "rerun: no restart"                      "no"  "$(has "$out" "restart atvvoice")"
 check "rerun: enable --now still issued"       "yes" "$(has "$out" "enable --now atvvoice")"
 
 # 3. re-run after the service was stopped/disabled: enable --now brings it back, no restart
-out=$(BT_ATV=$ADDR INSTALLED_REV=$REV run)
+out=$(BT_ATV=$ADDR STAMPED=1 run)
 check "stopped: enable --now"                  "yes" "$(has "$out" "enable --now atvvoice")"
 check "stopped: no restart"                    "no"  "$(has "$out" "restart atvvoice")"
 
-# 4. only the binary changed (older rev installed), service active: rebuild + restart, no rewrite
-out=$(BT_ATV=$ADDR INSTALLED_REV=1111111111111111111111111111111111111111 WAS_ACTIVE=1 run)
-check "binary: rebuilt"                        "yes" "$(has "$out" "--locked atvvoice")"
+# 4. only the binary changed (older rev stamped), service active: rebuild + restart, no rewrite
+out=$(BT_ATV=$ADDR STAMPED=1 STAMP_TEXT="rev=1111111111111111111111111111111111111111 patch=$PSHA" WAS_ACTIVE=1 run)
+check "binary: rebuilt"                        "yes" "$(has "$out" "--locked --path")"
 check "binary: no daemon-reload"               "no"  "$(has "$out" "daemon-reload")"
 check "binary: restart"                        "yes" "$(has "$out" "systemctl --user restart atvvoice")"
 
+# 4b. same rev, different patch hash: rebuild; a missing binary with a matching stamp: rebuild
+out=$(BT_ATV=$ADDR STAMPED=1 STAMP_TEXT="rev=$REV patch=deadbeef" WAS_ACTIVE=1 run)
+check "patch hash differs: rebuilt"            "yes" "$(has "$out" "--locked --path")"
+check "patch hash differs: stamp refreshed"    "$STAMP_LINE" "$(cat "$T/state/atvvoice.build")"
+check "patch hash differs: restart"            "yes" "$(has "$out" "systemctl --user restart atvvoice")"
+out=$(BT_ATV=$ADDR STAMPED=1 NOBIN=1 run)
+check "binary missing, stamp ok: rebuilt"      "yes" "$(has "$out" "--locked --path")"
+out=$(BT_ATV=$ADDR run)
+check "no stamp (unpatched host): rebuilt"     "yes" "$(has "$out" "--locked --path")"
+
 # 5. unit changed (remote re-paired at a new address), service active: rewrite + reload + restart
-out=$(BT_ATV=AA:AA:AA:AA:AA:AA INSTALLED_REV=$REV WAS_ACTIVE=1 run)
+out=$(BT_ATV=AA:AA:AA:AA:AA:AA STAMPED=1 WAS_ACTIVE=1 run)
 check "unit changed: daemon-reload"            "yes" "$(has "$out" "daemon-reload")"
 check "unit changed: restart"                  "yes" "$(has "$out" "systemctl --user restart atvvoice")"
 check "unit changed: new address written"      "yes" "$(has "$(cat "$T/unit/atvvoice.service")" "--device AA:AA:AA:AA:AA:AA")"
 
 # 6. no ATVV remote paired (Review focus 5): stops, names the problem, writes nothing
 rm -rf "$T/unit"
-out=$(BT_OTHER=11:22:33:44:55:66 INSTALLED_REV=$REV run)
+out=$(BT_OTHER=11:22:33:44:55:66 STAMPED=1 run)
 check "none: exits non-zero"                   "no"  "$(has "$out" "exit=0")"
 check "none: no unit written"                  "no"  "$([[ -e $T/unit/atvvoice.service ]] && echo yes || echo no)"
 check "none: message names the cause"          "yes" "$(has "$(cat "$T/out.log")" "no paired ATVV remote")"
 check "none: no enable"                        "no"  "$(has "$out" "enable --now")"
 
 # 7. bluetoothctl fails (Bluetooth off): same as none
-out=$(BT_FAILS=1 INSTALLED_REV=$REV run)
+out=$(BT_FAILS=1 STAMPED=1 run)
 check "bt off: exits non-zero"                 "no"  "$(has "$out" "exit=0")"
 check "bt off: message names the cause"        "yes" "$(has "$(cat "$T/out.log")" "no paired ATVV remote")"
 
 # 8. two ATVV remotes: stops and names both
-out=$(BT_ATV="$ADDR AA:AA:AA:AA:AA:AA" INSTALLED_REV=$REV run)
+out=$(BT_ATV="$ADDR AA:AA:AA:AA:AA:AA" STAMPED=1 run)
 check "two: exits non-zero"                    "no"  "$(has "$out" "exit=0")"
 check "two: both named"                        "yes" "$(has "$(cat "$T/out.log")" "$ADDR AA:AA:AA:AA:AA:AA")"
 
@@ -118,7 +150,30 @@ out=$(BT_ATV=$ADDR CARGO_FAILS=1 WAS_ACTIVE=1 run)
 check "cargo fails: exits non-zero"            "no"  "$(has "$out" "exit=0")"
 check "cargo fails: unit untouched"            "EXISTING" "$(cat "$T/unit/atvvoice.service")"
 check "cargo fails: no systemctl mutation"     "no"  "$(grep -qE 'systemctl --user (daemon-reload|enable|restart)' <<<"$out" && echo yes || echo no)"
+check "cargo fails: no stamp"                  "no"  "$([[ -e $T/state/atvvoice.build ]] && echo yes || echo no)"
 check "cargo fails: ALSA file not created"     "no"  "$([[ -e $T/alsa/asoundrc ]] && echo yes || echo no)"
+
+# 9b. git apply fails: dies with git's error; no cargo, no stamp, no unit, no ALSA, no systemctl
+rm -rf "$T/unit" "$T/alsa"
+out=$(BT_ATV=$ADDR GIT_APPLY_FAIL=1 WAS_ACTIVE=1 run)
+check "apply fails: exits non-zero"            "no"  "$(has "$out" "exit=0")"
+check "apply fails: git's error shown"         "yes" "$(has "$(cat "$T/out.log")" "patch failed")"
+check "apply fails: no cargo"                  "no"  "$(has "$out" "cargo")"
+check "apply fails: no stamp, unit or ALSA"    "no no no" "$([[ -e $T/state/atvvoice.build ]] && echo yes || echo no) $([[ -e $T/unit/atvvoice.service ]] && echo yes || echo no) $([[ -e $T/alsa/asoundrc ]] && echo yes || echo no)"
+check "apply fails: no systemctl mutation"     "no"  "$(grep -qE 'systemctl --user (daemon-reload|enable|restart)' <<<"$out" && echo yes || echo no)"
+out=$(BT_ATV=$ADDR GIT_FETCH_FAIL=1 run)
+check "fetch fails: exits non-zero, no apply"  "no no" "$(has "$out" "exit=0") $(has "$out" "apply")"
+check "fetch fails: no cargo, no stamp"        "no no" "$(has "$out" "cargo") $([[ -e $T/state/atvvoice.build ]] && echo yes || echo no)"
+
+# 9c. git missing: dies with the pacman hint before any write or build
+out=$(NO_GIT=1 BT_ATV=$ADDR run)
+check "no git: exits non-zero"                 "no"  "$(has "$out" "exit=0")"
+check "no git: pacman hint"                    "yes" "$(has "$(cat "$T/out.log")" "sudo pacman -S git")"
+check "no git: nothing ran or written"         "no no no" "$(has "$out" "cargo") $(has "$out" "systemctl") $([[ -e $T/unit/atvvoice.service ]] && echo yes || echo no)"
+
+# static: the patch ships in the repo (git apply --check needs the network-fetched source, so it cannot run here)
+check "patch file exists in the repo"          "yes" "$([[ -f $PATCH ]] && echo yes || echo no)"
+check "patch carries the decoder reset"        "yes" "$(grep -qF 'on_audio_sync(&AudioSyncData::Full' "$PATCH" && echo yes || echo no)"
 
 # 10. no cargo: prints the rustup command for the user and stops before anything else
 out=$(NO_CARGO=1 BT_ATV=$ADDR run)
@@ -136,14 +191,14 @@ pcm.atvvoice-xiaomi {
 }
 $END_M"
 rm -rf "$T/unit" "$T/alsa"
-out=$(BT_ATV=$ADDR INSTALLED_REV=$REV run)
+out=$(BT_ATV=$ADDR STAMPED=1 run)
 check "alsa fresh: file is exactly the block"  "$BLOCK" "$(cat "$T/alsa/asoundrc" 2>/dev/null)"
 check "alsa fresh: reports the write"          "yes" "$(has "$(cat "$T/out.log")" "wrote $T/alsa/asoundrc (ALSA PCM atvvoice-xiaomi)")"
 check "alsa fresh: voxtype try-restart"        "no"  "$(has "$out" "try-restart voxtype")"   # inactive stub: see below for the active case
 
 # rerun: unchanged, and not rewritten (mtime pinned in the past would move on any rewrite)
 touch -d '2001-01-01 00:00:00' "$T/alsa/asoundrc"
-out=$(BT_ATV=$ADDR INSTALLED_REV=$REV VOX_ACTIVE=1 run)
+out=$(BT_ATV=$ADDR STAMPED=1 VOX_ACTIVE=1 run)
 check "alsa rerun: says unchanged"             "yes" "$(has "$(cat "$T/out.log")" "ALSA PCM atvvoice-xiaomi: unchanged")"
 check "alsa rerun: mtime untouched"            "2001-01-01" "$(date -r "$T/alsa/asoundrc" +%F)"
 check "alsa rerun: voxtype not restarted"      "no"  "$(has "$out" "voxtype")"
@@ -152,7 +207,7 @@ check "alsa rerun: voxtype not restarted"      "no"  "$(has "$out" "voxtype")"
 rm -rf "$T/alsa"; mkdir -p "$T/alsa"
 printf '# my own config\npcm.foo {\n  type null\n}\n' > "$T/alsa/asoundrc"
 before=$(cat "$T/alsa/asoundrc")
-out=$(BT_ATV=$ADDR INSTALLED_REV=$REV VOX_ACTIVE=1 run)
+out=$(BT_ATV=$ADDR STAMPED=1 VOX_ACTIVE=1 run)
 check "alsa append: original lines kept first" "$before" "$(head -n 4 "$T/alsa/asoundrc")"
 check "alsa append: block present once"        "1"   "$(grep -c -F "$BEGIN_M" "$T/alsa/asoundrc")"
 check "alsa append: block text exact"          "$BLOCK" "$(sed -n "/^# BEGIN omaremote/,/^# END omaremote/p" "$T/alsa/asoundrc")"
@@ -160,7 +215,7 @@ check "alsa changed + voxtype active: try-restart" "yes" "$(has "$out" "systemct
 
 # stale block replaced in place; text before and after it preserved
 printf '# top\npcm.foo {}\n%s\npcm.stale {\n  type null\n}\n%s\n# bottom\npcm.bar {}\n' "$BEGIN_M" "$END_M" > "$T/alsa/asoundrc"
-out=$(BT_ATV=$ADDR INSTALLED_REV=$REV VOX_ACTIVE=1 run)
+out=$(BT_ATV=$ADDR STAMPED=1 VOX_ACTIVE=1 run)
 want=$(printf '# top\npcm.foo {}\n%s\n# bottom\npcm.bar {}' "$BLOCK")
 check "alsa stale: block replaced, rest kept"  "$want" "$(cat "$T/alsa/asoundrc")"
 check "alsa stale: voxtype try-restart"        "yes" "$(has "$out" "systemctl --user try-restart voxtype")"
@@ -168,10 +223,10 @@ check "alsa stale: voxtype try-restart"        "yes" "$(has "$out" "systemctl --
 # an unterminated marker is never guessed at: the file is left alone and the step stops
 rm -rf "$T/unit"
 printf '# top\n%s\npcm.mine {}\n' "$BEGIN_M" > "$T/alsa/asoundrc"; before=$(cat "$T/alsa/asoundrc")
-out=$(BT_ATV=$ADDR INSTALLED_REV=$REV run)
+out=$(BT_ATV=$ADDR STAMPED=1 run)
 check "alsa broken markers: exits non-zero"    "no"  "$(has "$out" "exit=0")"
 check "alsa broken markers: file untouched"    "$before" "$(cat "$T/alsa/asoundrc")"
-check "alsa broken markers: no build, no unit" "no no" "$(has "$out" "cargo install --git") $([[ -e $T/unit/atvvoice.service ]] && echo yes || echo no)"
+check "alsa broken markers: no build, no unit" "no no" "$(has "$out" "--path") $([[ -e $T/unit/atvvoice.service ]] && echo yes || echo no)"
 check "alsa broken markers: fails before systemctl" "no" "$(has "$out" "systemctl")"
 
 # END before BEGIN (one of each) is misordered: refuse, never drop the tail
@@ -180,14 +235,14 @@ printf '# top\n%s\npcm.mine {}\n%s\n# precious tail\n' "$END_M" "$BEGIN_M" > "$T
 out=$(BT_ATV=$ADDR run)
 check "alsa END before BEGIN: dies"            "no"  "$(has "$out" "exit=0")"
 check "alsa END before BEGIN: file unchanged"  "$before" "$(cat "$T/alsa/asoundrc")"
-check "alsa END before BEGIN: no cargo install" "no" "$(has "$out" "cargo install --git")"
+check "alsa END before BEGIN: no cargo install" "no" "$(has "$out" "--path")"
 
 # PipeWire ALSA plugin missing: dies with the pacman hint before cargo, the unit or the ALSA file
 rm -rf "$T/unit" "$T/alsa"
 out=$(BT_ATV=$ADDR PW_PROBE=$T/absent run)
 check "no pw plugin: exits non-zero"           "no"  "$(has "$out" "exit=0")"
 check "no pw plugin: pacman hint"              "yes" "$(has "$(cat "$T/out.log")" "sudo pacman -S --needed pipewire-alsa")"
-check "no pw plugin: no cargo install"         "no"  "$(has "$out" "cargo install --git")"
+check "no pw plugin: no cargo install"         "no"  "$(has "$out" "--path")"
 check "no pw plugin: no unit, no alsa file"    "no no" "$([[ -e $T/unit/atvvoice.service ]] && echo yes || echo no) $([[ -e $T/alsa/asoundrc ]] && echo yes || echo no)"
 check "no pw plugin: no systemctl at all"      "no"  "$(has "$out" "systemctl")"
 

@@ -27,6 +27,12 @@ MIC_EXPLICIT=0    # 1 once --mic is given: only then does the bare `mic` subcomm
 # ATVVoice, pinned to the commit measured against the Xiaomi RC003 on 2026-10-12.
 ATV_REPO=https://github.com/b0o/ATVVoice
 ATV_REV=0e8f6413dc4bad7a04e3c6b648945439d7a22fac
+# Built from the pinned rev plus a repo patch (the RC003 never sends AUDIO_SYNC, which upstream needs to reset its
+# ADPCM decoder; the patch resets it at AUDIO_START). Located from $0, like tests/inject-key.py.
+ATV_PATCH=${OMAREMOTE_ATV_PATCH:-$(dirname "$0")/../host/patches/atvvoice-reset-decoder.patch}
+ATV_BIN=${OMAREMOTE_ATV_BIN:-$HOME/.cargo/bin/atvvoice}
+# One line, `rev=<ATV_REV> patch=<sha256 of the patch>`; written only after a successful install.
+ATV_STAMP=${OMAREMOTE_ATV_STAMP:-${XDG_STATE_HOME:-$HOME/.local/state}/omaremote/atvvoice.build}
 ATV_UUID=ab5e0001-5a21-4f05-bc7d-af01f617b664
 ATV_UNIT=${OMAREMOTE_ATV_UNIT:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/atvvoice.service}
 # One name for the unit's --name, the PipeWire node ATVVoice then creates, and the ALSA PCM we define for it.
@@ -506,8 +512,17 @@ atv_candidates() {   # paired devices exposing the ATV voice service, one addres
   return 0
 }
 
-atv_installed_rev() {   # the rev cargo recorded for an installed atvvoice, or nothing
-  cargo install --list 2>/dev/null | sed -n 's/^atvvoice v[^ ]* (.*[?&]rev=\([0-9a-f]*\).*/\1/p' | head -n1
+atv_stamp_line() { printf 'rev=%s patch=%s\n' "$ATV_REV" "$(sha256sum "$ATV_PATCH" | cut -d' ' -f1)"; }
+
+# Fetch the pinned rev, apply the repo patch, install the result. Any failure dies before the caller writes anything.
+atv_build() {
+  local src=$WORKDIR/atvvoice-src
+  mkdir -p "$src"
+  git -C "$src" init -q || die "git init failed; nothing was changed"
+  git -C "$src" fetch --depth 1 "$ATV_REPO" "$ATV_REV" || die "git fetch of ATVVoice $ATV_REV failed; nothing was changed"
+  git -C "$src" checkout -q FETCH_HEAD || die "git checkout failed; nothing was changed"
+  git -C "$src" apply "$ATV_PATCH" || die "the ATVVoice patch no longer applies to $ATV_REV; nothing was changed"
+  cargo install --locked --path "$src" --force || die "cargo install failed; nothing was changed"
 }
 
 gen_atv_unit() {   # gen_atv_unit <addr> > file
@@ -578,6 +593,9 @@ cmd_atvvoice() {
   step "ATVVoice (remote microphone)"
   command -v cargo >/dev/null 2>&1 \
     || die "cargo is missing. Run:  sudo pacman -S rustup && rustup default stable  -- then re-run this step."
+  command -v git >/dev/null 2>&1 \
+    || die "git is missing (ATVVoice is built from source). Run:  sudo pacman -S git  -- then re-run this step."
+  [[ -f $ATV_PATCH ]] || die "the ATVVoice patch is missing: $ATV_PATCH"
   need bluetoothctl
 
   # Resolve the device before building or touching anything, so a missing remote changes nothing.
@@ -595,11 +613,16 @@ cmd_atvvoice() {
   [[ $(alsa_rc_state "$ALSA_RC") != bad ]] \
     || die "$ALSA_RC has unbalanced or misordered '$ALSA_BEGIN' / '$ALSA_END' markers; fix it by hand. Nothing was changed."
 
-  local built=0
-  if [[ $(atv_installed_rev) != "$ATV_REV" ]]; then
-    say "building ATVVoice $ATV_REV (a few minutes)"
-    cargo install --git "$ATV_REPO" --rev "$ATV_REV" --locked atvvoice || die "cargo install failed; nothing was changed"
+  local built=0 want; want=$(atv_stamp_line)
+  if [[ ! -x $ATV_BIN || $(cat "$ATV_STAMP" 2>/dev/null) != "$want" ]]; then
+    say "building ATVVoice $ATV_REV + reset-decoder patch (a few minutes)"
+    atv_build
+    mkdir -p "$(dirname "$ATV_STAMP")"
+    printf '%s\n' "$want" > "$ATV_STAMP"
     built=1
+    say "built atvvoice ${ATV_REV:0:7} + reset-decoder patch"
+  else
+    say "atvvoice ${ATV_REV:0:7} + patch: up to date"
   fi
 
   gen_atv_unit "${cands[0]}" > "$WORKDIR/atvvoice.service"
@@ -656,7 +679,8 @@ usage: omaremote-setup [--yes] [--mic remote|system] <subcommand>
   keyd     stage and validate /etc/keyd/omaremote.conf, then guide enabling the service
   binds    ensure the xkb option, generate ~/.config/hypr/omaremote.lua, reload and verify
   plugin   check the Omarchy plugin is installed and the service answers
-  atvvoice build ATVVoice (pinned), write its user unit for the paired remote, enable it, and
+  atvvoice build ATVVoice (pinned rev + host/patches/atvvoice-reset-decoder.patch; needs git and cargo),
+           write its user unit for the paired remote, enable it, and
            define the ALSA PCM atvvoice-xiaomi that Voxtype opens (managed block in the ALSA file below)
   mic      apply a mic mode (remote|system) through the mic-apply contract
   verify   verify the loaded binds and sweep the transport with the injector
@@ -670,6 +694,7 @@ and applies the system/external mic.
 Environment:
   OMAREMOTE_DEVICE   vendor:product of the remote (default 2717:32b8)
   OMAREMOTE_ALSA_RC  ALSA user config the atvvoice step edits (default ~/.config/alsa/asoundrc)
+  OMAREMOTE_ATV_STAMP  build stamp the atvvoice step compares (default ~/.local/state/omaremote/atvvoice.build)
   OMAREMOTE_NODE_WAIT_MS  how long `mic remote` waits for the remote's audio node (default 30000)
 USAGE
 }

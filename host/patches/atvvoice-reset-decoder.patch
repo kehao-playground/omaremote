@@ -1,0 +1,27 @@
+# Fixes ATVVoice decoding every stream after the first as garbage on remotes that never send AUDIO_SYNC
+# (Xiaomi RC003): resets the v1.0 ADPCM decoder at each AUDIO_START. Applies to the rev pinned as
+# ATV_REV in host/omaremote-setup (b0o/ATVVoice 0e8f641); git apply ignores this leading text.
+diff --git a/src/atvv.rs b/src/atvv.rs
+index db48752..72dd386 100644
+--- a/src/atvv.rs
++++ b/src/atvv.rs
+@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
+ use tokio::time::{self, Instant};
+ 
+ use crate::consumer;
+-use crate::protocol::types::{AudioFrame, AudioStopReason, CtlEvent, StreamId};
++use crate::protocol::types::{AudioFrame, AudioStopReason, AudioSyncData, CtlEvent, StreamId};
+ use crate::protocol::Protocol;
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+@@ -198,6 +198,10 @@ pub async fn run_session(
+                         tracing::info!("AUDIO_START (reason={:?}, codec={:?}, stream_id={:?})", reason, codec, stream_id);
+                         // Remote resets its sequence counter on every AUDIO_START
+                         last_seq = None;
++                        // ...and its ADPCM encoder state. Remotes that never send AUDIO_SYNC
++                        // (e.g. Xiaomi RC003) would otherwise be decoded with the previous
++                        // stream's predictor/step index, which saturates the output.
++                        protocol.on_audio_sync(&AudioSyncData::Full { codec, seq: 0, predictor: 0, step_index: 0 });
+                         current_stream_id = Some(stream_id);
+                         set_state(State::Streaming, &mut state);
+                         // Reset keepalive timer when streaming starts/restarts
