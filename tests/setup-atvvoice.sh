@@ -37,8 +37,9 @@ run() {
     }
     git() {
       printf 'git %s\n' "$*" >> "$LOG"
+      local dir=.; [[ $1 == -C ]] && { dir=$2; shift 2; }   # honour -C: a relative patch path is opened from inside dir
       case " $* " in
-        *" apply "*) [[ -z ${GIT_APPLY_FAIL:-} ]] || { echo "error: patch failed" >&2; return 1; } ;;
+        *" apply "*) [[ -z ${GIT_APPLY_FAIL:-} ]] && (cd "$dir" && [[ -f ${!#} ]]) ||  { echo "error: patch failed" >&2; return 1; } ;;
         *" fetch "*) [[ -z ${GIT_FETCH_FAIL:-} ]] || { echo "fatal: unable to access" >&2; return 128; } ;;
       esac
       return 0
@@ -170,6 +171,14 @@ out=$(NO_GIT=1 BT_ATV=$ADDR run)
 check "no git: exits non-zero"                 "no"  "$(has "$out" "exit=0")"
 check "no git: pacman hint"                    "yes" "$(has "$(cat "$T/out.log")" "sudo pacman -S git")"
 check "no git: nothing ran or written"         "no no no" "$(has "$out" "cargo") $(has "$out" "systemctl") $([[ -e $T/unit/atvvoice.service ]] && echo yes || echo no)"
+
+# a relative patch path (script run as `bash host/omaremote-setup` from the repo root) must still reach git apply
+REPO=$(cd "$(dirname "$SRC")/.." && pwd)
+check "ATV_PATCH absolute for a relative \$0"  "yes" "$(cd "$REPO" && bash -c 'source "$1"; [[ $ATV_PATCH == /* && -f $ATV_PATCH ]] && echo yes || echo no' host/omaremote-setup "$LIB")"
+rm -rf "$T/unit" "$T/alsa"
+out=$(cd "$REPO" && BT_ATV=$ADDR OMAREMOTE_ATV_PATCH=host/patches/atvvoice-reset-decoder.patch run)
+check "relative override: apply still succeeds" "yes" "$(has "$out" "exit=0")"
+check "relative override: reaches cargo"        "yes" "$(has "$out" "cargo install --locked --path")"
 
 # static: the patch ships in the repo (git apply --check needs the network-fetched source, so it cannot run here)
 check "patch file exists in the repo"          "yes" "$([[ -f $PATCH ]] && echo yes || echo no)"

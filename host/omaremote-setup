@@ -29,7 +29,9 @@ ATV_REPO=https://github.com/b0o/ATVVoice
 ATV_REV=0e8f6413dc4bad7a04e3c6b648945439d7a22fac
 # Built from the pinned rev plus a repo patch (the RC003 never sends AUDIO_SYNC, which upstream needs to reset its
 # ADPCM decoder; the patch resets it at AUDIO_START). Located from $0, like tests/inject-key.py.
+# Absolute: git -C <workdir> apply would otherwise resolve a relative path inside the work dir.
 ATV_PATCH=${OMAREMOTE_ATV_PATCH:-$(dirname "$0")/../host/patches/atvvoice-reset-decoder.patch}
+[[ $ATV_PATCH == /* ]] || ATV_PATCH=$(cd "$(dirname "$ATV_PATCH")" 2>/dev/null && pwd)/$(basename "$ATV_PATCH")
 ATV_BIN=${OMAREMOTE_ATV_BIN:-$HOME/.cargo/bin/atvvoice}
 # One line, `rev=<ATV_REV> patch=<sha256 of the patch>`; written only after a successful install.
 ATV_STAMP=${OMAREMOTE_ATV_STAMP:-${XDG_STATE_HOME:-$HOME/.local/state}/omaremote/atvvoice.build}
@@ -694,6 +696,8 @@ and applies the system/external mic.
 Environment:
   OMAREMOTE_DEVICE   vendor:product of the remote (default 2717:32b8)
   OMAREMOTE_ALSA_RC  ALSA user config the atvvoice step edits (default ~/.config/alsa/asoundrc)
+  OMAREMOTE_ATV_BIN    atvvoice binary whose presence the build check requires (default ~/.cargo/bin/atvvoice)
+  OMAREMOTE_ATV_PATCH  patch applied to the pinned rev (default host/patches/atvvoice-reset-decoder.patch)
   OMAREMOTE_ATV_STAMP  build stamp the atvvoice step compares (default ~/.local/state/omaremote/atvvoice.build)
   OMAREMOTE_NODE_WAIT_MS  how long `mic remote` waits for the remote's audio node (default 30000)
 USAGE
