@@ -20,7 +20,7 @@ integration harness), `busctl`, systemd user units, cargo.
 
 ## Global Constraints
 
-- ATVVoice repo `https://github.com/b0o/ATVVoice`, pinned rev `0e8f6413dc4bad7a04e3c6b648945439d7a22fac`, installed with `--locked`.
+- ATVVoice repo `https://github.com/b0o/ATVVoice`, pinned rev `0e8f6413dc4bad7a04e3c6b648945439d7a22fac` plus `host/patches/atvvoice-reset-decoder.patch`, installed with `--locked`.
 - The unit's ExecStart is `%h/.cargo/bin/atvvoice --device <addr> --name xiaomi`. It never contains `--mic-on-demand`.
 - ATV service UUID used to pick the remote: `ab5e0001-5a21-4f05-bc7d-af01f617b664`.
 - `voice.remoteOnDemand` is a boolean, defaults to `false`, and any non-boolean normalizes to `false`.
@@ -1929,3 +1929,18 @@ voxtype when the block changed. `omaremote-facts` reports `alsa.pcms` (`arecord 
 
 **Second observation, not investigated.** Of 6 presses, 3 streamed only 0.13-0.19 s (`AUDIO_STOP`
 `HttButtonRelease`) and 3 streamed 2.9-3.9 s.
+
+## Task 11
+
+Hardware acceptance, third finding (2026-10-12). With Task 10 Voxtype captured the whole hold but Whisper
+returned "" every time: decoded audio was saturated (mean about -30000, pinned at -32768). ATVVoice rev
+0e8f641 resets its v1.0 ADPCM decoder only on AUDIO_SYNC; the RC003 never sends AUDIO_SYNC and resets its
+encoder at every AUDIO_START, so each stream after the first was decoded from the previous stream's state.
+Offline, a btsnoop capture decoded with a reset at each AUDIO_START was clean and transcribed "one two
+three..."; a patched build transcribed "1 2 3, 1 2 3, ... testing, 1 2 3" live.
+
+`host/patches/atvvoice-reset-decoder.patch` resets the decoder at AUDIO_START. `omaremote-setup atvvoice`
+now fetches the pinned rev with git, applies the patch, and runs `cargo install --locked --path --force`.
+Installed-build detection is a stamp file (`rev=<rev> patch=<sha256>`) plus the binary's presence, so the
+unpatched upstream install on the current host rebuilds once. `git` is a new prerequisite. The patch is a
+candidate for upstream; reporting it is the user's decision.

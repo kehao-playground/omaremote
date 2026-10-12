@@ -257,6 +257,10 @@ Measured against this remote (`bluetooth:v2717p32B8d00A4`, RC003) with b0o/ATVVo
 6. The HID mic key (F5, keyd `xfer`) is a press-time pulse. A self-test lease counted one `down` per
    hold, whatever its length. It carries no release information, so the D-Bus stream state is the
    only release signal.
+6b. The remote never sends `AUDIO_SYNC`; it resets its ADPCM encoder at every `AUDIO_START`. Upstream
+   ATVVoice resets its decoder only on `AUDIO_SYNC`, so every stream after the first decodes saturated
+   (mean about -30000) and Whisper returns "". Setup builds ATVVoice with
+   `host/patches/atvvoice-reset-decoder.patch`, which resets at `AUDIO_START` (spec §2.10).
 7. Naming bug: ATVVoice derives its D-Bus and PipeWire names from the BLE device name. The Chinese
    name `小米蓝牙语音遥控器` strips to an empty suffix, so the D-Bus name `org.atvvoice.` is invalid and
    registration fails. `--name xiaomi` avoids this (`org.atvvoice.xiaomi`, node `atvvoice-xiaomi`).

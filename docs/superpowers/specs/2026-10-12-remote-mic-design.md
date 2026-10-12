@@ -52,6 +52,16 @@ All measured on 2026-10-09..12 against the Xiaomi Bluetooth Remote 2 Pro / RC003
    (`pw-link` shows the stream linked to `atvvoice-xiaomi:capture_MONO`). Hyphens are fine in the
    PCM id. Naming the PCM exactly like the node means `audio.device = <NodeName>` and the doctor's
    equality check need no change.
+10. ATVVoice rev 0e8f641 decodes every stream after the first as saturated noise on this remote
+   (hardware acceptance, 2026-10-12). Voxtype held the capture for the whole hold, but Whisper
+   returned "" every time: the decoded PCM had mean about -30000, pinned at -32768. Upstream resets
+   its v1.0 ADPCM decoder only on AUDIO_SYNC; the RC003 never sends AUDIO_SYNC and instead resets its
+   encoder at every AUDIO_START, so each stream was decoded from the previous stream's predictor and
+   step index. Offline, decoding a btsnoop capture with a reset at each AUDIO_START gave clean audio
+   and Voxtype transcribed "one two three..."; carrying the state over reproduced the saturation. A
+   patched build then transcribed "1 2 3, 1 2 3, ... testing, 1 2 3" live. The fix is
+   `host/patches/atvvoice-reset-decoder.patch` (reset on AUDIO_START), applied by setup to the pinned
+   rev. It is a candidate for upstream; reporting it is the user's decision.
 
 ## 3. Host (setup)
 
@@ -64,9 +74,16 @@ The `atvvoice` step:
 
 - **Toolchain.** If `cargo` is missing, print `sudo pacman -S rustup && rustup default stable`
   and stop. This is the only step needing root; the user runs it, as with every other `sudo`.
-- **Build.** `cargo install --git https://github.com/b0o/ATVVoice --rev 0e8f6413dc4bad7a04e3c6b648945439d7a22fac --locked atvvoice`
-  into `~/.cargo/bin`. Skip it when `cargo install --list` already shows `atvvoice` at the pinned
-  `rev` (the binary has no `--version` flag).
+- **Build.** Requires `git` (missing: print `sudo pacman -S git` and stop, before any write). Fetch
+  the pinned rev (`git init`, `git fetch --depth 1 https://github.com/b0o/ATVVoice 0e8f6413dc4bad7a04e3c6b648945439d7a22fac`,
+  `git checkout FETCH_HEAD`) into a work dir, `git apply host/patches/atvvoice-reset-decoder.patch`
+  (§2.10), then `cargo install --locked --path <dir> --force`; the binary lands in `~/.cargo/bin`.
+  A failure in fetch, apply or cargo dies with the tool's error and leaves the unit, service, ALSA
+  file and stamp untouched. A path install does not record its rev in `cargo install --list`, so
+  setup keeps a stamp, `${OMAREMOTE_ATV_STAMP:-~/.local/state/omaremote/atvvoice.build}`, holding
+  `rev=<rev> patch=<sha256 of the patch file>`, written only after `cargo install` succeeds. The
+  build is skipped only when the stamp equals the expected line and `~/.cargo/bin/atvvoice` exists
+  (so a host with the unpatched upstream install and no stamp rebuilds once).
 - **Device.** Resolve the remote's address from `bluetoothctl devices` plus
   `bluetoothctl info <addr>`, choosing the device whose UUIDs include `ab5e0001-…`. The address is
   written into the unit, not left to auto-detection. With zero or several candidates, the step
@@ -79,8 +96,8 @@ The `atvvoice` step:
     rewrite nor reload.
   - Always ensure the service is enabled and active (`enable --now`), whatever the unit content.
     A re-run therefore repairs a stopped or disabled service.
-  - Restart the service when the unit changed or the build step installed a new binary, and it was
-    already active, so the running process uses the new unit or binary.
+  - Restart the service when the unit changed or the build step installed a new binary (a stamp mismatch or a
+    missing binary), and it was already active, so the running process uses the new unit or binary.
 - **Config.** No omaremote config edit: `voice.remoteOnDemand` defaults to `false`, which matches
   the unit this step writes. A user who later adds `--mic-on-demand` must also set the field to
   `true`. Doctor (§5) reports a mismatch.
