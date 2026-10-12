@@ -343,8 +343,8 @@ s_remote_mode_ignores_hid_mic() {         # plan 4 §4.2: remote mode drops both
   ipc key mic down > /dev/null; sleep 0.2; ipc key mic up > /dev/null; sleep 0.3
   [[ $(jget '.voice.state') == idle ]] || return 1
   no_line "$F/vox.log" "voxtype record start" || return 1
-  # actions.log also holds the startup probes (hyprctl binds, pw-dump); only a dispatched action counts.
-  ! grep -qvE '^(hyprctl binds|pw-dump)' "$F/actions.log" || { echo "    actions.log:"; sed 's/^/      /' "$F/actions.log"; return 1; }
+  # actions.log also holds the startup probes (hyprctl binds, pw-dump, arecord -L); only a dispatched action counts.
+  ! grep -qvE '^(hyprctl binds|pw-dump|arecord -L)' "$F/actions.log" || { echo "    actions.log:"; sed 's/^/      /' "$F/actions.log"; return 1; }
 }
 scenario hid_session s_hid_session
 scenario hid_release_while_starting s_hid_release_while_starting
