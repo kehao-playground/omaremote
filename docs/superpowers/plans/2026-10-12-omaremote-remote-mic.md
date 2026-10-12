@@ -39,8 +39,8 @@ integration harness), `busctl`, systemd user units, cargo.
 1. **The remote drops off Bluetooth mid-hold.** ATVVoice reports `disconnected` (not `connected`) while a `dbus` session records. The user expects the session to stop as if released, not to run to `maxSessionSec`. Task 2 adds this test.
 2. **A second press while the previous dictation is still transcribing.** `streaming` arrives with the session in `transcribing`. The user expects it to be ignored, with no new `record start` that would race the typing output. Task 2 adds this test.
 3. **The button is pressed while a mic apply or self-test holds the gate.** The new direct-start path must honour the gate like arbitration did. The user expects no session. Task 2 adds this test.
-4. **`cargo install` fails (offline, toolchain broken).** The user expects setup to stop with the cargo error, leaving the existing unit file and running service untouched. Task 6 adds this test.
-5. **Bluetooth is off or the remote is not paired.** `bluetoothctl` lists nothing, or fails. The user expects setup to stop and say no ATVV remote is paired, not to write a unit with an empty `--device`. Task 6 adds this test.
+4. **`cargo install` fails (offline, toolchain broken).** The user expects setup to stop with the cargo error, leaving the existing unit file and running service untouched. Task 7 adds this test.
+5. **Bluetooth is off or the remote is not paired.** `bluetoothctl` lists nothing, or fails. The user expects setup to stop and say no ATVV remote is paired, not to write a unit with an empty `--device`. Task 7 adds this test.
 
 ---
 
@@ -50,20 +50,21 @@ integration harness), `busctl`, systemd user units, cargo.
 |---|---|---|
 | `lib/Defaults.mjs` | modify | `DEFAULT_VOICE.remoteOnDemand: false` |
 | `lib/Config.mjs` | modify | normalize `voice.remoteOnDemand` |
-| `lib/VoiceSession.mjs` | modify | direct D-Bus start when `remoteOnDemand` is false |
+| `lib/VoiceSession.mjs` | modify | direct D-Bus start when `remoteOnDemand` is false; `sourceLost` |
 | `lib/Doctor.mjs` | modify | `atvvoice-ondemand` becomes a consistency row |
 | `lib/Dbus.mjs` | modify | `parseNameOwnerChanged(line)` |
+| `lib/AtvSource.mjs` | create | which org.atvvoice owner is the source; arrivals, departures, races (pure) |
 | `lib/Presentation.mjs` | modify | `hidMicLine(cfg)`, `keyboardSourceLine(cfg)` |
 | `Service.qml` | modify | drop HID mic in remote mode; status fields |
-| `components/AtvvoiceMonitor.qml` | modify | NameOwnerChanged monitor; `retryMs`/`retryAt` |
+| `components/AtvvoiceMonitor.qml` | modify | thin driver of `AtvSource`; NameOwnerChanged monitor; `retryMs`/`retryAt` |
 | `components/VoiceTab.qml` | modify | source lines from Presentation |
 | `host/omaremote-setup` | modify | `atvvoice` subcommand, `--mic`, new default flow |
 | `tests/fakes/bin/systemctl` | modify | ExecStart answer driven by `atv.ondemand` knob |
-| `tests/fakes/bin/busctl` | modify | NameOwnerChanged monitor fed by `atv.owners` |
-| `tests/fake-remote.sh` | modify | `set_cfg`/`use_system`/`use_ondemand`; scenario updates; 4 new scenarios |
+| `tests/fakes/bin/busctl` | modify | NameOwnerChanged monitor fed by `atv.owners`; owner from `atv.owner` |
+| `tests/fake-remote.sh` | modify | `set_cfg`/`use_system`/`use_ondemand`; scenario updates; 6 new scenarios |
 | `tests/setup-atvvoice.sh` | create | setup `atvvoice` step and `--mic` flow against stubs |
 | `Makefile` | modify | run `tests/setup-atvvoice.sh` in `check` |
-| `tests/*.test.mjs` | modify | Config, VoiceSession, Doctor, Dbus, Presentation |
+| `tests/*.test.mjs` | modify/create | Config, VoiceSession, Doctor, Dbus, Presentation, AtvSource (new) |
 | docs | modify | base spec, host-setup spec, hw keymap doc |
 
 ---
@@ -632,23 +633,32 @@ git commit -m "feat(voice): remote mode drops the HID mic key; publish voiceMode
 
 ---
 
-### Task 5: ATVVoice arrival and departure via NameOwnerChanged
+### Task 5: ATVVoice source tracking as a pure state machine (arrivals, departures, races)
 
 **Files:**
-- Modify: `lib/Dbus.mjs` (new export)
-- Modify: `components/AtvvoiceMonitor.qml`
+- Create: `lib/AtvSource.mjs`
+- Test: `tests/AtvSource.test.mjs`
+- Modify: `lib/Dbus.mjs` (new export `parseNameOwnerChanged`)
+- Test: `tests/Dbus.test.mjs`
+- Modify: `components/AtvvoiceMonitor.qml` (becomes a thin driver of `AtvSource`)
 - Modify: `Service.qml:596` (status `remote`)
 - Modify: `tests/fakes/bin/busctl`, `tests/fake-remote.sh`
-- Test: `tests/Dbus.test.mjs`
 
 **Interfaces:**
+- Consumes: `Systemd.backoffMs(attempt)` (existing; 1000·2ⁿ capped at 30000).
 - Produces:
-  - `Dbus.parseNameOwnerChanged(line: string) → { name, oldOwner, newOwner } | null`. It returns null for anything that is not a `NameOwnerChanged` from `org.freedesktop.DBus` about an `org.atvvoice.*` name.
-  - `AtvvoiceMonitor.retryMs: int` (current backoff interval, 0 when connected) and `AtvvoiceMonitor.retryAt: double` (epoch ms of the next scheduled rediscovery, 0 when none).
-  - status JSON `remote.retryMs`, `remote.retryAt`.
-  - fake busctl knob file `atv.owners`. Each appended line `<name> <old> <new>` (use `-` for empty) is emitted as a NameOwnerChanged signal.
+  - `Dbus.parseNameOwnerChanged(line: string) → { name, oldOwner, newOwner } | null`.
+  - `AtvSource.createAtvSource({ backoffMs }) →` an object with:
+    - `start(now)`, `discovered(names: string[], now)`, `ownerResolved(owner: string|null, now)`, `monitorExited(now)`, `nameOwnerChanged(ev, now)` and `retryFired(now)`. Each returns an effects array.
+    - `snapshot() → { sender, busName, retryMs, retryAt, attempts, monitorRunning, retiring, pendingMonitor }`.
+  - Effect types, in emission order: `{type:"discover"}`, `{type:"resolveOwner", name}`, `{type:"source", sender, busName}` (`sender ""` means revoked), `{type:"startMonitor"}`, `{type:"stopMonitor"}`, `{type:"retry", ms}` and `{type:"cancelRetry"}`.
+  - `AtvvoiceMonitor` keeps its public API (`start()`, `readState()`, `micClose()`, `micToggle()`, the `busName`, `sender` and `generation` properties, and the `source`, `signalEvent`, `stateRead` and `nodeName` signals). It adds `retryMs: int` and `retryAt: double`.
+  - status JSON `remote.retryMs` and `remote.retryAt`.
+  - Two fake busctl knobs:
+    - `atv.owners`: each appended line `<name> <old> <new>` (`-` for empty) is emitted as a NameOwnerChanged signal.
+    - `atv.owner`: the fake daemon's unique name. It defaults to `:1.99` and is used by `list`, `GetNameOwner` and the MicStateChanged sender.
 
-- [ ] **Step 1: Write the failing parser tests** (append to `tests/Dbus.test.mjs`; add `parseNameOwnerChanged` to the import)
+- [ ] **Step 1: Write the failing parser tests** (append to `tests/Dbus.test.mjs`; add `parseNameOwnerChanged` to its import)
 
 ```js
 // Shape measured 2026-10-12 with `busctl --user --json=short monitor` while ATVVoice started and stopped.
@@ -670,16 +680,128 @@ test("parseNameOwnerChanged rejects other names, other senders, other members an
 });
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+- [ ] **Step 2: Write the failing state-machine tests** (`tests/AtvSource.test.mjs`)
 
-Run: `node --test tests/Dbus.test.mjs`
-Expected: FAIL. `parseNameOwnerChanged` is not exported.
+```js
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { createAtvSource } from "../lib/AtvSource.mjs";
+import { backoffMs } from "../lib/Systemd.mjs";
 
-- [ ] **Step 3: Implement the parser** (append to `lib/Dbus.mjs`)
+const types = (fx) => fx.map(e => e.type);
+const N = "org.atvvoice.xiaomi";
+const mk = () => createAtvSource({ backoffMs });
+function connected(owner = ":1.99") {
+  const s = mk();
+  s.start(0); s.discovered([N], 0); s.ownerResolved(owner, 0);
+  return s;
+}
+
+test("startup: discover, resolve the owner, then announce the source and start the monitor", () => {
+  const s = mk();
+  assert.deepEqual(types(s.start(0)), ["discover"]);
+  assert.deepEqual(s.discovered([N], 10), [{ type: "resolveOwner", name: N }]);
+  const fx = s.ownerResolved(":1.99", 20);
+  assert.deepEqual(types(fx), ["cancelRetry", "source", "startMonitor"]);
+  assert.deepEqual(fx[1], { type: "source", sender: ":1.99", busName: N });
+  assert.equal(s.snapshot().retryAt, 0);
+});
+
+test("no daemon: the backoff is 1 s, 2 s, then 4 s, each with a retryAt deadline", () => {
+  const s = mk();
+  s.start(0);
+  assert.deepEqual(s.discovered([], 0), [{ type: "retry", ms: 1000 }]);
+  assert.equal(s.snapshot().retryAt, 1000);
+  s.retryFired(1000); s.discovered([], 1000);
+  assert.equal(s.snapshot().retryMs, 2000);
+  s.retryFired(3000); s.discovered([], 3000);
+  assert.deepEqual([s.snapshot().retryMs, s.snapshot().retryAt], [4000, 7000]);
+});
+
+test("an arrival cancels the pending retry, resets the backoff and rediscovers at once", () => {
+  const s = mk();
+  s.start(0); s.discovered([], 0); s.retryFired(1000); s.discovered([], 1000);
+  const fx = s.nameOwnerChanged({ name: N, oldOwner: "", newOwner: ":1.5" }, 1500);
+  assert.deepEqual(types(fx), ["cancelRetry", "discover"]);
+  assert.equal(s.snapshot().retryAt, 0);
+  assert.equal(s.snapshot().attempts, 0);
+});
+
+test("a departure revokes at once and stops the monitor; its exit then backs off only once", () => {
+  const s = connected();
+  const fx = s.nameOwnerChanged({ name: N, oldOwner: ":1.99", newOwner: "" }, 100);
+  assert.deepEqual(types(fx), ["source", "stopMonitor", "retry"]);
+  assert.deepEqual(fx[0], { type: "source", sender: "", busName: "" });
+  assert.equal(s.snapshot().sender, "");
+  assert.deepEqual(s.monitorExited(150), [], "a retiring monitor's exit is neither a second revoke nor a second backoff");
+  assert.equal(s.snapshot().retryMs, 1000);
+});
+
+test("departure then arrival before the old monitor exits: the new owner wins and the old exit cannot clear it", () => {
+  const s = connected(":1.99");
+  s.nameOwnerChanged({ name: N, oldOwner: ":1.99", newOwner: "" }, 100);
+  assert.deepEqual(types(s.nameOwnerChanged({ name: N, oldOwner: "", newOwner: ":1.77" }, 110)), ["cancelRetry", "discover"]);
+  s.discovered([N], 120);
+  const fx = s.ownerResolved(":1.77", 130);
+  assert.deepEqual(types(fx), ["cancelRetry", "source"], "the monitor start waits for the old monitor to exit");
+  assert.equal(s.snapshot().sender, ":1.77");
+  assert.deepEqual(s.monitorExited(140), [{ type: "startMonitor" }]);
+  assert.equal(s.snapshot().sender, ":1.77");
+  assert.equal(s.snapshot().retryAt, 0);
+});
+
+test("a direct owner replacement in one signal revokes the old owner and rediscovers", () => {
+  const s = connected(":1.99");
+  const fx = s.nameOwnerChanged({ name: N, oldOwner: ":1.99", newOwner: ":1.77" }, 100);
+  assert.deepEqual(types(fx), ["source", "stopMonitor", "cancelRetry", "discover"]);
+  assert.equal(fx[0].sender, "");
+  s.discovered([N], 110);
+  s.ownerResolved(":1.77", 120);
+  assert.deepEqual(s.monitorExited(130), [{ type: "startMonitor" }]);
+  assert.equal(s.snapshot().sender, ":1.77");
+});
+
+test("an arrival naming the current owner changes nothing", () => {
+  assert.deepEqual(connected(":1.99").nameOwnerChanged({ name: N, oldOwner: "", newOwner: ":1.99" }, 100), []);
+});
+
+test("a departure of some other org.atvvoice name changes nothing", () => {
+  assert.deepEqual(connected().nameOwnerChanged({ name: "org.atvvoice.other", oldOwner: ":1.5", newOwner: "" }, 100), []);
+});
+
+test("an owner result that arrives after its name was revoked is ignored", () => {
+  const s = mk();
+  s.start(0); s.discovered([N], 0);
+  s.nameOwnerChanged({ name: N, oldOwner: ":1.99", newOwner: "" }, 5);
+  assert.deepEqual(s.ownerResolved(":1.99", 10), []);
+  assert.equal(s.snapshot().sender, "");
+});
+
+test("an unexpected monitor exit is a loss: revoke and back off", () => {
+  const s = connected();
+  const fx = s.monitorExited(100);
+  assert.deepEqual(types(fx), ["source", "retry"]);
+  assert.equal(s.snapshot().sender, "");
+});
+
+test("a start requested while a discovery is in flight runs one more discovery and drops the stale result", () => {
+  const s = mk();
+  s.start(0);
+  assert.deepEqual(s.start(5), []);
+  assert.deepEqual(types(s.discovered([], 10)), ["discover"]);
+});
+```
+
+- [ ] **Step 3: Run them to verify they fail**
+
+Run: `node --test tests/Dbus.test.mjs tests/AtvSource.test.mjs`
+Expected: FAIL. `parseNameOwnerChanged` is not exported, and `lib/AtvSource.mjs` does not exist.
+
+- [ ] **Step 4: Implement the parser** (append to `lib/Dbus.mjs`)
 
 ```js
 // Plan 4 §4.4: NameOwnerChanged for an org.atvvoice.* name, from the bus itself. An empty newOwner is
-// a departure, an empty oldOwner an arrival.
+// a departure, an empty oldOwner an arrival, both non-empty a replacement.
 export function parseNameOwnerChanged(line) {
   let m;
   try { m = JSON.parse(line); } catch (e) { return null; }
@@ -691,21 +813,133 @@ export function parseNameOwnerChanged(line) {
 }
 ```
 
-- [ ] **Step 4: Run the parser tests to verify they pass**
+- [ ] **Step 5: Implement the state machine** (`lib/AtvSource.mjs`)
 
-Run: `node --test tests/Dbus.test.mjs`
-Expected: PASS.
+```js
+// Plan 4 spec §4.4: which org.atvvoice.* owner is the voice source, as a pure state machine.
+// AtvvoiceMonitor.qml runs the processes and reports back; this decides. Effects, in order:
+//   { type: "discover" }                 run `busctl --user list`
+//   { type: "resolveOwner", name }       GetNameOwner(name)
+//   { type: "source", sender, busName }  bump the parser generation, then announce (sender "" = revoked)
+//   { type: "startMonitor" }             start the MicStateChanged monitor and the one-shot NodeName/State reads
+//   { type: "stopMonitor" }              stop the MicStateChanged monitor; its exit is reported back
+//   { type: "retry", ms }                (re)arm the rediscovery timer
+//   { type: "cancelRetry" }
+// Losing the current owner revokes at once -- never via the old monitor's exit callback, which may land
+// after a new owner has already connected. A monitor being retired is tracked so that its exit neither
+// clears a newer connection nor counts as a second loss.
+export function createAtvSource({ backoffMs }) {
+  let sender = "", busName = "", attempts = 0, retryMs = 0, retryAt = 0;
+  let discovering = false, rediscover = false;
+  let monitorRunning = false, retiring = false, pendingMonitor = false;
 
-- [ ] **Step 5: Teach the fake busctl NameOwnerChanged**
+  function revoke() {
+    if (!sender && !busName) return [];
+    sender = ""; busName = "";
+    pendingMonitor = false;
+    const out = [{ type: "source", sender: "", busName: "" }];
+    if (monitorRunning && !retiring) { retiring = true; out.push({ type: "stopMonitor" }); }
+    return out;
+  }
+  function scheduleRetry(now) {
+    retryMs = backoffMs(attempts++);
+    retryAt = now + retryMs;
+    return [{ type: "retry", ms: retryMs }];
+  }
+  function clearRetry() { retryMs = 0; retryAt = 0; return [{ type: "cancelRetry" }]; }
+  function lost(now) { return [...revoke(), ...scheduleRetry(now)]; }
+  function start() {
+    if (discovering) { rediscover = true; return []; }
+    discovering = true;
+    return [{ type: "discover" }];
+  }
 
-In `tests/fakes/bin/busctl`, add to the header comment:
+  return {
+    start(now) { return start(); },
+    discovered(names, now) {
+      discovering = false;
+      if (rediscover) { rediscover = false; return start(); }      // a newer request supersedes this result
+      if (!Array.isArray(names) || names.length === 0) return lost(now);
+      if (sender) return [];                                        // already connected: a redundant discovery
+      busName = names[0];
+      return [{ type: "resolveOwner", name: busName }];
+    },
+    ownerResolved(owner, now) {
+      if (!busName || sender) return [];                            // revoked while resolving, or already connected
+      if (!owner) return lost(now);
+      sender = owner; attempts = 0;
+      const out = [...clearRetry(), { type: "source", sender, busName }];
+      if (monitorRunning) pendingMonitor = true;                    // the retired monitor has not exited yet
+      else { monitorRunning = true; out.push({ type: "startMonitor" }); }
+      return out;
+    },
+    monitorExited(now) {
+      monitorRunning = false;
+      if (retiring) {
+        retiring = false;
+        if (pendingMonitor) { pendingMonitor = false; monitorRunning = true; return [{ type: "startMonitor" }]; }
+        return [];
+      }
+      return lost(now);
+    },
+    nameOwnerChanged(ev, now) {
+      if (!ev) return [];
+      if (ev.newOwner) {
+        if (ev.newOwner === sender) return [];
+        const out = [...revoke(), ...clearRetry()];
+        attempts = 0;
+        return [...out, ...start()];
+      }
+      if (ev.name === busName) return lost(now);
+      return [];
+    },
+    retryFired(now) { retryAt = 0; return start(); },
+    snapshot() { return { sender, busName, retryMs, retryAt, attempts, monitorRunning, retiring, pendingMonitor }; },
+  };
+}
+```
+
+- [ ] **Step 6: Run the unit tests to verify they pass**
+
+Run: `node --test tests/Dbus.test.mjs tests/AtvSource.test.mjs`
+Expected: PASS, all tests.
+
+- [ ] **Step 7: Mutation checks on the race handling**
+
+Make each change on its own, run `node --test tests/AtvSource.test.mjs`, confirm the named test
+FAILS, and revert:
+- In `revoke()`, delete `retiring = true;`, leaving only the push. Expected failures: "departure
+  then arrival before the old monitor exits" and "a departure revokes at once…", because the old
+  exit becomes a loss.
+- In `nameOwnerChanged`, change `const out = [...revoke(), ...clearRetry()];` to
+  `const out = [...clearRetry()];`. Expected failure: "a direct owner replacement…".
+- In `ownerResolved`, delete `!busName ||`. Expected failure: "an owner result that arrives after
+  its name was revoked is ignored".
+
+- [ ] **Step 8: Teach the fake busctl NameOwnerChanged and a changeable owner**
+
+Replace `tests/fakes/bin/busctl` header lines 2-4 with:
 
 ```bash
-#   atv.owners   append "<name> <old> <new>" per line (use - for empty) to emit NameOwnerChanged from a
+# Spec §9: fake busctl for ATVVoice. State files in $OMAREMOTE_FAKE_DIR:
+#   atv.present  exists → org.atvvoice.fake is owned            atv.state   connected|streaming|disconnected
+#   atv.owner    the owner's unique name (default :1.99)        atv.log     every invocation
+#   atv.signals  append a state per line to emit MicStateChanged from `monitor`
+#   atv.owners   append "<name> <old> <new>" per line (- for empty) to emit NameOwnerChanged from a
 #                `monitor` whose match names NameOwnerChanged
 ```
 
-In the `monitor)` branch, before `: >> "$d/atv.signals"`, insert:
+After `present() { … }`, add:
+
+```bash
+owner() { cat "$d/atv.owner" 2>/dev/null || echo ":1.99"; }
+```
+
+In `list)`, change `:1.99` in the atvvoice line to `$(owner)`. In the GetNameOwner branch, change
+`echo 's ":1.99"'` to `printf 's "%s"\n' "$(owner)"`. In the MicStateChanged `printf`, change
+`"sender":":1.99"` to `"sender":"'"$(owner)"'"`.
+
+In `monitor)`, before `: >> "$d/atv.signals"`, insert:
 
 ```bash
     if [[ " $* " == *NameOwnerChanged* ]]; then
@@ -722,15 +956,29 @@ In the `monitor)` branch, before `: >> "$d/atv.signals"`, insert:
     fi
 ```
 
-The fake's `list` and `GetNameOwner` follow `atv.present`. A scenario that announces an arrival
-creates `atv.present` *before* appending to `atv.owners`, matching the real order: the name is
-owned before the signal is sent.
+A scenario changes `atv.present`/`atv.owner` *before* appending to `atv.owners`, matching the real
+order: the bus updates ownership, then announces it.
 
-- [ ] **Step 6: Write the failing integration scenarios** (append next to the other remote scenarios and register them)
+- [ ] **Step 9: Write the failing integration scenarios** (define them after `s_remote_mode_ignores_hid_mic`; register them after its `scenario` line)
 
 ```bash
+s_atvvoice_departure_noticed() {          # plan 4 §4.4: a stopped daemon is reported absent; busctl monitor alone never exits
+  ready || return 1
+  wait_for '.remote.state' connected 3 || return 1
+  rm -f "$F/atv.present"
+  echo "org.atvvoice.fake :1.99 -" >> "$F/atv.owners"
+  wait_for '.remote.state' absent 3 || return 1
+  [[ $(jget '.remote.sender') == "" ]]
+}
+s_atvvoice_owner_replaced() {             # plan 4 §4.4: one signal, old owner → new owner; the race orderings are unit-tested
+  ready || return 1
+  wait_for '.remote.sender' ":1.99" 3 || return 1
+  echo ":1.77" > "$F/atv.owner"
+  echo "org.atvvoice.fake :1.99 :1.77" >> "$F/atv.owners"
+  wait_for '.remote.sender' ":1.77" 3
+}
 s_atvvoice_appears_late() {               # plan 4 §4.4: an arrival is noticed at once, not at the next backoff retry
-  ready || return 1                                       # the harness starts with the fake daemon present: make it leave first
+  ready || return 1                       # the harness starts with the fake daemon present: make it leave first
   wait_for '.remote.state' connected 3 || return 1
   rm -f "$F/atv.present"
   echo "org.atvvoice.fake :1.99 -" >> "$F/atv.owners"
@@ -750,92 +998,156 @@ s_atvvoice_appears_late() {               # plan 4 §4.4: an arrival is noticed 
   (( $(date +%s%3N) < at )) || { echo "    connected only after the backoff deadline"; return 1; }
   [[ $(jget '.remote.retryAt') == 0 ]]
 }
-s_atvvoice_departure_noticed() {          # plan 4 §4.4: a stopped daemon is reported absent; busctl monitor alone never exits
-  ready || return 1
-  wait_for '.remote.state' connected 3 || return 1
-  rm -f "$F/atv.present"
-  echo "org.atvvoice.fake :1.99 -" >> "$F/atv.owners"
-  wait_for '.remote.state' absent 3 || return 1
-  [[ $(jget '.remote.sender') == "" ]]
-}
-scenario atvvoice_appears_late s_atvvoice_appears_late
 scenario atvvoice_departure_noticed s_atvvoice_departure_noticed
+scenario atvvoice_owner_replaced s_atvvoice_owner_replaced
+scenario atvvoice_appears_late s_atvvoice_appears_late
 ```
 
 `date +%s%3N` gives epoch milliseconds (GNU date), the same clock as QML `Date.now()`.
-`s_atvvoice_appears_late` reaches `absent` through the departure handling, so it fails until both
-halves of Step 8 exist. The mutation in Step 11 isolates the arrival half.
 
-- [ ] **Step 7: Run them to verify they fail**
+- [ ] **Step 10: Run them to verify they fail**
 
-Run: `bash tests/fake-remote.sh atvvoice_appears_late; bash tests/fake-remote.sh atvvoice_departure_noticed`
-Expected: `FAIL atvvoice_appears_late`, because `.remote.retryMs` is null and the wait times out.
-`FAIL atvvoice_departure_noticed`: the state stays `connected`, because the MicStateChanged monitor
-never exits.
+Run: `for s in atvvoice_departure_noticed atvvoice_owner_replaced atvvoice_appears_late; do bash tests/fake-remote.sh $s; done`
+Expected, all three FAIL:
+- `atvvoice_departure_noticed`: the state stays `connected`.
+- `atvvoice_owner_replaced`: the sender stays `:1.99`.
+- `atvvoice_appears_late`: `.remote.retryMs` is null.
 
-- [ ] **Step 8: Implement in AtvvoiceMonitor.qml**
+- [ ] **Step 11: Rewrite AtvvoiceMonitor.qml as a driver**
 
-Add properties after `property int attempts: 0`:
+Replace the whole of `components/AtvvoiceMonitor.qml` with:
 
 ```qml
+// Spec §3 ATVVoice (bus name discovered by prefix; State/NodeName; MicClose/MicToggle), §5.1 (only the selected sender,
+// exact path and interface; a generation per monitor (re)connect; State and NodeName read on start and reconnect), §5.4 (backoff).
+// Plan 4 §4.4: which owner is the source is decided by lib/AtvSource.mjs; this file only runs the processes it asks for.
+import QtQuick
+import Quickshell
+import Quickshell.Io
+import "../lib/Dbus.mjs" as Dbus
+import "../lib/Systemd.mjs" as Systemd
+import "../lib/AtvSource.mjs" as AtvSource
+
+Item {
+  id: root
+  readonly property string path: "/org/atvvoice/Daemon"
+  readonly property string iface: "org.atvvoice.Daemon"
+  property string busName: ""
+  property string sender: ""                     // unique name (":1.42"); "" while absent
+  property int generation: 0
   property int retryMs: 0                        // plan 4 §4.4: current backoff interval (diagnostic), 0 when connected
   property double retryAt: 0                     // epoch ms of the next scheduled rediscovery, 0 when none
-```
+  property string _resolving: ""                 // name whose owner the `owner` process is resolving
+  property var _reads: []                        // requestIds waiting for a State read
+  property var core: AtvSource.createAtvSource({ backoffMs: Systemd.backoffMs })
+  property var parser: Dbus.createSignalParser({
+    path: root.path, iface: root.iface, member: "MicStateChanged",
+    acceptSender: function(s) { return root.sender !== "" && s === root.sender }
+  })
+  signal source(string sender, int generation, string busName)
+  signal signalEvent(var ev)
+  signal stateRead(string requestId, string state, int generation)   // state "" on failure
+  signal nodeName(string name)
 
-Replace `_lost()` with:
-
-```qml
-  function _lost() {                             // monitor gone or owner unresolvable: fail closed, then rediscover with backoff
-    root.sender = ""
-    root.busName = ""                             // finding #8: report absent, not the stale bus name, so remoteState/warning update now
-    root.generation = root.parser.bumpGeneration()
-    root.source("", root.generation, root.busName)
-    backoff.interval = Systemd.backoffMs(root.attempts++)
-    root.retryMs = backoff.interval
-    root.retryAt = Date.now() + backoff.interval
-    backoff.restart()
+  function start() { root._apply(root.core.start(Date.now())) }
+  function readState(requestId) {
+    if (!root.busName) { root.stateRead(requestId, "", root.generation); return }
+    root._reads.push(requestId)
+    if (!stateProc.running) stateProc.running = true
   }
-  function _arrived() {                          // plan 4 §4.4: an org.atvvoice.* name gained an owner -- rediscover now
-    if (root.sender !== "") return               // already connected; the existing monitor keeps serving it
-    backoff.stop()
-    root.attempts = 0
-    root.retryMs = 0
-    root.retryAt = 0
-    root.start()
+  function micClose() { if (root.busName) Quickshell.execDetached(["busctl", "--user", "call", root.busName, root.path, root.iface, "MicClose"]) }
+  function micToggle() { if (root.busName) Quickshell.execDetached(["busctl", "--user", "call", root.busName, root.path, root.iface, "MicToggle"]) }
+
+  function _apply(effects) {
+    for (var i = 0; i < effects.length; i++) {
+      var e = effects[i]
+      switch (e.type) {
+        case "discover": discover.running = true; break
+        case "resolveOwner": root._resolving = e.name; owner.running = true; break
+        case "source":                           // host obligation: setDbusSource before any signal of the new generation
+          root.sender = e.sender
+          root.busName = e.busName
+          root.generation = root.parser.bumpGeneration()
+          root.source(root.sender, root.generation, root.busName)
+          break
+        case "startMonitor": monitor.running = true; nodeProc.running = true; initState.running = true; break
+        case "stopMonitor": monitor.running = false; break
+        case "retry": backoff.interval = e.ms; backoff.restart(); break
+        case "cancelRetry": backoff.stop(); break
+      }
+    }
+    var s = root.core.snapshot()
+    root.retryMs = s.retryMs
+    root.retryAt = s.retryAt
   }
-```
+  Timer { id: backoff; repeat: false; onTriggered: root._apply(root.core.retryFired(Date.now())) }
 
-In the `owner` Process's `onStreamFinished`, after `root.attempts = 0`, add:
-
-```qml
-      root.retryMs = 0
-      root.retryAt = 0
-```
-
-Add a new Process after the `monitor` Process:
-
-```qml
-  Process {                                      // plan 4 §4.4: arrivals and departures of org.atvvoice.* names
+  Process {                                      // 1. names with the org.atvvoice. prefix
+    id: discover
+    command: ["busctl", "--user", "list", "--no-legend"]
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root._apply(root.core.discovered(Dbus.atvvoiceNames(text), Date.now())) }
+  }
+  Process {                                      // 2. unique name of the owner → the only accepted sender
+    id: owner
+    command: ["busctl", "--user", "call", "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "GetNameOwner", "s", root._resolving]
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root._apply(root.core.ownerResolved(Dbus.parseProperty(text), Date.now())) }
+  }
+  Process {                                      // 3. signal monitor
+    id: monitor
+    command: ["busctl", "--user", "--json=short", "monitor", "--match", "type='signal',interface='org.atvvoice.Daemon',member='MicStateChanged'"]
+    stdout: SplitParser { splitMarker: "\n"; onRead: function(line) {
+      var evs = root.parser.feed(line + "\n")
+      for (var i = 0; i < evs.length; i++) root.signalEvent(evs[i])
+    } }
+    onExited: function(code, st) { root._apply(root.core.monitorExited(Date.now())) }
+  }
+  Process {                                      // plan 4 §4.4: arrivals, departures and replacements of org.atvvoice.* names
     id: owners
     running: true
     command: ["busctl", "--user", "--json=short", "monitor", "--match",
               "type='signal',sender='org.freedesktop.DBus',interface='org.freedesktop.DBus',member='NameOwnerChanged',arg0namespace='org.atvvoice'"]
     stdout: SplitParser { splitMarker: "\n"; onRead: function(line) {
       var ev = Dbus.parseNameOwnerChanged(line)
-      if (!ev) return
-      if (ev.newOwner !== "") root._arrived()
-      // A departure of the name in use: busctl monitor filters by match rule and never exits on its own
-      // when the sender disappears, so stop it; its onExited runs _lost() and Status reports absent.
-      else if (ev.name === root.busName && monitor.running) monitor.running = false
+      if (ev) root._apply(root.core.nameOwnerChanged(ev, Date.now()))
     } }
     onExited: function(code, st) { ownersRestart.restart() }
   }
   Timer { id: ownersRestart; interval: 2000; repeat: false; onTriggered: owners.running = true }
+  Process {                                      // 4. NodeName on (re)connect
+    id: nodeProc
+    command: ["busctl", "--user", "get-property", root.busName, root.path, root.iface, "NodeName"]
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: { var n = Dbus.parseProperty(text); if (n) root.nodeName(n) } }
+  }
+  Process {                                      // 5. State on (re)connect, delivered like a signal
+    id: initState
+    command: ["busctl", "--user", "get-property", root.busName, root.path, root.iface, "State"]
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: {
+      var s = Dbus.parseProperty(text)
+      if (s) root.signalEvent({ state: s, sender: root.sender, path: root.path, interface: root.iface, member: "MicStateChanged", generation: root.generation })
+    } }
+  }
+  Process {                                      // 6. explicit re-reads (readAtv effects); answers every queued request
+    id: stateProc
+    command: ["busctl", "--user", "get-property", root.busName, root.path, root.iface, "State"]
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: {
+      var s = Dbus.parseProperty(text) || ""
+      var ids = root._reads; root._reads = []
+      for (var i = 0; i < ids.length; i++) root.stateRead(ids[i], s, root.generation)
+    } }
+    onExited: function(code, st) { if (root._reads.length > 0) stateProc.running = true }
+  }
+}
 ```
 
-This mirrors the existing `monitor` Process: `SplitParser { splitMarker: "\n"; onRead: function(line) {…} }`.
+Two behaviours of the old file are deliberately gone:
+- `attempts` is no longer reset on every received signal. `AtvSource` resets it when an owner
+  resolves, which is the success that matters.
+- `_lost()` is gone. Every loss goes through `AtvSource`.
 
-- [ ] **Step 9: Publish the retry fields**
+Before replacing the file, `grep -n "attempts\|_lost" Service.qml components/*.qml` must show no
+caller outside `AtvvoiceMonitor.qml`. If one exists, stop and report it.
+
+- [ ] **Step 12: Publish the retry fields**
 
 In `Service.qml` `statusJson()`, change the `remote` object to:
 
@@ -843,28 +1155,178 @@ In `Service.qml` `statusJson()`, change the `remote` object to:
       , remote: { state: root.remoteState, node: root.remoteNode, bus: root.atvBusName, sender: atv.sender, warning: root.remoteWarning, retryMs: atv.retryMs, retryAt: atv.retryAt }
 ```
 
-- [ ] **Step 10: Run the scenarios, then the whole suite**
+- [ ] **Step 13: Run the scenarios, then the whole suite**
 
-Run: `bash tests/fake-remote.sh atvvoice_appears_late; bash tests/fake-remote.sh atvvoice_departure_noticed; make check; echo MAKE_CHECK_EXIT=$?`
-Expected: `ok` for both scenarios, then `MAKE_CHECK_EXIT=0` with `50 passed, 0 failed`.
+Run: `for s in atvvoice_departure_noticed atvvoice_owner_replaced atvvoice_appears_late; do bash tests/fake-remote.sh $s; done; make check; echo MAKE_CHECK_EXIT=$?`
+Expected: `ok` for all three, then `MAKE_CHECK_EXIT=0` with `51 passed, 0 failed`.
 
-- [ ] **Step 11: Discrimination check (mutation)**
+- [ ] **Step 14: Discrimination check on the late-arrival scenario**
 
-Temporarily change `if (ev.newOwner !== "") root._arrived()` to `if (false) root._arrived()`, then run
+In `AtvvoiceMonitor.qml`, temporarily change `if (ev) root._apply(…)` to `if (ev && ev.newOwner === "") root._apply(…)`, so arrivals are ignored. Then run
 `bash tests/fake-remote.sh atvvoice_appears_late`. It must FAIL with "connected only after the
-backoff deadline" or a `wait_for` timeout. Revert the change and confirm `ok`. If it passes with the
-mutation, the test is not discriminating. Fix the test before committing.
+backoff deadline" or a `wait_for` timeout. Revert and confirm `ok`.
 
-- [ ] **Step 12: Commit**
+- [ ] **Step 15: Commit**
 
 ```bash
-git add lib/Dbus.mjs tests/Dbus.test.mjs components/AtvvoiceMonitor.qml Service.qml tests/fakes/bin/busctl tests/fake-remote.sh
-git commit -m "feat(remote): notice ATVVoice arriving and leaving via NameOwnerChanged"
+git add lib/AtvSource.mjs tests/AtvSource.test.mjs lib/Dbus.mjs tests/Dbus.test.mjs components/AtvvoiceMonitor.qml Service.qml tests/fakes/bin/busctl tests/fake-remote.sh
+git commit -m "feat(remote): track the ATVVoice owner through NameOwnerChanged, race-safe"
 ```
 
 ---
 
-### Task 6: Setup `atvvoice` step and `--mic`
+### Task 6: Stop a D-Bus session when its source disappears
+
+**Files:**
+- Modify: `lib/VoiceSession.mjs` (new `sourceLost`, exported)
+- Modify: `Service.qml` (`AtvvoiceMonitor.onSource`, near line 395)
+- Modify: `tests/fake-remote.sh`
+- Test: `tests/VoiceSession.test.mjs`
+
+**Interfaces:**
+- Consumes:
+  - A revoked source announced as `source("", generation, "")` (Task 5).
+  - The `directIdle()`/`directRecording()`/`idleSession()`/`hidRecording()` test helpers (Task 2 and existing).
+- Produces: `VoiceSession.sourceLost(now) → effects`. It returns `[cmd stop, hud, state stopping]` for a `dbus`-owned recording. It returns `[]` and latches the stop for `dbus`/`starting`. It returns `[hud "", state idle]` from `arbitrating`. It returns `[]` otherwise.
+
+- [ ] **Step 1: Write the failing tests** (append to `tests/VoiceSession.test.mjs`, after the direct-start block)
+
+```js
+// ---- source lost mid-session (plan 4 §4.5) ----
+test("sourceLost stops a dbus-owned recording at once, with no re-read", () => {
+  const vs = directRecording();
+  const fx = vs.sourceLost(500);
+  assert.deepEqual(kinds(fx), ["stop"]);
+  assert.equal(byType(fx, "readAtv").length, 0);
+  assert.equal(stateOf(fx), "stopping");
+});
+
+test("sourceLost while a dbus session is starting latches the stop until recording is confirmed", () => {
+  const vs = directIdle();
+  const fx = vs.dbus(D("streaming"), 0);
+  assert.deepEqual(kinds(vs.sourceLost(30)), []);
+  vs.cmdExit(cmdId(fx, "start"), 0, 40);
+  assert.deepEqual(kinds(vs.status("recording", 100)), ["stop"]);
+});
+
+test("sourceLost abandons arbitration without any command", () => {
+  const vs = idleSession();                                  // on-demand: arbitration exists
+  vs.dbus(D("streaming"), 0);
+  const fx = vs.sourceLost(100);
+  assert.deepEqual(kinds(fx), []);
+  assert.equal(stateOf(fx), "idle");
+});
+
+test("sourceLost leaves keyboard and hid sessions alone", () => {
+  const kb = directIdle();
+  kb.status("recording", 0);
+  assert.deepEqual(kinds(kb.sourceLost(50)), []);
+  assert.equal(kb.snapshot().state, "recording");
+  const hid = hidRecording();
+  assert.deepEqual(kinds(hid.sourceLost(200)), []);
+  assert.equal(hid.snapshot().state, "recording");
+});
+
+test("after sourceLost the next daemon's first streaming is a transition and starts a session", () => {
+  const vs = directIdle();
+  assert.equal(vs.gate.acquire("mic-apply"), true);
+  vs.dbus(D("streaming"), 0);                                // remembered as streaming, no start (gate held)
+  vs.sourceLost(10);
+  vs.gate.release("mic-apply");
+  vs.setDbusSource({ sender: ":1.77", generation: 1 });
+  const fx = vs.dbus(D("streaming", { sender: ":1.77", generation: 1 }), 20);
+  assert.deepEqual(kinds(fx), ["start"]);
+});
+```
+
+- [ ] **Step 2: Run them to verify they fail**
+
+Run: `node --test tests/VoiceSession.test.mjs`
+Expected: FAIL with `vs.sourceLost is not a function`.
+
+- [ ] **Step 3: Implement**
+
+In `lib/VoiceSession.mjs`, after `hidRelease`, add:
+
+```js
+  // Plan 4 §4.5: the ATVVoice source was revoked or lost. No `connected` can arrive any more, so a
+  // dbus-owned recording would otherwise run to maxSessionSec. keyboard/hid audio does not depend on it.
+  function sourceLost(now) {
+    const out = [];
+    remote = "absent";                                       // the next daemon's first streaming is a transition
+    if (st === "arbitrating") { abandonArb(out, null); return out; }
+    if (owner !== "dbus") return out;
+    if (st === "starting") stopOnConfirm = true;
+    else if (st === "recording") requestStop(out, now);
+    return out;
+  }
+```
+
+Add `sourceLost` to the returned object's first line, after `hidToggle`:
+
+```js
+    hidPress, hidRelease, hidToggle, sourceLost, dbus, atvRead, status, cmdExit, restartResult, abort, advance, nextDeadline,
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `node --test tests/VoiceSession.test.mjs`
+Expected: PASS.
+
+- [ ] **Step 5: Write the failing integration scenario** (define after `s_atvvoice_appears_late`; register after its `scenario` line)
+
+```bash
+s_atvvoice_departure_stops_session() {    # plan 4 §4.5: ATVVoice exiting mid-hold must not leave Voxtype recording
+  ready || return 1
+  echo streaming >> "$F/atv.signals"
+  wait_for '.voice.state' recording 3 || return 1
+  [[ $(jget '.voice.owner') == dbus ]] || return 1
+  rm -f "$F/atv.present"
+  echo "org.atvvoice.fake :1.99 -" >> "$F/atv.owners"
+  wait_for '.voice.state' idle 5 || return 1
+  has_line "$F/vox.log" "voxtype record stop"
+}
+scenario atvvoice_departure_stops_session s_atvvoice_departure_stops_session
+```
+
+- [ ] **Step 6: Run it to verify it fails**
+
+Run: `bash tests/fake-remote.sh atvvoice_departure_stops_session`
+Expected: FAIL. The state stays `recording`, because `Service` never calls `sourceLost`.
+
+- [ ] **Step 7: Wire it in Service.qml**
+
+Replace the `onSource` handler of `AtvvoiceMonitor` with:
+
+```js
+    onSource: function(sender, generation, busName) {
+      root.atvBusName = busName
+      if (!busName) root.remoteState = "absent"
+      if (root.voice) {
+        root.voice.setDbusSource({ sender: sender || null, generation: generation })
+        // Plan 4 §4.5: a revoked/lost source can never send the `connected` that ends a dbus session.
+        if (!sender) root.dispatch(root.guarded("voice.sourceLost", function() { return root.voice.sourceLost(Date.now()) }), "voice")
+      }
+      root.updateRemoteWarning()
+      root.rearm()
+    }
+```
+
+- [ ] **Step 8: Run the scenario and the whole suite**
+
+Run: `bash tests/fake-remote.sh atvvoice_departure_stops_session; make check; echo MAKE_CHECK_EXIT=$?`
+Expected: `ok   atvvoice_departure_stops_session`, then `MAKE_CHECK_EXIT=0` with `52 passed, 0 failed`.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add lib/VoiceSession.mjs tests/VoiceSession.test.mjs Service.qml tests/fake-remote.sh
+git commit -m "feat(voice): stop a dbus session when the ATVVoice source disappears"
+```
+
+---
+
+### Task 7: Setup `atvvoice` step and `--mic`
 
 **Files:**
 - Modify: `host/omaremote-setup` (constants, 4 functions, `cmd_atvvoice`, `cmd_all`, `usage`, `main`)
@@ -947,7 +1409,7 @@ check "fresh: enable --now"                    "yes" "$(has "$out" "systemctl --
 check "fresh: no restart"                      "no"  "$(has "$out" "systemctl --user restart atvvoice")"
 unit=$(cat "$T/unit/atvvoice.service" 2>/dev/null)
 check "unit: ExecStart with address and name"  "yes" "$(has "$unit" "ExecStart=%h/.cargo/bin/atvvoice --device $ADDR --name xiaomi")"
-check "unit: never --mic-on-demand"            "no"  "$(has "$unit" "--mic-on-demand")"
+check "unit: ExecStart never --mic-on-demand"  "no"  "$(has "$(grep '^ExecStart=' <<<"$unit")" "--mic-on-demand")"   # comments may mention it
 
 # 2. re-run, nothing changed, service active: no build, no rewrite, no reload, no restart, still enable --now
 out=$(BT_ATV=$ADDR INSTALLED_REV=$REV WAS_ACTIVE=1 run)
@@ -1197,7 +1659,7 @@ git commit -m "feat(host): atvvoice setup step and --mic; remote mic is the defa
 
 ---
 
-### Task 7: Documentation
+### Task 8: Documentation
 
 **Files:**
 - Modify: `docs/superpowers/specs/2026-09-14-omaremote-design.md` (§1 Target line, §2 diagram, §3 ATVVoice, §5.1, §5.2 mode table, §7 step 1 ATVVoice sentence)
@@ -1247,14 +1709,14 @@ git commit -m "docs: remote mic via ATVVoice hold-to-talk; on-demand becomes opt
 
 ---
 
-### Task 8: Verification and hardware acceptance
+### Task 9: Verification and hardware acceptance
 
 **Files:** none changed unless a check fails.
 
 - [ ] **Step 1: Full suite**
 
 Run: `make check; echo MAKE_CHECK_EXIT=$?`
-Expected: `MAKE_CHECK_EXIT=0`, integration `50 passed, 0 failed`, and `RESULT: PASS` from both setup
+Expected: `MAKE_CHECK_EXIT=0`, integration `52 passed, 0 failed`, and `RESULT: PASS` from both setup
 test files. Report the exact counts.
 
 - [ ] **Step 2: Install into the live shell**
