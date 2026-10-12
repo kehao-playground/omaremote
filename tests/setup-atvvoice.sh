@@ -136,6 +136,12 @@ check "--mic remote is the default flow"   "cmd_deps cmd_keyd cmd_binds cmd_plug
 check "--mic bogus is a usage error"       "yes" "$(flow --mic bogus | grep -q 'exit=1' && echo yes || echo no)"
 check "bare --mic is a usage error, no hang" "yes" "$(timeout 5 bash -c "$(declare -f flow); LIB=$LIB; flow --mic" | grep -q 'exit=1' && echo yes || echo no)"
 check "atvvoice subcommand dispatches"     "cmd_atvvoice exit=0 " "$(flow atvvoice)"
+# The mic subcommand honours an explicit --mic; with neither it keeps its old default (system).
+check "mic subcommand alone stays system"  "cmd_mic system exit=0 " "$(flow mic)"
+check "--mic remote mic applies remote"    "cmd_mic remote exit=0 " "$(flow --mic remote mic)"
+check "--mic system mic applies system"    "cmd_mic system exit=0 " "$(flow --mic system mic)"
+check "mic's own argument wins over --mic" "cmd_mic system exit=0 " "$(flow --mic remote mic system)"
+
 # ---- cmd_mic remote waits for the remote's audio node (fresh host: ATVVoice registers late) ----
 # micrun <scenario-env...>: cmd_mic with ipc stubbed. NODE_AFTER=n -> .remote.node is empty for the first n
 # status polls, then atvvoice-xiaomi; NODE_AFTER=never -> it never appears. Prints the call log + exit code.

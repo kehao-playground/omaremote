@@ -23,6 +23,7 @@ XKB_OPTION=fkeys:basic_13-24
 PLUGIN_ID=io.github.kehao-chen.omaremote
 SHELL_CMD=${OMAREMOTE_SHELL:-omarchy-shell}
 MIC_MODE=remote   # plan 4 §3: --mic remote|system; system skips the atvvoice step (external microphone hosts)
+MIC_EXPLICIT=0    # 1 once --mic is given: only then does the bare `mic` subcommand take MIC_MODE as its default
 # ATVVoice, pinned to the commit measured against the Xiaomi RC003 on 2026-10-12.
 ATV_REPO=https://github.com/b0o/ATVVoice
 ATV_REV=0e8f6413dc4bad7a04e3c6b648945439d7a22fac
@@ -598,7 +599,7 @@ main() {
   while [[ ${1:-} == --* ]]; do
     case $1 in
       --yes) ASSUME_YES=1; shift ;;
-      --mic) MIC_MODE=${2:-}; shift; [[ $# -gt 0 ]] && shift ;;   # never `shift 2 || true`: a bare --mic would loop forever
+      --mic) MIC_MODE=${2:-}; MIC_EXPLICIT=1; shift; [[ $# -gt 0 ]] && shift ;;   # never `shift 2 || true`: a bare --mic would loop forever
       --help) usage; exit 0 ;;
       *) die "unknown option: $1" ;;
     esac
@@ -610,7 +611,7 @@ main() {
     binds) cmd_binds ;;
     plugin) cmd_plugin ;;
     atvvoice) cmd_atvvoice ;;
-    mic) cmd_mic "${2:-system}" ;;
+    mic) if (( MIC_EXPLICIT )); then cmd_mic "${2:-$MIC_MODE}"; else cmd_mic "${2:-system}"; fi ;;
     verify) cmd_verify ;;
     genconf) cmd_genconf ;;
     genlua) gen_lua ;;
