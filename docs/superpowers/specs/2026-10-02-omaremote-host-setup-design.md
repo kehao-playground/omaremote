@@ -41,6 +41,7 @@ genuinely usable on this Omarchy host: button → keyd → neutral key → Hyprl
 - ATVVoice and `voice.mic = "remote"`. The remote's microphone *button* works without it; only the
   audio *source* needs it. `voice.mic = "system"` is what this round configures, which the main spec
   §3 already supports ("Voxtype healthy only; ATVVoice rows are informational").
+  *Superseded by `2026-10-12-remote-mic-design.md`: setup now has an `atvvoice` step and defaults to `--mic remote`.*
 - Interactive key learning (main spec §7 step 2). The learned map for this device already exists, and
   the main spec already skips learning when `device.learned` is present.
 - `omaremote-setup --doctor`, `docs/hw-checklist.md`, and automating the §7 step 6 self-test.

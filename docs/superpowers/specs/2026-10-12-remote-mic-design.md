@@ -75,7 +75,10 @@ The `atvvoice` step:
   the unit this step writes. A user who later adds `--mic-on-demand` must also set the field to
   `true`. Doctor (§5) reports a mismatch.
 - **Mic apply.** The existing `omaremote mic remote` sets Voxtype `audio.device` to
-  `atvvoice-xiaomi`. No new code.
+  `atvvoice-xiaomi`. The plugin refuses it until it has read ATVVoice's `NodeName`, and
+  `enable --now` returns before ATVVoice has connected to the remote, so setup first polls
+  `status → .remote.node` for up to 30 s, asks once for a button press to wake the remote, and on
+  timeout stops naming `omaremote-setup mic remote` as the retry.
 
 The upstream naming bug is worked around with `--name`. Reporting it upstream is outside this plan.
 
