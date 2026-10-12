@@ -354,10 +354,26 @@ cmd_plugin() {
   die "the service never answered selftestPing. A changed keepLoaded manifest needs a full restart: omarchy-restart-shell"
 }
 
+# The plugin refuses remote mode until it knows the remote's PipeWire node, and it learns that only after
+# ATVVoice has connected to the remote and registered on D-Bus. `systemctl enable --now` returns at fork,
+# and a sleeping remote may not connect until a button wakes it -- so wait for .remote.node, bounded.
+wait_remote_node() {
+  local wait_ms=${OMAREMOTE_NODE_WAIT_MS:-30000} poll_ms=${OMAREMOTE_NODE_POLL_MS:-500}
+  local tries=$(( (wait_ms + poll_ms - 1) / poll_ms )) i=0 node="" hinted=0
+  while (( i < tries )); do
+    node=$(ipc status 2>/dev/null | jq -r '.remote.node // empty' 2>/dev/null) || node=""
+    [[ -n $node ]] && { say "remote audio node: $node"; return 0; }
+    (( hinted )) || { say "Waiting for the remote's audio node -- press any button on the remote to wake it"; hinted=1; }
+    sleep "$(printf '%d.%03d' $((poll_ms / 1000)) $((poll_ms % 1000)))"; i=$((i + 1))
+  done
+  die "the remote's audio node never appeared within $((wait_ms / 1000)) s (is ATVVoice running and the remote awake?). Wake the remote, then retry: omaremote-setup mic remote"
+}
+
 cmd_mic() {   # cmd_mic <remote|system>
   need jq
   local mode=${1:-system}
   [[ $mode == remote || $mode == system ]] || die "mic mode must be 'remote' or 'system'; got '$mode'"
+  [[ $mode == remote ]] && wait_remote_node
   step "applying mic mode: $mode"
   say "This restarts voxtype once. Do not use F9 until it finishes."
   local r id; r=$(ipc mic "$mode"); id=$(jq -r '.operationId // empty' <<< "$r")
@@ -574,6 +590,7 @@ and applies the system/external mic.
 
 Environment:
   OMAREMOTE_DEVICE   vendor:product of the remote (default 2717:32b8)
+  OMAREMOTE_NODE_WAIT_MS  how long `mic remote` waits for the remote's audio node (default 30000)
 USAGE
 }
 

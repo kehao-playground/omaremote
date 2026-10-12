@@ -136,6 +136,48 @@ check "--mic remote is the default flow"   "cmd_deps cmd_keyd cmd_binds cmd_plug
 check "--mic bogus is a usage error"       "yes" "$(flow --mic bogus | grep -q 'exit=1' && echo yes || echo no)"
 check "bare --mic is a usage error, no hang" "yes" "$(timeout 5 bash -c "$(declare -f flow); LIB=$LIB; flow --mic" | grep -q 'exit=1' && echo yes || echo no)"
 check "atvvoice subcommand dispatches"     "cmd_atvvoice exit=0 " "$(flow atvvoice)"
+# ---- cmd_mic remote waits for the remote's audio node (fresh host: ATVVoice registers late) ----
+# micrun <scenario-env...>: cmd_mic with ipc stubbed. NODE_AFTER=n -> .remote.node is empty for the first n
+# status polls, then atvvoice-xiaomi; NODE_AFTER=never -> it never appears. Prints the call log + exit code.
+micrun() {
+  (
+    source "$LIB"
+    set +e
+    LOG=$T/mic.log; : > "$LOG"; echo 0 > "$T/polls"
+    ipc() {
+      printf 'ipc %s\n' "$*" >> "$LOG"
+      case $1 in
+        status)
+          local n; n=$(( $(cat "$T/polls") + 1 )); echo "$n" > "$T/polls"
+          if [[ $NODE_AFTER != never ]] && (( n > NODE_AFTER )); then echo '{"remote":{"node":"atvvoice-xiaomi"}}'
+          else echo '{"remote":{"node":""}}'; fi ;;
+        mic) echo '{"ok":true,"operationId":"op-1"}' ;;
+        micStatus) echo '{"state":"succeeded"}' ;;
+      esac
+    }
+    sleep() { :; }                                    # the poll interval is real time; the tries are what is under test
+    ( cmd_mic "$1" ) > "$T/mic.out" 2>&1
+    echo "exit=$?" >> "$LOG"
+  )
+  cat "$T/mic.log"
+}
+out=$(NODE_AFTER=3 OMAREMOTE_NODE_WAIT_MS=2000 OMAREMOTE_NODE_POLL_MS=100 micrun remote)
+check "node late: exits 0"                     "yes" "$(has "$out" "exit=0")"
+check "node late: mic remote applied"          "yes" "$(has "$out" "ipc mic remote")"
+check "node late: polled until the node"       "4"   "$(grep -c '^ipc status' <<<"$out")"
+check "node late: status polled before apply"  "ipc status" "$(grep -m1 '^ipc \(status\|mic \)' <<<"$out")"
+check "node late: wake hint printed once"      "1"   "$(grep -c 'press any button on the remote' "$T/mic.out")"
+out=$(NODE_AFTER=never OMAREMOTE_NODE_WAIT_MS=1000 OMAREMOTE_NODE_POLL_MS=100 micrun remote)
+check "no node: exits non-zero"                "no"  "$(has "$out" "exit=0")"
+check "no node: no mic apply"                  "no"  "$(has "$out" "ipc mic ")"
+check "no node: bounded by the wait"           "10"  "$(grep -c '^ipc status' <<<"$out")"
+check "no node: says how to retry"             "yes" "$(has "$(cat "$T/mic.out")" "omaremote-setup mic remote")"
+out=$(NODE_AFTER=0 micrun remote)
+check "node present: no hint"                  "0"   "$(grep -c 'press any button on the remote' "$T/mic.out")"
+check "node present: mic remote applied"       "yes" "$(has "$out" "ipc mic remote")"
+out=$(NODE_AFTER=never OMAREMOTE_NODE_WAIT_MS=1000 OMAREMOTE_NODE_POLL_MS=100 micrun system)
+check "system mode: never waits for a node"    "0"   "$(grep -c '^ipc status' <<<"$out")"
+check "system mode: mic system applied"        "yes" "$(has "$out" "ipc mic system")"
 
 printf '\n%s\n' "$([[ $fail == 0 ]] && echo 'RESULT: PASS' || echo 'RESULT: FAIL')"
 exit $fail
