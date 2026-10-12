@@ -166,10 +166,21 @@ check "alsa stale: block replaced, rest kept"  "$want" "$(cat "$T/alsa/asoundrc"
 check "alsa stale: voxtype try-restart"        "yes" "$(has "$out" "systemctl --user try-restart voxtype")"
 
 # an unterminated marker is never guessed at: the file is left alone and the step stops
+rm -rf "$T/unit"
 printf '# top\n%s\npcm.mine {}\n' "$BEGIN_M" > "$T/alsa/asoundrc"; before=$(cat "$T/alsa/asoundrc")
 out=$(BT_ATV=$ADDR INSTALLED_REV=$REV run)
 check "alsa broken markers: exits non-zero"    "no"  "$(has "$out" "exit=0")"
 check "alsa broken markers: file untouched"    "$before" "$(cat "$T/alsa/asoundrc")"
+check "alsa broken markers: no build, no unit" "no no" "$(has "$out" "cargo install --git") $([[ -e $T/unit/atvvoice.service ]] && echo yes || echo no)"
+check "alsa broken markers: fails before systemctl" "no" "$(has "$out" "systemctl")"
+
+# END before BEGIN (one of each) is misordered: refuse, never drop the tail
+rm -rf "$T/unit"
+printf '# top\n%s\npcm.mine {}\n%s\n# precious tail\n' "$END_M" "$BEGIN_M" > "$T/alsa/asoundrc"; before=$(cat "$T/alsa/asoundrc")
+out=$(BT_ATV=$ADDR run)
+check "alsa END before BEGIN: dies"            "no"  "$(has "$out" "exit=0")"
+check "alsa END before BEGIN: file unchanged"  "$before" "$(cat "$T/alsa/asoundrc")"
+check "alsa END before BEGIN: no cargo install" "no" "$(has "$out" "cargo install --git")"
 
 # PipeWire ALSA plugin missing: dies with the pacman hint before cargo, the unit or the ALSA file
 rm -rf "$T/unit" "$T/alsa"
