@@ -132,6 +132,20 @@ because `busctl monitor` filters by match rule and keeps running after the sende
 Measured signal shape:
 `{"sender":"org.freedesktop.DBus","member":"NameOwnerChanged","payload":{"type":"sss","data":["org.atvvoice.xiaomi","",":1.66819"]}}`.
 
+**Owner changes, including races.** Losing the current owner revokes the source *at once*: the
+sender and bus name are cleared, the generation is bumped, and the old `MicStateChanged` monitor is
+told to stop. It must not wait for that monitor's exit callback. A rediscovery requested while the
+old monitor is still exiting is kept pending, and the old monitor's exit then neither clears the new
+connection nor triggers a backoff. Two orders must work:
+
+- A departure immediately followed by an arrival, possibly before the old monitor has exited.
+- A direct owner replacement: a non-empty old owner and a different non-empty new owner in one
+  signal.
+
+An owner result that arrives after its name was revoked is ignored. This logic is a pure module,
+`lib/AtvSource.mjs`, driven by `AtvvoiceMonitor.qml`, so the orderings are unit-tested
+deterministically rather than raced in integration.
+
 The status JSON's `remote` object gains two fields:
 
 - `retryMs`: the current backoff interval, kept for diagnosis.
@@ -142,7 +156,22 @@ The interval alone does not say how soon the next retry fires: with `retryMs = 4
 3 s in, the backoff would still find a daemon 1 s later. The late-discovery test therefore reads
 `retryAt`.
 
-### 4.5 Consequence: F9 in `remote` mode
+### 4.5 The daemon disappearing mid-session
+
+When the source is revoked (§4.4) or lost, the voice session is told so explicitly with
+`VoiceSession.sourceLost(now)`. Without this, ATVVoice exiting during a hold leaves Voxtype recording
+until `maxSessionSec`, because no `connected` signal can ever arrive. By owner:
+
+- `dbus` owner, `recording`: stop at once. There is nothing to re-read, so this does not go through
+  the D-Bus end re-read.
+- `dbus` owner, `starting`: latch the stop, which fires on confirmation.
+- `arbitrating`: abandon to `idle`.
+- `keyboard` and `hid` owners are untouched: their audio does not depend on the source.
+
+The last known remote state becomes `absent`, so the next daemon's first `streaming` counts as a
+transition.
+
+### 4.6 Consequence: F9 in `remote` mode
 
 Without on-demand, a keyboard (F9) session in `remote` mode captures from the ATVVoice node and
 receives silence, unless the remote's button is held at the same time. The base spec's mode table
@@ -175,6 +204,12 @@ Unit tests (`node --test`) come first:
   - With `remoteOnDemand=true`, the existing arbitration tests pass unchanged.
   - Backend `recording` plus `streaming` adopts `keyboard`.
   - A release during `starting` latches the stop.
+- `AtvSource`: departure then arrival before the old monitor exits; direct owner replacement; a
+  duplicate arrival of the current owner; a stale owner result after revocation; unexpected monitor
+  exit; the 1/2/4 s backoff with `retryAt`, and an arrival cancelling it.
+- `VoiceSession.sourceLost`: stop for `dbus`/`recording`, latch for `dbus`/`starting`, abandon from
+  `arbitrating`, nothing for `keyboard` and `hid`; the remote state resets so a new `streaming` is a
+  transition.
 - `Doctor`: the on-demand consistency row fails on mismatch in each direction and passes when both
   sides agree.
 
@@ -184,6 +219,11 @@ Integration (`tests/fake-remote.sh`, fake `busctl`):
   `connected` returns to `idle`.
 - `s_remote_mode_ignores_hid_mic`: in `remote` mode, `ipc key mic down/up` leaves voice `idle` and
   writes nothing to `actions.log`.
+- `s_atvvoice_departure_stops_session`: a `dbus`-owned recording, then the daemon departs; Voxtype
+  receives `record stop` and the session returns to `idle`.
+- `s_atvvoice_owner_replaced`: the fake daemon's owner changes from `:1.99` to `:1.77` in one
+  NameOwnerChanged; `remote.sender` becomes `:1.77`. The race orderings themselves are pinned by
+  `lib/AtvSource.mjs` unit tests.
 - `s_atvvoice_appears_late`: start with no daemon. The backoff schedules 1 s, 2 s and then 4 s, so
   wait for the third failed discovery, when `remote.retryMs` reaches 4000. Immediately before the
   emit, read `remote.retryAt` and require `retryAt - now > 2000`; if not, wait for the next
