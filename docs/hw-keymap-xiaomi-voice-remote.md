@@ -48,13 +48,13 @@ apart), with no autorepeat held back by the kernel — the engine's tap/hold/rep
 real edges to work with. A full in-order sweep under `keyd monitor -t` on 2026-10-08 reproduced all
 twelve, in the table's order, with the codes above.
 
-**`mic` is the exception and cannot be held.** Its press and release arrive in the *same
+**`mic` is the exception and cannot be held (HID layer only; see the ATVV section).** Its press and release arrive in the *same
 millisecond* -- measured independently at two layers: a raw read of `/dev/input/event13` showed down
 and up at an identical timestamp, and `keyd monitor -t` shows `down` followed by `up` at `+0 ms`.
 This is the remote's firmware emitting a *pulse*, not a press-and-hold, and it is not a defect
 anywhere in our stack. The consequence is hard: **`ptt: true` can never work on this button**,
 because `hidPress` and `hidRelease` are indistinguishable in time. Hold-to-talk on the remote's own
-mic button is physically impossible on this model.
+mic button is physically impossible on this model (HID layer only; see the ATVV section).
 
 ## Consequences for Plan 3
 
@@ -235,3 +235,33 @@ mic button is physically impossible on this model.
 - **End-to-end verified pre-keyd:** remote button → libinput/xkb → Hyprland bind → `GlobalShortcut`
   → engine → action, with `back:tap:Escape` and `back:hold:BackSpace` observed from the remote's own
   Back button on 2026-10-02.
+
+## ATVV voice (measured 2026-10-09..12)
+
+Measured against this remote (`bluetooth:v2717p32B8d00A4`, RC003) with b0o/ATVVoice at
+`0e8f6413dc4bad7a04e3c6b648945439d7a22fac`. Source: `docs/superpowers/specs/2026-10-12-remote-mic-design.md` §2.
+
+1. The remote exposes standard ATVV (`ab5e0001…`): TX `ab5e0002`, AUDIO `ab5e0003`, CTL `ab5e0004`.
+   It is reachable by the logged-in user over BlueZ D-Bus; no root is needed to capture.
+2. CAPS negotiation reports v1.0, ADPCM 16 kHz, frame size 120, model `HoldToTalk`.
+3. **The audio stream lasts exactly as long as the button is physically held.** The remote sends
+   `AUDIO_START(HoldToTalk)` on press and `AUDIO_STOP(HttButtonRelease)` on release. Holds of
+   3.3--7.3 s streamed continuously in every configuration tried, the normal path included (keyd
+   running, omaremote running a session, Voxtype recording). A short press gives 0.1--0.2 s.
+4. **Host-initiated `MIC_OPEN` yields no audio.** The remote answers with `AUDIO_START(MicOpen)` and
+   then sends zero frames; a PipeWire capture during an 8 s host open was all zeros. This held in all
+   three negotiated models (HTT, PTT, OnRequest). ATVVoice `--mic-on-demand` therefore cannot work on
+   this remote.
+5. The remote ignores the negotiated model: advertising PTT-only or OnRequest-only changes the
+   CAPS_RESP field, but the firmware still behaves as HoldToTalk and never sends `START_SEARCH`.
+6. The HID mic key (F5, keyd `xfer`) is a press-time pulse. A self-test lease counted one `down` per
+   hold, whatever its length. It carries no release information, so the D-Bus stream state is the
+   only release signal.
+7. Naming bug: ATVVoice derives its D-Bus and PipeWire names from the BLE device name. The Chinese
+   name `小米蓝牙语音遥控器` strips to an empty suffix, so the D-Bus name `org.atvvoice.` is invalid and
+   registration fails. `--name xiaomi` avoids this (`org.atvvoice.xiaomi`, node `atvvoice-xiaomi`).
+8. **Withdrawn conclusion.** The earlier "the mic button is a ~0 ms pulse and push-to-talk is
+   impossible" referred to the HID layer only. Some early ATVV runs showed ~0.1 s streams on what
+   were reported as holds. Their cause is still unexplained: they did not reproduce, and neither keyd
+   nor Voxtype start accounts for them. Every later long hold streamed continuously, so the design
+   adopts HoldToTalk as measured in (3).

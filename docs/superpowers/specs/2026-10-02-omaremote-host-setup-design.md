@@ -346,9 +346,25 @@ omaremote-setup deps         # pacman -S --needed keyd; verify jq, wtype, pw-dum
 omaremote-setup keyd         # seed conf, keyd check, id verification, install, foreground prompt, enable on confirmation
 omaremote-setup binds        # generate omaremote.lua, require line, hyprctl reload, description verification
 omaremote-setup plugin       # omarchy plugin add --enable, rescanPlugins, wait for selftestPing
+omaremote-setup atvvoice     # build pinned ATVVoice, write the user unit (--device <addr> --name xiaomi), enable it
+omaremote-setup mic remote   # as `mic system`, with Voxtype audio.device = atvvoice-xiaomi
 omaremote-setup mic system   # drive the main spec §3 mic-apply contract, poll micStatus to a terminal state
 omaremote-setup verify       # description check plus one selftest arm/report sweep with the injector
 ```
+
+The default flow is `deps → keyd → binds → plugin → atvvoice → mic remote → verify`. The option
+`--mic remote|system` selects it: `remote` is the default; `system` skips the `atvvoice` step and ends
+with `mic system`, which is the previous flow, for hosts that use an external microphone. Any other
+value is a usage error. Details: `2026-10-12-remote-mic-design.md` §3.
+
+The `atvvoice` step has three separate idempotence rules:
+
+- Unit content changed: write it and run `systemctl --user daemon-reload`. Unchanged: neither rewrite
+  nor reload.
+- Always ensure the service is enabled and active (`enable --now`), whatever the unit content, so a
+  re-run repairs a stopped or disabled service.
+- Restart the service when the unit changed or the build step installed a new binary, and it was
+  already active.
 
 `verify` is the only step that needs root after installation, because the injector writes to
 `/dev/uinput`; run without it, the step performs the description check, reports that the transport

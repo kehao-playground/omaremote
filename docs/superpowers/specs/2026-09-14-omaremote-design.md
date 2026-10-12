@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-14
 **Status:** Revision 7; aligned with Plan 1 (`docs/superpowers/plans/2026-09-14-omaremote-core-lib.md`). Implementation of Plan 1 may start; Plans 2–3 remain gated by task-0 spikes.
-**Target:** Omarchy master ("quattro", Lua Hyprland config), Hyprland with Lua config + `global` dispatcher, keyd ≥ 2.5, Voxtype ≥ 0.8 (`record cancel`, `config set`), ATVVoice with `--mic-on-demand`
+**Target:** Omarchy master ("quattro", Lua Hyprland config), Hyprland with Lua config + `global` dispatcher, keyd ≥ 2.5, Voxtype ≥ 0.8 (`record cancel`, `config set`), ATVVoice (pinned build, no --mic-on-demand on the Xiaomi RC003; see 2026-10-12-remote-mic-design.md)
 **Plugin id:** `io.github.kehao-chen.omaremote`
 **Global-shortcut appid:** `omaremote`
 
@@ -39,7 +39,7 @@ Per-app profiles and "app control mode", window-switcher overlay, mouse mode, la
 │           up→f13 down→f14 … 12 keys → F13–F24 (neutral, never collide)       │
 │ hyprland  ~/.config/hypr/omaremote.lua, require()d from hyprland.lua        │
 │           hl.bind("F13", hl.dsp.global("omaremote:up"))  × learned keys      │
-│ atvvoice  systemd --user, --mic-on-demand; PipeWire node + D-Bus             │
+│ atvvoice  systemd --user, --device/--name, no on-demand; PipeWire node + D-Bus│
 │ voxtype   ~/.config/voxtype/config.toml  [audio] device = <atvvoice node>    │
 └──────────────────────────────────────────────────────────────────────────────┘
           │ GlobalShortcut press/release                 │ busctl monitor
@@ -75,7 +75,7 @@ These are assumptions about the Omarchy plugin API that must be confirmed by clo
 1. A plugin may declare both `bar-widget` and `service` kinds, and BarWidget/Panel can reach the Service singleton's state.
 2. A `service` may instantiate its own `PanelWindow` (for the HUD).
 3. `Quickshell.Hyprland.GlobalShortcut { appid: "omaremote"; name: "up" }` receives `pressed`/`released` for `hl.bind("F13", hl.dsp.global("omaremote:up"))` (Hyprland's `dsp_global` sets `request_release`, so one bind should deliver both).
-4. Voxtype opens its PipeWire capture stream only while recording (so ATVVoice `--mic-on-demand` opens the remote mic per session, not permanently).
+4. Voxtype opens its PipeWire capture stream only while recording (so ATVVoice `--mic-on-demand` opens the remote mic per session, not permanently). Superseded for the Xiaomi RC003: a host MIC_OPEN yields no audio, so capture rides the button's hold-to-talk stream (2026-10-12-remote-mic-design.md §2.4).
 
 Already settled by Voxtype's own Omarchy plugin (`peteonrails/voxtype/omarchy-plugin`, id `io.voxtype.settings`): a plugin's `IpcHandler { target: "<id>" }` is reachable as `omarchy-shell <id> <verb> [args]`; `"keepLoaded": true` in the manifest instantiates the plugin with the shell so the IPC target exists before any UI is opened (changing that flag needs `omarchy-restart-shell`, not `rescanPlugins`); `omarchy-shell shell rescanPlugins` picks up a hand-copied plugin.
 
@@ -153,7 +153,7 @@ and appends `require("hypr.omaremote")` to `hyprland.lua` once if absent (after 
 
 ### ATVVoice
 
-`systemctl --user enable --now atvvoice`, with a drop-in setting `ExecStart=… --mic-on-demand` so the remote mic opens whenever a PipeWire client captures from the node and closes when the client stops. Plugin consumes:
+`systemctl --user enable --now atvvoice`, with the unit written by `omaremote-setup atvvoice` (remote-mic design §3): `ExecStart=%h/.cargo/bin/atvvoice --device <addr> --name xiaomi`, no `--mic-on-demand` (a host `MIC_OPEN` yields no audio on the Xiaomi RC003, 2026-10-12-remote-mic-design.md §2.4; capture rides the button's hold-to-talk stream). The config field `voice.remoteOnDemand` (default `false`) records whether the unit runs with `--mic-on-demand`; a doctor row checks that the unit's `ExecStart` and the field agree. Plugin consumes:
 
 - Bus name `org.atvvoice.<name>` (any suffix; the plugin discovers it by listing names with the prefix), object `/org/atvvoice/Daemon`, interface `org.atvvoice.Daemon`.
 - Methods `MicOpen`, `MicClose`, `MicToggle`.
@@ -168,7 +168,7 @@ and appends `require("hypr.omaremote")` to `hyprland.lua` once if absent (after 
 
 | mode | Voxtype `audio.device` | remote button (D-Bus) | keyboard F9 | prerequisites for `ready` |
 |---|---|---|---|---|
-| `remote` (default after setup) | ATVVoice `NodeName` | starts a session, audio from remote | audio from remote via on-demand; **no microphone while the remote is disconnected** (Status shows "remote mic: disconnected") | Voxtype healthy + ATVVoice active + device == `NodeName` |
+| `remote` (default after setup) | ATVVoice `NodeName` | hold to talk; release ends the session | no audio unless the remote's button is held (no on-demand); use `system` mode for F9. **No microphone while the remote is disconnected** (Status shows "remote mic: disconnected") | Voxtype healthy + ATVVoice active + device == `NodeName` |
 | `system` | `"default"` | still starts a session (if ATVVoice is present), audio from the system mic — the remote acts as a PTT button | normal Voxtype behaviour | Voxtype healthy only; ATVVoice rows are informational |
 
 **Mic apply contract** (one implementation, in the plugin; the Voice tab and setup use it). `omarchy-shell` has a short IPC timeout, so `mic remote|system` returns immediately with JSON `{ "ok": true, "operationId": "…", "state": "queued" }`. `micStatus <operationId>` returns `queued|applying|verifying|rollingBack|succeeded|failed`, including an error and rollback result when applicable. Both clients inspect this payload, not just the shell exit code. Only one operation may be pending; a second request returns `busy`. Results remain available for the Service lifetime; an unknown ID or lost Service connection is a failure, never assumed success.
@@ -275,26 +275,28 @@ dispatch` answers `ok` even for an argument it cannot use (verified: `hl.dsp.dpm
 
 ### 5.1 Sources
 
-Because ATVVoice runs with `--mic-on-demand`, every source funnels into the same Voxtype commands; the plugin does not call `MicOpen` for normal sessions. A **plugin-owned remote mic** therefore exists only after the plugin's own `MicToggle`/mic test (§6.1) opened it; that is the only mic `abort()` and recovery ever close.
+With `voice.remoteOnDemand = true`: because ATVVoice runs with `--mic-on-demand`, every source funnels into the same Voxtype commands; the plugin does not call `MicOpen` for normal sessions. A **plugin-owned remote mic** therefore exists only after the plugin's own `MicToggle`/mic test (§6.1) opened it; that is the only mic `abort()` and recovery ever close.
+
+With the default `false`, a D-Bus `streaming` can only be the button; it starts a session at once with owner `dbus` (no arbitration), and in remote mode the HID mic key is dropped before voice and engine.
 
 - **D-Bus — remote mic button:** `busctl --user monitor --match "type='signal',interface='org.atvvoice.Daemon',member='MicStateChanged'"`, parsed by `lib/Dbus.js` into `{ state, sender, path, interface, generation }`. Only signals from the selected `org.atvvoice.*` sender, exact object path and interface are accepted. A monitor reconnect increments `generation`; buffered signals and prior generations are discarded. The remote's own button makes ATVVoice go `streaming`; that is the start signal. On start and after every monitor reconnect the `State` and `NodeName` properties are read once.
-- **HID mic key:** `trigger: "toggle"` is the **default** — the **press edge alone** toggles:
+- **HID mic key:** `keys.mic.trigger` applies only in `system` mode; in `remote` mode the key is dropped (above). `trigger: "toggle"` is the **default** — the **press edge alone** toggles:
   press to start, press again to stop, and the release is ignored entirely. With
   `trigger: "ptt"` the `mic` press starts a session and its release ends it. With
   `trigger: "key"` the engine handles `mic` as an ordinary key and the voice path never sees it.
 
-  Toggle is the default for two reasons. A pulse-type mic button cannot do push-to-talk at all (see
+  Toggle is the default for two reasons. A pulse-type HID mic key cannot do push-to-talk at all (see
   below), and an explicit start/stop is the right primitive for a streaming dictation backend —
   including Typeless, which this project intends to support. A remote whose mic button genuinely
   holds can select `"ptt"`.
 
-  **A toggle is not a preference, it is a hardware requirement on some remotes.** The Xiaomi
-  2717:32b8's mic button emits press and release ~0 ms apart -- a firmware pulse, measured at the
+  **A toggle is not a preference, it is a hardware requirement on some remotes** (for the HID key; `keys.mic.trigger` applies only in `system` mode). The Xiaomi
+  2717:32b8's mic key emits press and release ~0 ms apart -- a firmware pulse, measured at the
   raw HID layer and at keyd's output independently (see `docs/hw-keymap-xiaomi-voice-remote.md`).
-  Push-to-talk on it is *mechanically correct and useless*: voxtype's own journal shows
+  Push-to-talk on the HID key is *mechanically correct and useless*: voxtype's own journal shows
   `Recording started` / `Recording stopped (0.1s)`, far too short to speak into. Both edges do
   arrive, so this is not a lost-release problem; there is simply no hold interval to express.
-  A toggle, driven by the press edge, is the only interaction such a button supports.
+  The HID key is a press-time pulse (one down per press, measured with a self-test lease); the remote's audio, by contrast, streams for the whole physical hold over ATVV (2026-10-12-remote-mic-design.md §2.3, §2.6). A toggle, driven by the press edge, is the only interaction the HID key supports.
 
   A second press while the start is still unconfirmed latches a deferred stop rather than being
   dropped, because dropping it leaves a recording nothing can end -- observed on the host before
@@ -325,7 +327,7 @@ Because ATVVoice runs with `--mic-on-demand`, every source funnels into the same
 | Voxtype status `recording` not requested by us | none (observe) | `keyboard` | `recording` |
 
 - `starting` → `recording` when status shows `recording`; HUD shows `starting…` meanwhile. If the owner releases during `starting`, the release is remembered and the stop is issued the moment `recording` is observed. If `startTimeoutMs` (1500) passes with no `recording`: `voxtype record cancel`, HUD `no audio from Voxtype`, error +1, → **`recovering`** (§5.3) — not `idle`, because `cancel` only files a request and a late `recording` from the cancelled start may still arrive.
-- **Arbitration** (`arbitrating`, both mic modes): D-Bus `streaming` is ambiguous — it is either the remote button, or an on-demand open caused by a capture client whose `recording` status has not reached us yet. Voxtype opens capture before it writes its state, and the two monitors have no ordering guarantee or trigger identity. `system` mode does not prove independence: the system default source can itself resolve to ATVVoice. Rules while `arbitrating`:
+- **Arbitration** (`arbitrating`, both mic modes). Only with `voice.remoteOnDemand = true`. D-Bus `streaming` is ambiguous — it is either the remote button, or an on-demand open caused by a capture client whose `recording` status has not reached us yet. Voxtype opens capture before it writes its state, and the two monitors have no ordering guarantee or trigger identity. `system` mode does not prove independence: the system default source can itself resolve to ATVVoice. Rules while `arbitrating`:
   - status already `recording`, or `recording` arrives within `arbitrationMs` (250) → adopt as `keyboard` owner → `recording`.
   - D-Bus leaves `streaming` (button released, or remote dropped) → arbitration cancelled → `idle`, nothing sent. A short remote tap therefore never issues a `record start` after the user has let go.
   - `abort()` → `cancel`, and `MicClose` only when this session owns a remote mic opened by the plugin; then `recovering`. In `system` mode, or when ownership is unknown, do not close ATVVoice's mic. Arbitration may conceal an already-starting keyboard session.
@@ -392,7 +394,7 @@ Four tabs, fully keyboard-navigable:
 1. **Status** — remote / ATVVoice state and node, Voxtype status, today's stats, "Test mic (3 s)" button.
 2. **Keys** — 13 rows: key · tap · hold · double · repeat☐. Editing an action opens a popover: type combo + type-specific fields; `key` type has a "press a key to capture" mode. Footer: "Reset to defaults", "Timing…" (holdMs/doubleMs/repeatMs).
 3. **Voice** — active sources, owner of the current session (label inferred attribution), `maxSessionSec`, HUD and action-flash toggles, **Voxtype mic: Remote / System default** switch (§3), detailed stats. Show active and requested modes separately while the asynchronous apply is pending; disable a second request and display terminal errors/rollback outcome.
-4. **Setup (Doctor)** — checklist rows (pass/warning/failure/not-yet-verified + one-line fix command + Copy): keyd service enabled+active and `keyd check` passes on our conf; remote evdev device grabbed by keyd; `hypr/omaremote.lua` required and exactly one `omaremote:<key>` description per supported key (§3); Voxtype ≥ 0.8 present, healthy JSON status class rather than merely exit zero, `output.mode == "type"`; per `voice.mic` mode: ATVVoice service active with `--mic-on-demand` and `audio.device == NodeName` (`remote`) or `audio.device` resolves to an existing PipeWire source (`system`); last session's captured node and freshness; at least one supported key has `panic: true`; required tools present; config valid (§4.2). Each row states which mode it applies to. Header button "Copy full setup command" → `bash <plugin-dir>/host/omaremote-setup`. The panel never installs anything.
+4. **Setup (Doctor)** — checklist rows (pass/warning/failure/not-yet-verified + one-line fix command + Copy): keyd service enabled+active and `keyd check` passes on our conf; remote evdev device grabbed by keyd; `hypr/omaremote.lua` required and exactly one `omaremote:<key>` description per supported key (§3); Voxtype ≥ 0.8 present, healthy JSON status class rather than merely exit zero, `output.mode == "type"`; per `voice.mic` mode: ATVVoice service active with `ExecStart` agreeing with `voice.remoteOnDemand` (`--mic-on-demand` exactly when `true`) and `audio.device == NodeName` (`remote`) or `audio.device` resolves to an existing PipeWire source (`system`); last session's captured node and freshness; at least one supported key has `panic: true`; required tools present; config valid (§4.2). Each row states which mode it applies to. Header button "Copy full setup command" → `bash <plugin-dir>/host/omaremote-setup`. The panel never installs anything.
 
 Key/timing changes write `config.json` through `JsonAdapter`; the engine hot-reloads and resets affected keys. Mic-mode changes use the transaction in §3 and write the mode only on commit; that internal write must not trigger another apply or abort. An external edit that disagrees with Voxtype is shown as a mismatch until an explicit mic apply reconciles it.
 
@@ -409,7 +411,7 @@ A `PanelWindow` owned by Service: layer overlay, top-centre, no exclusive zone, 
 
 bash (Omarchy ships bash 5), idempotent, safe to re-run. Steps:
 
-1. `sudo pacman -S --needed keyd playerctl evtest jq psmisc nodejs` (Node.js runs the shared `lib/Doctor.js` rules for `--doctor`); verify the other documented host tools (`pw-dump`, `wpctl`, Voxtype) before dependent steps. `sudo systemctl enable --now keyd` (a host that never ran keyd has nothing to `reload`). Install `rustup` if `cargo` is missing, build ATVVoice with `cargo install --git https://github.com/b0o/ATVVoice` after checking its upstream build prerequisites, write the user unit plus a drop-in with `--mic-on-demand`, `systemctl --user daemon-reload`, then `systemctl --user enable --now atvvoice`.
+1. `sudo pacman -S --needed keyd playerctl evtest jq psmisc nodejs` (Node.js runs the shared `lib/Doctor.js` rules for `--doctor`); verify the other documented host tools (`pw-dump`, `wpctl`, Voxtype) before dependent steps. `sudo systemctl enable --now keyd` (a host that never ran keyd has nothing to `reload`). Then `omaremote-setup atvvoice` (remote-mic design §3): if `cargo` is missing, print `sudo pacman -S rustup && rustup default stable` and stop; build ATVVoice at the pinned rev with `cargo install --git https://github.com/b0o/ATVVoice --rev <pinned> --locked atvvoice`; resolve the remote's address from `bluetoothctl`; write the user unit `ExecStart=%h/.cargo/bin/atvvoice --device <addr> --name xiaomi` (no `--mic-on-demand`); `systemctl --user daemon-reload` when the unit changed, then `systemctl --user enable --now atvvoice`. The `--mic remote|system` option (default `remote`) selects the flow; `system` skips this step.
 2. **Detect the remote:** list `/proc/bus/input/devices` entries matching `Remote|RC|G20` (or take `--device vendor:product`). **Learn keys** — skipped when `config.json → device.learned` already exists for this vendor:product unless `--relearn` is given. keyd holds the remote with `EVIOCGRAB`, so on a re-run `evtest` would see nothing: learning runs inside `sudo systemctl stop keyd` … `start keyd`, with a `trap` that terminates/reaps the learning process and restarts keyd on any exit or Ctrl-C. Exclusivity is tested by the grab itself: one `evtest --grab` process holds the selected node throughout learning; a failed grab (`EBUSY`) aborts with the holder list from `fuser -v` as a diagnostic only. Normal readers such as the compositor's libinput keep the node open and coexist with `evtest`, so open handles are never treated as a conflict. Prompt the 13 *logical* keys one at a time; accept a press/release pair before advancing, or `s` / 10 s timeout to mark it `supported: false`. `mic` is last with "most ATVV remotes have no HID mic key — skipping is normal". `up down left right ok back` are required; abort if any is skipped. **Panic guarantee:** if the panic key (default `menu`) was skipped, ask for a supported fallback in the order `home, app, power, back`; the chosen key gets `panic: true` and loses `hold`/`repeat`. Stage the results and generated keyd config; reject duplicate physical-key assignments and validate with `keyd check` before replacing existing files. Persist `device.learned` / `keys.<k>.supported` only after validation. Terminate/reap `evtest` to release its grab, explicitly `sudo systemctl start keyd`, then `sudo keyd reload`. Prompt the user to press a learned key and confirm via a 3 s `keyd -m` capture that the remote emits the expected neutral key; restore the previous config and reload on failure.
 Learning cleanup uses a dedicated process group: the trap sends TERM then KILL, waits for every child, confirms the evdev grab is released, and only then starts keyd. Prior files remain untouched until staged learning passes duplicate-key and `keyd check` validation.
 3. Write `~/.config/hypr/omaremote.lua` (§3); append `require("hypr.omaremote")` to `hyprland.lua` if absent; `hyprctl reload`; verify the description set with `hyprctl binds -j` as in §3, abort on mismatch.
