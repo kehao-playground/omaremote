@@ -10,6 +10,10 @@ const cfg = (over = {}) => normalizeConfig({ ...DEFAULT_CONFIG, ...over }).confi
 // button cannot do push-to-talk, and a toggle suits a streaming dictation backend), so every test
 // that exercises them selects ptt explicitly rather than relying on the default.
 const pttCfg = () => cfg({ keys: { ...DEFAULT_CONFIG.keys, mic: { trigger: "ptt" } } });
+// Arbitration (§5.2) only exists when ATVVoice runs with --mic-on-demand. The shipped default is
+// remoteOnDemand=false (plan 4: the Xiaomi remote yields no audio for a host MIC_OPEN), where a
+// streaming signal can only be the button and starts at once -- so arbitration tests opt in.
+const onDemandCfg = () => cfg({ keys: { ...DEFAULT_CONFIG.keys, mic: { trigger: "ppt" } }, voice: { ...DEFAULT_CONFIG.voice, remoteOnDemand: true } });
 const kinds = (fx) => byType(fx, "cmd").map(c => c.kind);
 const stateOf = (fx) => (last(fx, "state") || {}).state;
 const cmdId = (fx, kind) => byType(fx, "cmd").find(c => c.kind === kind).id;
@@ -128,7 +132,7 @@ test("gate: acquire only from idle, blocks HID start, release restores", () => {
 
 // ---- D-Bus arbitration (§5.2) ----
 function idleSession() {
-  const vs = createVoiceSession(pttCfg());
+  const vs = createVoiceSession(onDemandCfg());
   vs.setDbusSource({ sender: ":1.42", generation: 0 });
   vs.status("idle", 0, { fresh: true });
   return vs;
@@ -320,7 +324,7 @@ test("abort from transcribing (HID session, released) cancels without a stop and
 });
 
 test("arbitration still runs in system mode: streaming, then recording at 100ms adopts keyboard owner", () => {
-  const vs = createVoiceSession(cfg({ voice: { ...DEFAULT_CONFIG.voice, mic: "system" } }));
+  const vs = createVoiceSession(cfg({ voice: { ...DEFAULT_CONFIG.voice, mic: "system", remoteOnDemand: true } }));
   vs.setDbusSource({ sender: ":1.42", generation: 0 });
   vs.status("idle", 0, { fresh: true });
   const fx = vs.dbus(D("streaming"), 0);
@@ -330,6 +334,86 @@ test("arbitration still runs in system mode: streaming, then recording at 100ms 
   assert.equal(vs.snapshot().owner, "keyboard");
 });
 
+
+// ---- direct D-Bus start, no on-demand (plan 4 §4.1) ----
+function directIdle() {
+  const vs = createVoiceSession(cfg());                     // remoteOnDemand defaults to false
+  vs.setDbusSource({ sender: ":1.42", generation: 0 });
+  vs.status("idle", 0, { fresh: true });
+  return vs;
+}
+function directRecording() {
+  const vs = directIdle();
+  const fx = vs.dbus(D("streaming"), 0);
+  vs.cmdExit(cmdId(fx, "start"), 0, 20);
+  vs.status("recording", 100);
+  return vs;
+}
+
+test("without on-demand, streaming from idle starts at once: record start, owner dbus, no arbitration", () => {
+  const vs = directIdle();
+  const fx = vs.dbus(D("streaming"), 0);
+  assert.deepEqual(kinds(fx), ["start"]);
+  assert.equal(stateOf(fx), "starting");
+  assert.equal(vs.snapshot().owner, "dbus");
+  assert.ok(!byType(fx, "state").some(s => s.state === "arbitrating"), "must not pass through arbitrating");
+  assert.equal(vs.nextDeadline(), 1500, "the next deadline is the start timeout, not arbitrationMs");
+});
+
+test("without on-demand, a full hold: recording on confirm, release re-reads then stops, stat source dbus", () => {
+  const vs = directRecording();
+  assert.equal(vs.snapshot().state, "recording");
+  const end = vs.dbus(D("connected"), 900);
+  assert.deepEqual(kinds(end), []);
+  assert.equal(byType(end, "readAtv").length, 1);
+  assert.deepEqual(kinds(vs.atvRead(A(vs, "connected"), 910)), ["stop"]);
+  const done = vs.status("idle", 1200);
+  assert.equal(byType(done, "stat")[0].session.source, "dbus");
+});
+
+test("without on-demand, a release while starting latches the stop until recording is confirmed", () => {
+  const vs = directIdle();
+  const fx = vs.dbus(D("streaming"), 0);
+  assert.deepEqual(kinds(vs.dbus(D("connected"), 60)), []);
+  vs.cmdExit(cmdId(fx, "start"), 0, 70);
+  assert.deepEqual(kinds(vs.status("recording", 100)), ["stop"]);
+});
+
+test("without on-demand, a keyboard session observed first keeps its owner and streaming starts nothing", () => {
+  const vs = directIdle();
+  vs.status("recording", 0);
+  assert.equal(vs.snapshot().owner, "keyboard");
+  assert.deepEqual(kinds(vs.dbus(D("streaming"), 30)), []);
+  assert.equal(vs.snapshot().owner, "keyboard");
+});
+
+// Review focus 3: the direct path must honour the gate exactly like arbitration did.
+test("without on-demand, streaming while a gate is held starts nothing", () => {
+  const vs = directIdle();
+  assert.equal(vs.gate.acquire("mic-apply"), true);
+  const fx = vs.dbus(D("streaming"), 0);
+  assert.deepEqual(kinds(fx), []);
+  assert.equal(vs.snapshot().state, "idle");
+});
+
+// Review focus 2: a press while the last dictation is still transcribing must not race its output.
+test("without on-demand, streaming during transcribing is ignored", () => {
+  const vs = directRecording();
+  vs.dbus(D("connected"), 900);
+  vs.atvRead(A(vs, "connected"), 910);
+  vs.status("transcribing", 950);
+  assert.equal(vs.snapshot().state, "transcribing");
+  assert.deepEqual(kinds(vs.dbus(D("streaming"), 1000)), []);
+  assert.equal(vs.snapshot().state, "transcribing");
+});
+
+// Review focus 1: the remote dropping off Bluetooth mid-hold ends the session like a release.
+test("without on-demand, the remote disconnecting mid-hold stops the session after the re-read", () => {
+  const vs = directRecording();
+  const drop = vs.dbus(D("disconnected"), 900);
+  assert.equal(byType(drop, "readAtv").length, 1);
+  assert.deepEqual(kinds(vs.atvRead(A(vs, "disconnected"), 910)), ["stop"]);
+});
 // ---- recovery (§5.3) ----
 test("abort from recording cancels (never stops), closes no mic unless plugin-owned, enters recovering", () => {
   const vs = hidRecording();
