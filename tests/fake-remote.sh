@@ -576,19 +576,25 @@ s_mic_toggle_session() {   # a pulse-type mic button: press starts, next press s
 scenario mic_toggle_session s_mic_toggle_session
 s_system_toggle_ignores_remote_stream() {   # plan 4 §4.2b: in system mode the remote's stream is no trigger
   ready || return 1
-  use_system || return 1
+  # The real path: mic apply commits through configStore.setVoiceMic, not an external file reload.
+  local id; id=$(ipc mic system | jq -r .operationId)
+  [[ $(mic_wait "$id") == succeeded ]] || { ipc micStatus "$id"; return 1; }
+  wait_for '.voiceMode' system 5 || return 1
   [[ $(jget '.micTrigger') == toggle ]] || return 1
   [[ $(jget '.remoteOnDemand') == false ]] || return 1
 
   # The hold-to-talk stream is reported ~10 ms before the HID press edge; it must start nothing.
-  echo streaming >> "$F/atv.signals"; sleep 0.4
+  echo streaming >> "$F/atv.signals"
+  wait_for '.remote.state' streaming 3 || { echo "    the stream signal was not processed"; return 1; }
   [[ $(jget '.voice.state') == idle ]] || { echo "    the stream started a session: $(jget '.voice.state')"; return 1; }
   ipc key mic down > /dev/null; ipc key mic up > /dev/null
   wait_for '.voice.state' recording 3 || { echo "    toggle press did not start a session"; return 1; }
   [[ $(jget '.voice.owner') == hid ]] || { echo "    owner is $(jget '.voice.owner')"; return 1; }
   has_line "$F/vox.log" "voxtype record start" || return 1
 
-  echo connected >> "$F/atv.signals"; sleep 0.6       # the release: the stream ends, the session must not
+  echo connected >> "$F/atv.signals"                  # the release: the stream ends, the session must not
+  wait_for '.remote.state' connected 3 || { echo "    the stream end was not processed"; return 1; }
+  sleep 0.7                                           # past the end-check window; a wrongly armed stop would land here
   [[ $(jget '.voice.state') == recording ]] || { echo "    the stream's end stopped it: $(jget '.voice.state')"; return 1; }
   no_line "$F/vox.log" "voxtype record stop" || return 1
 

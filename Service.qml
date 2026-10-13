@@ -181,7 +181,13 @@ Item {
   function onConfigChanged(kind) {
     var now = Date.now()
     if (kind === "load") { root.startModules(now); root.rearm(); return }
-    if (kind === "commit") return                                  // §6.2: the internal voice.mic write reloads nothing
+    if (kind === "commit") {                                        // §6.2: the internal voice.mic write reloads and aborts nothing,
+      if (voice) {                                                  // but _write replaced the config object: refresh what reads voice.mic
+        root.guarded("voice.setConfig", function() { voice.setConfig(configStore.config); return [] })
+        root.updateRemoteWarning()
+      }
+      return
+    }
     if (kind !== "voice") {                                         // §4.3 reset without emitting
       root.dispatch(root.guarded("engine.reload", function() { return engine.reload(configStore.config) }), "engine")
       root.heldKeys = engine.heldKeys()
