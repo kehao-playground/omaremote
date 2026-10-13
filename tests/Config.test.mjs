@@ -196,3 +196,36 @@ test("unknown voice fields survive normalization next to remoteOnDemand", () => 
   assert.equal(config.voice.futureKnob, "x");
   assert.equal(config.voice.remoteOnDemand, true);
 });
+
+test("voice.engine defaults to voxtype and only the exact string typeless selects Typeless", () => {
+  const n = (v) => normalizeConfig({ ...DEFAULT_CONFIG, voice: { ...DEFAULT_CONFIG.voice, engine: v } }).config.voice.engine;
+  assert.equal(normalizeConfig(DEFAULT_CONFIG).config.voice.engine, "voxtype");
+  assert.equal(n("typeless"), "typeless");
+  for (const junk of ["Typeless", "voxtype ", 1, null, {}, undefined]) assert.equal(n(junk), "voxtype", JSON.stringify(junk));
+});
+
+test("voice.typeless.hotkey defaults to RightAlt and is stored canonical", () => {
+  const n = (h) => normalizeConfig({ ...DEFAULT_CONFIG, voice: { ...DEFAULT_CONFIG.voice, typeless: { hotkey: h } } });
+  assert.equal(normalizeConfig(DEFAULT_CONFIG).config.voice.typeless.hotkey, "RightAlt");
+  assert.equal(n("rightalt+rightshift").config.voice.typeless.hotkey, "RightAlt+RightShift");
+  assert.equal(n("space+rightctrl").config.voice.typeless.hotkey, "RightCtrl+Space");
+  assert.deepEqual(n("RightAlt").problems, []);
+});
+
+test("an invalid stored hotkey normalizes to RightAlt with a typeless-hotkey-invalid problem", () => {
+  const { config, problems } = normalizeConfig({ ...DEFAULT_CONFIG, voice: { ...DEFAULT_CONFIG.voice, typeless: { hotkey: "Alt+Q" } } });
+  assert.equal(config.voice.typeless.hotkey, "RightAlt");
+  const p = problems.find(x => x.code === "typeless-hotkey-invalid");
+  assert.ok(p, "problem reported");
+  assert.match(p.message, /unknown name: Alt/);
+});
+
+test("the shipped defaults never write engine or typeless into config.json (hotkeyStored stays meaningful)", () => {
+  assert.equal("engine" in DEFAULT_CONFIG.voice, false);
+  assert.equal("typeless" in DEFAULT_CONFIG.voice, false);
+});
+
+test("unknown fields under voice.typeless survive normalization", () => {
+  const { config } = normalizeConfig({ ...DEFAULT_CONFIG, voice: { ...DEFAULT_CONFIG.voice, typeless: { hotkey: "RightAlt", future: 1 } } });
+  assert.equal(config.voice.typeless.future, 1);
+});
