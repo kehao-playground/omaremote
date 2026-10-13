@@ -25,6 +25,7 @@ check: test lint
 	bash tests/setup-atvvoice.sh
 	bash tests/matrix-helpers.sh
 	python3 -I tests/test_keytap.py
+	bash tests/runner-bound.sh
 	@RUNTIME="$${XDG_RUNTIME_DIR:-/run/user/$$(id -u)}"; \
 	if command -v qs >/dev/null 2>&1 && ls "$$RUNTIME"/wayland-[0-9]* >/dev/null 2>&1; then bash tests/fake-remote.sh; else echo "integration skipped (no Wayland session / quickshell)"; fi
 

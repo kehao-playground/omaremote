@@ -6,6 +6,9 @@ Item {
   id: root
   signal finished(string src, int id, int code, string stdout, bool timedOut)
   property var _live: ({})                        // "src:id" → job Item
+  // The signal that follows an ignored SIGTERM. Only tests/harness/RunnerBound.qml changes it (to 0, a no-op), to
+  // prove the deadline + 1 s report does not depend on the process ever dying.
+  property int escalationSignal: 9
 
   function run(src, id, argv, deadlineMs) {
     var job = jobComponent.createObject(root, { src: src, opId: id, argv: argv, deadlineMs: deadlineMs })
@@ -29,6 +32,9 @@ Item {
     job.destroy(0)
   }
 
+  // Typeless spec §6.1: every job reports exactly once, by deadline + 1 s. The deadline sends SIGTERM; 500 ms later a
+  // process still running gets SIGKILL; at deadline + 1 s the job completes with 124 whatever its exit or stream
+  // state (a grandchild can hold stdout open past SIGKILL), and anything the process does afterwards is dropped.
   Component {
     id: jobComponent
     Item {
@@ -42,9 +48,11 @@ Item {
       property bool exitedSeen: false
       property bool streamDone: false
       property bool killed: false
+      property bool done: false
       property int code: -1
       property string outText: ""
-      function maybeDone() { if (exitedSeen && streamDone) root._finish(job) }
+      function complete() { if (!job.done) { job.done = true; root._finish(job) } }
+      function maybeDone() { if (exitedSeen && streamDone) job.complete() }
       function kill() { killed = true; if (proc.running) proc.signal(9) }
       Process {
         id: proc
@@ -75,7 +83,20 @@ Item {
         interval: job.deadlineMs
         running: true
         repeat: false
-        onTriggered: { if (proc.running) { job.timedOut = true; proc.signal(15) } }
+        onTriggered: { if (proc.running) { job.timedOut = true; proc.signal(15); killTimer.start() } }
+      }
+      Timer { id: killTimer; interval: 500; repeat: false; onTriggered: if (proc.running) proc.signal(root.escalationSignal) }
+      Timer {
+        interval: job.deadlineMs + 1000
+        running: true
+        repeat: false
+        onTriggered: {
+          if (job.done) return
+          job.timedOut = true
+          job.code = 124
+          if (proc.running) proc.signal(root.escalationSignal)
+          job.complete()
+        }
       }
       Component.onCompleted: proc.running = true
     }
