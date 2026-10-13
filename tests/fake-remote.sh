@@ -488,6 +488,7 @@ s_mic_apply_system() {
 }
 s_mic_apply_second_request_is_busy() {
   ready || return 1
+  echo 1 > "$F/vox.get-delay"          # keep the first apply pending: a fast fake apply can finish within one IPC round trip
   local id; id=$(ipc mic system | jq -r .operationId)
   [[ $(ipc mic remote | jq -r .reason) == busy ]] || return 1
   [[ $(mic_wait "$id") == succeeded ]]
