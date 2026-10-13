@@ -356,7 +356,9 @@ cmd_binds() {
 }
 
 # ---- plugin, mic mode, verification (Task 8) ----------------------------------------------
-ipc() { $SHELL_CMD omaremote "$@"; }
+# Typeless spec §4.3: every IPC call is bounded, so a wedged shell cannot hang setup.
+IPC_TIMEOUT=${OMAREMOTE_IPC_TIMEOUT:-3}
+ipc() { timeout "$IPC_TIMEOUT" $SHELL_CMD omaremote "$@"; }
 
 cmd_plugin() {
   need omarchy; need jq
@@ -676,6 +678,153 @@ cmd_atvvoice() {
   say "ATVVoice: node $ATV_NODE, D-Bus org.atvvoice.$ATV_NAME"
 }
 
+# ---- Typeless engine: keytap daemon and hotkey (Plan 5; Typeless spec §4.3) ----------------------
+KEYTAP_DIR=${OMAREMOTE_KEYTAP_DIR:-$HOME/.local/lib/omaremote}
+KEYTAP_UNIT=${OMAREMOTE_KEYTAP_UNIT:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/omaremote-keytap.service}
+TYPELESS_SETTINGS=${OMAREMOTE_TYPELESS_SETTINGS:-${XDG_CONFIG_HOME:-$HOME/.config}/Typeless/app-settings.json}
+UINPUT=${OMAREMOTE_UINPUT:-/dev/uinput}
+INPUT_SYSFS=${OMAREMOTE_INPUT_SYSFS:-/sys/class/input}
+KEYTAP_SRC=$SELF_DIR/../host/omaremote-keytap   # like ATV_PATCH: resolves from host/ and from a test that sources this file
+OMA_CONFIG=${XDG_CONFIG_HOME:-$HOME/.config}/omaremote/config.json
+SAVE_WAIT_MS=${OMAREMOTE_SAVE_WAIT_MS:-2000}
+NO_SERVICE="the omaremote service is not running; start the shell, then re-run \`omaremote-setup typeless --hotkey …\`"
+
+gen_keytap_unit() {   # gen_keytap_unit > file. %h keeps the unit independent of where the checkout lives.
+  local exec='%h/.local/lib/omaremote/omaremote-keytap'
+  [[ -n ${OMAREMOTE_KEYTAP_DIR:-} ]] && exec=$KEYTAP_DIR/omaremote-keytap   # tests only
+  cat <<UNIT
+[Unit]
+Description=omaremote keytap (uinput hotkey taps for Typeless)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/python3 -I $exec serve
+Restart=on-failure
+
+[Install]
+WantedBy=graphical-session.target
+UNIT
+}
+
+keytap_prereqs() {
+  command -v python3 >/dev/null 2>&1 || die "python3 is missing. Run:  sudo pacman -S --needed python  -- then re-run this step."
+  id -nG | tr ' ' '\n' | grep -qx input \
+    || die "you are not in the input group (Typeless needs it too). Run:  sudo usermod -aG input \$USER  -- then log out and back in, and re-run this step."
+  [[ -w $UINPUT ]] \
+    || die "$UINPUT is not writable. Run:  sudo usermod -aG input \$USER  -- then log out and back in (a group change needs a new login)."
+}
+
+keytap_install() {
+  [[ -f $KEYTAP_SRC ]] || die "the keytap script is missing: $KEYTAP_SRC"
+  local changed=0
+  mkdir -p "$KEYTAP_DIR"
+  if ! cmp -s "$KEYTAP_SRC" "$KEYTAP_DIR/omaremote-keytap"; then
+    install -m 0755 "$KEYTAP_SRC" "$KEYTAP_DIR/omaremote-keytap"; changed=1
+    say "installed $KEYTAP_DIR/omaremote-keytap"
+  fi
+  gen_keytap_unit > "$WORKDIR/omaremote-keytap.service"
+  if ! cmp -s "$WORKDIR/omaremote-keytap.service" "$KEYTAP_UNIT"; then
+    mkdir -p "$(dirname "$KEYTAP_UNIT")"
+    cp "$WORKDIR/omaremote-keytap.service" "$KEYTAP_UNIT"; changed=1
+    say "wrote $KEYTAP_UNIT"
+  fi
+  systemctl --user daemon-reload
+  systemctl --user enable --now omaremote-keytap
+  if (( changed )); then systemctl --user restart omaremote-keytap; fi
+  return 0
+}
+
+keytap_verify() {   # within 3 s: the input device exists and the daemon answers ping
+  local i=0
+  while (( i < 30 )); do
+    if grep -qxs 'omaremote keytap' "$INPUT_SYSFS"/event*/device/name && python3 -I "$KEYTAP_DIR/omaremote-keytap" ping >/dev/null 2>&1; then
+      say "keytap: input device present, daemon answers"
+      return 0
+    fi
+    sleep 0.1; i=$((i + 1))
+  done
+  journalctl --user -u omaremote-keytap -n 20 --no-pager 2>/dev/null | sed 's/^/    /' >&2 || true
+  die "omaremote-keytap did not come up within 3 s (its journal is above)"
+}
+
+typeless_value() {   # Typeless's dictationMode[0] when it is a string, else nothing
+  jq -r '(.featureShortcutBindings.dictationMode // null) | if type == "array" then (.[0] // empty) else empty end | strings' \
+    "$TYPELESS_SETTINGS" 2>/dev/null || true
+}
+
+hotkey_request() {   # hotkey_request <chord>: the IPC reply, or dies when there is no service
+  local r; r=$(ipc typelessHotkey "$1" 2>/dev/null) && [[ -n $r ]] || die "$NO_SERVICE"
+  printf '%s' "$r"
+}
+
+typeless_hotkey() {   # typeless_hotkey <explicit chord or ""> <from_typeless 0|1>
+  local want=$1 from=$2 st stored adopted=0
+  st=$(ipc status 2>/dev/null) && [[ -n $st ]] || die "$NO_SERVICE"
+  stored=$(jq -r '.typeless.hotkeyStored | if type == "boolean" then tostring else empty end' <<<"$st" 2>/dev/null)   # not `// empty`: false is falsy
+  [[ -n $stored ]] || die "$NO_SERVICE"
+  if [[ -z $want ]] && { (( from )) || [[ $stored == false ]]; }; then
+    want=$(typeless_value); adopted=1
+    if [[ -z $want ]]; then
+      want=RightAlt; adopted=0
+      say "Typeless's dictation hotkey could not be read from $TYPELESS_SETTINGS; using RightAlt"
+    else
+      say "using Typeless's dictation hotkey: $want"
+    fi
+  fi
+  if [[ -z $want ]]; then say "keeping the stored hotkey: $(jq -r '.typeless.hotkey' <<<"$st")"; return 0; fi
+
+  local r; r=$(hotkey_request "$want")
+  if [[ $(jq -r '.ok' <<<"$r") != true ]]; then
+    local why; why=$(jq -r '.reason // "unknown"' <<<"$r")
+    if (( adopted )) && [[ $why == "invalid chord: "* ]]; then        # an unusable Typeless value falls back, loudly
+      say "Typeless's hotkey '$want' is not usable here ($why); using RightAlt"
+      want=RightAlt; r=$(hotkey_request "$want")
+      [[ $(jq -r '.ok' <<<"$r") == true ]] || die "the hotkey was not accepted: $(jq -r '.reason // "unknown"' <<<"$r")"
+    else
+      die "the hotkey was not accepted: $why"
+    fi
+  fi
+
+  local canon seq; canon=$(jq -r '.hotkey' <<<"$r"); seq=$(jq -r '.writeSeq // empty' <<<"$r")
+  if [[ -n $seq ]]; then
+    local t0=${EPOCHREALTIME/./} state=""
+    while :; do
+      st=$(ipc status 2>/dev/null) && [[ -n $st ]] || die "$NO_SERVICE"
+      state=$(jq -r --arg n "$seq" '.configWrites.saves[$n] // "unknown"' <<<"$st")
+      case $state in
+        saved) break ;;
+        failed) die "saving config.json failed: $(jq -r --arg n "$seq" '.configWrites.errors[$n] // "unknown reason"' <<<"$st")" ;;
+      esac
+      (( (${EPOCHREALTIME/./} - t0) / 1000 >= SAVE_WAIT_MS )) && die "config.json write $seq was not confirmed within $((SAVE_WAIT_MS / 1000)) s (last state: $state)"
+      sleep 0.1
+    done
+  fi
+  local disk; disk=$(jq -r '.voice.typeless.hotkey // empty' "$OMA_CONFIG" 2>/dev/null)
+  [[ $disk == "$canon" ]] || die "the hotkey was changed again before setup could confirm it (config.json holds '${disk:-nothing}', expected '$canon')"
+  say "hotkey: $canon (saved)"
+}
+
+cmd_typeless() {   # cmd_typeless [--hotkey <chord> | --hotkey-from-typeless]
+  need jq
+  local want="" from=0
+  while (( $# )); do
+    case $1 in
+      --hotkey) [[ $# -ge 2 && -n $2 ]] || die "usage: omaremote-setup typeless [--hotkey <chord> | --hotkey-from-typeless]"; want=$2; shift 2 ;;
+      --hotkey-from-typeless) from=1; shift ;;
+      *) die "unknown typeless option: $1 (usage: omaremote-setup typeless [--hotkey <chord> | --hotkey-from-typeless])" ;;
+    esac
+  done
+  [[ -n $want && $from == 1 ]] && die "--hotkey and --hotkey-from-typeless are exclusive"
+  step "Typeless engine: keytap daemon"
+  keytap_prereqs
+  keytap_install
+  keytap_verify
+  step "Typeless engine: hotkey"           # only after a working keytap: a failure here leaves the daemon running
+  typeless_hotkey "$want" "$from"
+  say "Switch the engine in the panel (Voice tab → Engine: Typeless). Setup never switches it."
+}
+
 cmd_all() {
   # keyd and the mic apply both stop for confirmation or restart a daemon, so a bare run is
   # interactive by design. Pass --yes to skip the keyd prompts. Plan 4: the remote's microphone is
@@ -701,6 +850,9 @@ usage: omaremote-setup [--yes] [--mic remote|system] <subcommand>
            write its user unit for the paired remote, enable it, and
            define the ALSA PCM atvvoice-xiaomi that Voxtype opens (managed block in the ALSA file below)
   mic      apply a mic mode (remote|system) through the mic-apply contract
+  typeless install and start the omaremote-keytap user service (uinput; needs the input group) and store the
+           Typeless dictation hotkey: typeless [--hotkey <chord> | --hotkey-from-typeless]. Never switches the
+           engine; do that in the panel (Voice tab → Engine). Not part of the default flow.
   verify   verify the loaded binds and sweep the transport with the injector
   genconf  print the generated keyd config to stdout and exit (writes nothing)
   genlua   print the generated Hyprland binds to stdout and exit (writes nothing)
@@ -717,6 +869,7 @@ Environment:
   OMAREMOTE_ATV_STAMP  build stamp the atvvoice step compares (default ~/.local/state/omaremote/atvvoice.build)
   OMAREMOTE_NODE_WAIT_MS  how long `mic remote` waits for the remote's audio node (default 30000)
   OMAREMOTE_NODE_POLL_MS  how often `mic remote` polls for that node (default 500)
+  OMAREMOTE_KEYTAP_DIR, OMAREMOTE_KEYTAP_UNIT, OMAREMOTE_TYPELESS_SETTINGS, OMAREMOTE_UINPUT  test overrides for `typeless`
 USAGE
 }
 
@@ -737,6 +890,7 @@ main() {
     plugin) cmd_plugin ;;
     atvvoice) cmd_atvvoice ;;
     mic) if (( MIC_EXPLICIT )); then cmd_mic "${2:-$MIC_MODE}"; else cmd_mic "${2:-system}"; fi ;;
+    typeless) shift; cmd_typeless "$@" ;;
     verify) cmd_verify ;;
     genconf) cmd_genconf ;;
     genlua) gen_lua ;;
