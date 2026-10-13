@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { routeTargets, tapOutcome, reloadNeedsDrain, micVoiceView, createEngineSwitch, startTypeless, DRAIN_MS } from "../lib/EngineSwitch.mjs";
+import { routeTargets, tapOutcome, reloadNeedsDrain, micVoiceView, createEngineSwitch, startTypeless, releaseMicHold, DRAIN_MS } from "../lib/EngineSwitch.mjs";
 import { createTypelessSession } from "../lib/TypelessSession.mjs";
 import { createVoiceSession } from "../lib/VoiceSession.mjs";
 import { createMicApply } from "../lib/MicApply.mjs";
@@ -248,4 +248,46 @@ test("a mic apply under Typeless waits for settled, then rolls back without a ta
   assert.equal(h.taps().length, 2, "rollback never taps");
   h.apply("typeless", h.typeless.resume(80, "mic"), 80);    // Service resumes after the terminal outcome
   assert.equal(h.taps().length, 2, "the still-held button does not restart");
+});
+
+test("final review: a deferred mic rollback that runs out its 60 s bound releases the mic holder, so the next hold taps", () => {
+  const h = makeHost("typeless");
+  const mic = createMicApply({ voice: micVoiceView(h.voice, h.typeless, () => h.config.voice.engine) });
+  // Service's "done" handler, plus the pump step under test: both run after every MicApply call.
+  const after = (fx, now) => {
+    if (fx.some(e => e.type === "done") && !mic.pending()) h.apply("typeless", h.typeless.resume(now, "mic"), now);
+    h.apply("typeless", releaseMicHold(mic.pending(), h.typeless, now), now);
+    return fx;
+  };
+  const cmd = (fx, kind) => fx.find(e => e.type === "cmd" && e.kind === kind);
+  mic.backend("idle", 1, { fresh: true });
+  mic.systemdJob(false, 1);
+  h.apply("typeless", h.typeless.quiesce(10, "mic", "changing microphone"), 10);   // Service quiesces before request()
+  assert.equal(mic.request("remote", 11, { nodeName: "N" }).result.ok, true);
+  const get = cmd(after(mic.systemdJob(false, 12), 12), "get");
+  const GET = JSON.stringify({ key: "audio.device", value: "default", file_value: null });
+  const set = cmd(after(mic.cmdExit(get.id, 0, GET, 13), 13), "set");
+  after(mic.cmdExit(set.id, 0, "", 14), 14);                // mutated: the rollback must wait for a quiet system
+  after(mic.systemdJob(true, 15), 15);                       // a systemd job stays live, so it never gets quiet
+  after(mic.reset(16), 16);
+  assert.equal(mic.pending(), true, "the rollback is deferred");
+  assert.ok(h.typeless.snapshot().quiesced.includes("mic"), "still paused while the rollback is pending");
+  const u = after(mic.advance(16 + 60000), 16 + 60000);
+  assert.equal(u.find(e => e.type === "unconfigured").reason, "mic change unresolved");
+  assert.equal(u.some(e => e.type === "done"), false, "MicApply ends this one without a done effect");
+  assert.equal(mic.pending(), false);
+  assert.deepEqual(h.typeless.snapshot().quiesced, [], "the mic holder did not outlive the apply");
+  h.state(true, 60100);
+  assert.deepEqual(h.taps().map(t => t.kind), ["start"], "the next hold starts Typeless");
+});
+
+test("releaseMicHold never touches the holder while the apply is pending, nor another holder", () => {
+  const t = createTypelessSession(cfg({ engine: "typeless" }));
+  t.quiesce(0, "mic", "changing microphone");
+  assert.deepEqual(releaseMicHold(true, t, 1), []);
+  assert.deepEqual(t.snapshot().quiesced, ["mic"]);
+  const u = createTypelessSession(cfg({ engine: "typeless" }));
+  u.quiesce(0, "switch", "switching engine");
+  assert.deepEqual(releaseMicHold(false, u, 1), []);
+  assert.deepEqual(u.snapshot().quiesced, ["switch"]);
 });

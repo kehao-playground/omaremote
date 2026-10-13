@@ -63,6 +63,7 @@ Item {
   property var typelessSnap: null
   property string typelessView: "idle"            // Typeless spec §6.3: idle | recording | unsynced (remote mode only)
   property bool _pumping: false
+  property bool _micRequesting: false             // ipcMic is between its quiesce and mic.request
   property string _typelessSender: ""             // the ATVVoice source TypelessSession's facts belong to
   property int _typelessGeneration: -1
   readonly property string engineName: root.config ? root.config.voice.engine : "voxtype"
@@ -545,9 +546,13 @@ Item {
     // Typeless §6.2: under Typeless the apply first quiesces TypelessSession; MicApply (through micVoiceView) waits
     // until it is settled. The "done" effect resumes it after the terminal outcome.
     var underTypeless = root.engineName === "typeless"
-    if (underTypeless) root.typelessCall("quiesce", function(n) { return typeless.quiesce(n, "mic", "changing microphone") })
-    var r = root.guarded("mic.request", function() { return mic.request(mode, now, { nodeName: root.remoteNode }) },
-                          { effects: [], result: { ok: false, reason: "error" } })
+    root._micRequesting = true
+    var r
+    try {
+      if (underTypeless) root.typelessCall("quiesce", function(n) { return typeless.quiesce(n, "mic", "changing microphone") })
+      r = root.guarded("mic.request", function() { return mic.request(mode, now, { nodeName: root.remoteNode }) },
+                       { effects: [], result: { ok: false, reason: "error" } })
+    } finally { root._micRequesting = false }
     if (underTypeless && !r.result.ok) root.typelessCall("resume", function(n) { return typeless.resume(n, "mic") })
     root.dispatch(r.effects, "mic")
     if (r.result.ok) { root.micCurrentId = r.result.operationId; root.micConflict = null }
@@ -731,6 +736,8 @@ Item {
         if (fx.length) root.dispatch(fx, "switch")
       }
       if (root.mic && root.mic.pending() && root.engineName === "typeless") root.dispatch(root.mic.advance(now), "mic")
+      // Not inside ipcMic: its quiesce runs (and rearms) before mic.request makes the apply pending.
+      if (root.mic && !root._micRequesting) root.dispatch(EngineSwitch.releaseMicHold(root.mic.pending(), root.typeless, now), "typeless")
     } catch (err) { root.errorCount++; root.lastError = "orchestration: " + err; console.log("omaremote: orchestration threw: " + err) }
     finally { root._pumping = false }
   }
