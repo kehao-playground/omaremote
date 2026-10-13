@@ -61,6 +61,7 @@ Item {
   readonly property var switcher: EngineSwitch.createEngineSwitch()
   property bool switching: false                  // an engine switch or engine/mic/hotkey reload is draining
   property var typelessSnap: null
+  property string typelessView: "idle"            // Typeless spec §6.3: idle | recording | unsynced (remote mode only)
   property bool _pumping: false
   property string _typelessSender: ""             // the ATVVoice source TypelessSession's facts belong to
   property int _typelessGeneration: -1
@@ -94,8 +95,8 @@ Item {
   property double doctorAt: 0
   property int doctorSeq: 0
   readonly property bool unconfigured: root.voiceState === "unconfigured" || root.doctorSummary === "unconfigured" || root.configInvalid
-  readonly property string hudLine: Presentation.hudLine({ voiceState: root.voiceState, hudText: root.hudText, elapsedMs: root.elapsedMs, flash: root.flash })
-  Timer { interval: 250; repeat: true; running: root.voiceState === "recording"; onTriggered: root.elapsedMs = Date.now() - root.recordingSince }
+  readonly property string hudLine: Presentation.hudLine({ voiceState: root.voiceState, hudText: root.hudText, elapsedMs: root.elapsedMs, flash: root.flash, typeless: root.typelessView })
+  Timer { interval: 250; repeat: true; running: root.voiceState === "recording" || root.typelessView === "recording"; onTriggered: root.elapsedMs = Date.now() - root.recordingSince }
 
   // ---- exception containment (Controller Ruling 13): every call into a lib engine/session that can
   // create a deadline must not skip rearm() if it throws — this is the only such entry point. --------
@@ -568,11 +569,12 @@ Item {
     var h = hudLoader.item
     if (!h) return
     h.line = root.hudLine
-    h.recording = root.voiceState === "recording"
+    h.recording = root.voiceState === "recording" || root.typelessView === "recording"
     h.enabled = root.config ? root.config.voice.hud : true
   }
   onHudLineChanged: syncHud()
   onVoiceStateChanged: syncHud()
+  onTypelessViewChanged: syncHud()
   // NOTE (deviation from brief): `onConfigChanged: syncHud()` here would collide with the existing
   // `function onConfigChanged(kind)` member on root (same identifier) — QML rejects the duplicate.
   // A Connections block gives the `config` property's auto-generated change handler its own scope.
@@ -682,7 +684,18 @@ Item {
     var now = Date.now()
     root.dispatch(root.guarded("typeless." + label, function() { return fn(now) }), "typeless")
   }
-  function onTypelessState(e) { root.typelessSnap = e.state }
+  function onTypelessState(e) {
+    root.typelessSnap = e.state
+    root.refreshTypelessView()
+  }
+  function refreshTypelessView() {                              // §6.3: elapsed time runs from the start tap
+    var v = root.engineName === "typeless" && root.typelessSnap ? Presentation.typelessView(root.typelessSnap) : "idle"
+    if (v === "recording" && root.typelessView !== "recording") {
+      root.recordingSince = root.typelessSnap.since || Date.now()
+      root.elapsedMs = Date.now() - root.recordingSince
+    }
+    root.typelessView = v
+  }
   function onAtvState(ev) {                                     // §6.1: State changes reach TypelessSession under both engines
     var now = Date.now()
     root.remoteState = ev.state
@@ -755,6 +768,7 @@ Item {
     root.applyDormancy()
     root.typelessCall("resume", function(n) { return root.typeless.resume(n, "switch") })
     root.switching = false
+    root.refreshTypelessView()
     if (root.hudText === "switching engine") root.hudText = ""
     root.updateRemoteWarning()
     root.refreshDoctor()
@@ -810,7 +824,7 @@ Item {
       , configWrites: { saves: configStore.saves, errors: configStore.saveErrors }
       , engine: root.engineName
       , typeless: { hotkey: root.config ? root.config.voice.typeless.hotkey : null, hotkeyStored: root.hotkeyStored(),
-                    state: root.typeless ? root.typeless.snapshot() : null, switching: root.switching }
+                    state: root.typeless ? root.typeless.snapshot() : null, switching: root.switching, view: root.typelessView }
       , doctorSummary: root.doctorSummary
       , unconfigured: root.unconfigured
     })

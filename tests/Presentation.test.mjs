@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { elapsedText, keyLabel, flashText, glyphLook, hudLine, micStatusLine, keysFromQtEvent, hidMicLine, keyboardSourceLine } from "../lib/Presentation.mjs";
+import { elapsedText, keyLabel, flashText, glyphLook, hudLine, micStatusLine, keysFromQtEvent, hidMicLine, keyboardSourceLine, typelessView, engineStatusLine, TYPELESS_FLASH } from "../lib/Presentation.mjs";
 import { normalizeConfig } from "../lib/Config.mjs";
 import { DEFAULT_CONFIG } from "../lib/Defaults.mjs";
 
@@ -78,4 +78,37 @@ test("keyboardSourceLine warns that F9 is silent in remote mode without on-deman
   assert.equal(keyboardSourceLine(pcfg({ mic: "remote" })), "observed — no audio in remote mode unless the remote's mic button is held; use system mode for F9");
   assert.equal(keyboardSourceLine(pcfg({ mic: "remote", remoteOnDemand: true })), "observed");
   assert.equal(keyboardSourceLine(pcfg({ mic: "system" })), "observed");
+});
+
+// ---- Typeless engine (Typeless spec §6.3) ----
+test("typelessView: recording while on or a start is in flight, a warning while unsynced, idle otherwise and in system mode", () => {
+  const snap = (o) => Object.assign({ mode: "remote", typeless: "off", outstanding: null }, o);
+  assert.equal(typelessView(null), "idle");
+  assert.equal(typelessView(snap({})), "idle");
+  assert.equal(typelessView(snap({ outstanding: { id: 1, kind: "start" } })), "recording");
+  assert.equal(typelessView(snap({ typeless: "on" })), "recording");
+  assert.equal(typelessView(snap({ typeless: "on", outstanding: { id: 2, kind: "stop" } })), "recording", "a stop in flight keeps the display");
+  assert.equal(typelessView(snap({ typeless: "unsynced", outstanding: { id: 3, kind: "start" } })), "unsynced");
+  assert.equal(typelessView(snap({ mode: "system", outstanding: { id: 1, kind: "press" } })), "idle");
+});
+
+test("glyphLook and hudLine show Typeless recording and the unsynced warning", () => {
+  assert.equal(glyphLook({ voiceState: "idle", typeless: "recording" }), "recording");
+  assert.equal(glyphLook({ voiceState: "idle", typeless: "unsynced" }), "warning");
+  assert.equal(glyphLook({ voiceState: "idle", typeless: "idle" }), "ready");
+  assert.equal(glyphLook({ voiceState: "idle", typeless: "recording", selftest: true }), "selftest", "a self-test still wins");
+  assert.equal(hudLine({ voiceState: "idle", typeless: "recording", elapsedMs: 12000, hudText: "" }), "● Typeless 00:12");
+  assert.equal(hudLine({ voiceState: "idle", typeless: "recording", elapsedMs: 0, hudText: "max session reached" }), "● Typeless 00:00 · max session reached");
+  assert.equal(hudLine({ voiceState: "idle", typeless: "recording", elapsedMs: 0, flash: "Typeless ⏯" }), "Typeless ⏯");
+  assert.equal(hudLine({ voiceState: "idle", typeless: "unsynced", hudText: "Typeless state unknown — check Typeless; press reset when it is stopped" }),
+               "Typeless state unknown — check Typeless; press reset when it is stopped");
+});
+
+test("engineStatusLine reports the hotkey and whether keytap runs", () => {
+  const c = normalizeConfig({ ...DEFAULT_CONFIG, voice: { ...DEFAULT_CONFIG.voice, engine: "typeless", typeless: { hotkey: "RightAlt+RightShift" } } }).config;
+  assert.equal(engineStatusLine(c, null), "hotkey: RightAlt+RightShift · keytap: unknown");
+  assert.equal(engineStatusLine(c, { typeless: { keytapActive: true, keytapDevice: true } }), "hotkey: RightAlt+RightShift · keytap: running");
+  assert.equal(engineStatusLine(c, { typeless: { keytapActive: true, keytapDevice: false } }), "hotkey: RightAlt+RightShift · keytap: not running");
+  assert.equal(engineStatusLine(c, { typeless: { keytapActive: false, keytapDevice: false } }), "hotkey: RightAlt+RightShift · keytap: not running");
+  assert.equal(TYPELESS_FLASH, "Typeless ⏯");
 });

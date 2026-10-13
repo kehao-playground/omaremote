@@ -22,11 +22,11 @@ BarWidget {
 
   readonly property string look: service ? Presentation.glyphLook({
       voiceState: service.voiceState, unconfigured: service.unconfigured, remoteState: service.remoteState,
-      micPending: service.micPending, selftest: service.selftestActive }) : "disconnected"
+      micPending: service.micPending, selftest: service.selftestActive, typeless: service.typelessView }) : "disconnected"
   readonly property string glyph: look === "selftest" ? "󰙨" : (look === "unconfigured" || look === "disconnected" ? "󰍭" : "󰍬")
   readonly property color fg: bar ? bar.barForeground : Color.foreground
   readonly property color glyphColor: look === "recording" ? (bar ? bar.urgent : Color.urgent)
-                                    : look === "unconfigured" ? root.warningColor
+                                    : look === "unconfigured" || look === "warning" ? root.warningColor
                                     : look === "disconnected" ? Qt.darker(fg, 1.6) : fg
   readonly property string elapsed: service && look === "recording" ? Presentation.elapsedText(service.elapsedMs) : ""
   readonly property string tooltipText: {
@@ -37,6 +37,8 @@ BarWidget {
       return "OmaRemote unconfigured: " + (missing.length ? missing.join(", ") : service.unconfiguredReason || "see Setup tab")
     }
     if (look === "busy") return service.micPending ? "OmaRemote: changing microphone…" : "OmaRemote: recovering…"
+    if (look === "warning") return "OmaRemote: Typeless state unknown — check Typeless, then press reset"
+    if (look === "recording" && service.typelessView === "recording") return "Recording (Typeless)"
     if (look === "recording") return "Recording (" + service.voiceOwner + (service.voiceInferred ? ", inferred" : "") + ")"
     if (service.remoteWarning) return "OmaRemote: remote mic not ready (" + (service.remoteState === "absent" ? "ATVVoice not running" : "audio.device ≠ " + service.remoteNode) + ")"
     return "OmaRemote: " + look + (service.remoteState !== "unknown" ? " · remote " + service.remoteState : "")

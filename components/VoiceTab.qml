@@ -13,10 +13,11 @@ Item {
   property color fg: Color.foreground
   property string fontFamily: Style.font.family
   property int cursor: -1
-  readonly property int rowCount: 4                    // mic switch, HUD toggle, flash toggle, maxSessionSec (+/- via ←/→ not needed: Enter cycles 30/60/120)
+  readonly property int rowCount: 5                    // engine, mic switch, HUD toggle, flash toggle, maxSessionSec (Enter cycles 30/60/120)
   property bool editing: false
   property string requestedMode: ""
   property string lastError: ""
+  property string engineError: ""
   readonly property var s: service
   readonly property var cfg: s && s.config ? s.config : null
   readonly property var current: s && s.micCurrentId ? s.micStatusOf(s.micCurrentId) : null
@@ -25,10 +26,16 @@ Item {
   function moveCursor(dy) { cursor = cursor < 0 ? 0 : Math.max(0, Math.min(rowCount - 1, cursor + dy)) }
   function activate() {
     if (!cfg) return
-    if (cursor === 0) root.requestMic(cfg.voice.mic === "remote" ? "system" : "remote")
-    else if (cursor === 1) s.setVoiceField("hud", !cfg.voice.hud)
-    else if (cursor === 2) s.setVoiceField("actionFlash", !cfg.voice.actionFlash)
-    else if (cursor === 3) s.setVoiceField("maxSessionSec", cfg.voice.maxSessionSec >= 120 ? 30 : cfg.voice.maxSessionSec >= 60 ? 120 : 60)
+    if (cursor === 0) root.requestEngine(cfg.voice.engine === "typeless" ? "voxtype" : "typeless")
+    else if (cursor === 1) root.requestMic(cfg.voice.mic === "remote" ? "system" : "remote")
+    else if (cursor === 2) s.setVoiceField("hud", !cfg.voice.hud)
+    else if (cursor === 3) s.setVoiceField("actionFlash", !cfg.voice.actionFlash)
+    else if (cursor === 4) s.setVoiceField("maxSessionSec", cfg.voice.maxSessionSec >= 120 ? 30 : cfg.voice.maxSessionSec >= 60 ? 120 : 60)
+  }
+  function requestEngine(name) {                        // Typeless spec §7: the switch drains both engines first
+    if (!s) return
+    var r = s.setEngine(name)
+    root.engineError = r === "ok" ? "" : r
   }
   function requestMic(mode) {                           // §3: returns immediately; the Service polls micStatus internally
     if (!s || s.micPending) return
@@ -43,12 +50,32 @@ Item {
     width: parent.width
     spacing: Style.space(8)
 
+    PanelSectionHeader { text: "Engine"; foreground: root.fg; fontFamily: root.fontFamily }
+    Row {
+      spacing: Style.space(8)
+      Text { textFormat: Text.PlainText; text: "Transcription: " + (root.cfg ? root.cfg.voice.engine : "?"); color: root.fg; font.family: root.fontFamily; font.pixelSize: Style.font.body; anchors.verticalCenter: parent.verticalCenter }
+      Button { text: "Voxtype"; selected: root.cfg && root.cfg.voice.engine === "voxtype"; hasCursor: root.cursor === 0; foreground: root.fg; enabled: root.s && !root.s.switching; onClicked: root.requestEngine("voxtype") }
+      Button { text: "Typeless"; selected: root.cfg && root.cfg.voice.engine === "typeless"; hasCursor: root.cursor === 0; foreground: root.fg; enabled: root.s && !root.s.switching; onClicked: root.requestEngine("typeless") }
+    }
+    Text {
+      textFormat: Text.PlainText; width: parent.width; wrapMode: Text.WordWrap
+      visible: text !== ""
+      text: {
+        if (!root.s || !root.cfg) return ""
+        if (root.s.switching) return "switching engine…"
+        if (root.engineError) return "engine change refused: " + root.engineError
+        if (root.cfg.voice.engine !== "typeless") return ""
+        return Presentation.engineStatusLine(root.cfg, root.s.doctorFacts) + " — edit with omaremote-setup typeless --hotkey …"
+      }
+      color: Qt.darker(root.fg, 1.3); font.family: root.fontFamily; font.pixelSize: Style.font.caption
+    }
+
     PanelSectionHeader { text: "Microphone"; foreground: root.fg; fontFamily: root.fontFamily }
     Row {
       spacing: Style.space(8)
       Text { textFormat: Text.PlainText; text: "Voxtype mic: " + (root.cfg ? root.cfg.voice.mic : "?"); color: root.fg; font.family: root.fontFamily; font.pixelSize: Style.font.body; anchors.verticalCenter: parent.verticalCenter }
-      Button { text: "Remote"; selected: root.cfg && root.cfg.voice.mic === "remote"; hasCursor: root.cursor === 0; foreground: root.fg; enabled: root.s && !root.s.micPending; onClicked: root.requestMic("remote") }
-      Button { text: "System default"; selected: root.cfg && root.cfg.voice.mic === "system"; hasCursor: root.cursor === 0; foreground: root.fg; enabled: root.s && !root.s.micPending; onClicked: root.requestMic("system") }
+      Button { text: "Remote"; selected: root.cfg && root.cfg.voice.mic === "remote"; hasCursor: root.cursor === 1; foreground: root.fg; enabled: root.s && !root.s.micPending; onClicked: root.requestMic("remote") }
+      Button { text: "System default"; selected: root.cfg && root.cfg.voice.mic === "system"; hasCursor: root.cursor === 1; foreground: root.fg; enabled: root.s && !root.s.micPending; onClicked: root.requestMic("system") }
     }
     Text {
       textFormat: Text.PlainText
@@ -60,6 +87,7 @@ Item {
         if (root.lastError) return "request refused: " + root.lastError
         if (root.s.micLast && root.s.micLast.state === "failed") return "last change failed: " + Presentation.micStatusLine(root.s.micLast)
         if (root.s.micConflict) return "conflict: Voxtype audio.device is " + root.s.micConflict.found + " (expected " + root.s.micConflict.expected + ") — reconcile in Setup"
+        if (root.cfg && root.cfg.voice.engine === "typeless") return Presentation.TYPELESS_MIC_HINT
         return ""
       }
       color: root.s && root.s.micLast && root.s.micLast.state === "failed" ? Color.urgent : Qt.darker(root.fg, 1.3)
@@ -80,15 +108,15 @@ Item {
     PanelSectionHeader { text: "Options"; foreground: root.fg; fontFamily: root.fontFamily }
     Row { spacing: Style.space(8)
       Text { textFormat: Text.PlainText; text: "HUD"; width: Style.space(120); color: root.fg; font.family: root.fontFamily; font.pixelSize: Style.font.body; anchors.verticalCenter: parent.verticalCenter }
-      ToggleSwitch { checked: root.cfg ? root.cfg.voice.hud : true; hasCursor: root.cursor === 1; foreground: root.fg; onToggled: root.s.setVoiceField("hud", !root.cfg.voice.hud) }
+      ToggleSwitch { checked: root.cfg ? root.cfg.voice.hud : true; hasCursor: root.cursor === 2; foreground: root.fg; onToggled: root.s.setVoiceField("hud", !root.cfg.voice.hud) }
     }
     Row { spacing: Style.space(8)
       Text { textFormat: Text.PlainText; text: "Action flash"; width: Style.space(120); color: root.fg; font.family: root.fontFamily; font.pixelSize: Style.font.body; anchors.verticalCenter: parent.verticalCenter }
-      ToggleSwitch { checked: root.cfg ? root.cfg.voice.actionFlash : true; hasCursor: root.cursor === 2; foreground: root.fg; onToggled: root.s.setVoiceField("actionFlash", !root.cfg.voice.actionFlash) }
+      ToggleSwitch { checked: root.cfg ? root.cfg.voice.actionFlash : true; hasCursor: root.cursor === 3; foreground: root.fg; onToggled: root.s.setVoiceField("actionFlash", !root.cfg.voice.actionFlash) }
     }
     Row { spacing: Style.space(8)
       Text { textFormat: Text.PlainText; text: "Max session (s)"; width: Style.space(120); color: root.fg; font.family: root.fontFamily; font.pixelSize: Style.font.body; anchors.verticalCenter: parent.verticalCenter }
-      NumberField { value: root.cfg ? root.cfg.voice.maxSessionSec : 60; from: 5; to: 600; stepSize: 5; hasCursor: root.cursor === 3; foreground: root.fg; fontFamily: root.fontFamily; onModified: function(v) { root.s.setVoiceField("maxSessionSec", v) } }
+      NumberField { value: root.cfg ? root.cfg.voice.maxSessionSec : 60; from: 5; to: 600; stepSize: 5; hasCursor: root.cursor === 4; foreground: root.fg; fontFamily: root.fontFamily; onModified: function(v) { root.s.setVoiceField("maxSessionSec", v) } }
     }
 
     PanelSectionHeader { text: "Stats"; foreground: root.fg; fontFamily: root.fontFamily }
