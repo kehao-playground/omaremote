@@ -1,7 +1,7 @@
 # omaremote — Typeless as an alternative transcription engine
 
 **Date:** 2026-10-13
-**Status:** Draft rev 3 — second review addressed; awaiting user review
+**Status:** Draft rev 4 — third review addressed; awaiting user review
 **Amends:** `2026-09-14-omaremote-design.md` §3 (adds a host component), §5 (voice session), §6.2 (Voice tab);
 `2026-10-12-remote-mic-design.md` §5 (Doctor)
 
@@ -128,7 +128,7 @@ ever left down.
 | 4 | `err write` | unknown |
 | 5 | connected and sent, but no reply within 1.5 s, or the connection broke | unknown |
 
-The Service's command runner kills a client still running at 2 s. A kill is also "unknown".
+The Service's command runner completes every job within 3 s (§6.1); a timeout or kill is also "unknown".
 
 ### 4.2 Allowlist
 
@@ -183,19 +183,23 @@ classification only. The allowlist is what limits what is ever sent.
 
    **Serialized ConfigStore writes.** These are needed because FileView's `saved`/`saveFailed` signals carry no
    identity.
-   - Each `_write` gets the next `seq`. At most one `setText` is in flight.
-   - A write requested while one is in flight becomes the single queued write. A newer request replaces the
-     queued raw but keeps every seq it covers.
-   - When the in-flight write finishes, its signal resolves exactly the seqs that write carried, as `saved` or
-     `failed`. Then the queued write, if any, starts.
+   - Each `_write` gets the next `seq` and its own full text. Writes form a FIFO, at most 8 deep. A ninth
+     request fails at once with `saveFailed("too many pending config writes")`. Writes are **never merged**, so
+     each `saved` or `saveFailed` signal resolves exactly the one seq whose text that `setText` carried.
+   - `saved` therefore means "this request's text reached disk". A later write may still replace it. setup's
+     re-read of `config.json` catches that case and exits 1 with "the hotkey was changed again before setup
+     could confirm it" whenever the canonical value on disk differs from the requested one.
    - `status` exposes the last 16 outcomes as `config.saves` (`seq → saved|failed|pending`), plus the reason
      for a failure.
    - For `typelessHotkey` when the value is already equal in memory:
      - the write that last carried it is still pending → return that pending seq;
      - that write failed → issue a new write and return its seq;
      - otherwise (saved, or loaded from disk) → `writeSeq: null`.
-   - External reloads are unaffected. The echo check (`_lastWritten`) compares against the text of the write in
-     flight.
+   - **Watcher echoes.** ConfigStore remembers the texts of the in-flight write, the queued writes and the
+     last 4 completed writes. A watcher read equal to any of them is our own echo and is ignored. Only a text
+     outside that set is an external change. A late echo of an earlier write of ours therefore never reverts
+     the config or fires `changed("external")`.
+
 6. setup never switches `voice.engine`. The user does that in the panel.
 
 Overrides for tests: `OMAREMOTE_KEYTAP_DIR`, `OMAREMOTE_KEYTAP_UNIT`, `OMAREMOTE_TYPELESS_SETTINGS`,
@@ -224,8 +228,8 @@ return effects:
 **Single flight.** At most one tap is outstanding.
 - Every tap gets a fresh monotonically increasing `id`.
 - The outstanding tap is **never abandoned**. Reset, quiesce, a switch timeout and `unsynced` all leave it in
-  place, and its result is always delivered and honoured. The command runner guarantees the result within
-  2 s (§6.1).
+  place, and its result is always delivered: honoured per §5.2/§5.3, or logged only in `unsynced`. The
+  command runner guarantees the result within 3 s (§6.1).
 - No other tap is sent until it resolves.
 - A `tapResult` is *stale*, and ignored, only when its id is not the outstanding one. That happens for a
   duplicate report of an already-resolved id, or an id the session never issued.
@@ -243,9 +247,16 @@ and every tap result.
 - `typeless`: `off`, `on` or `unsynced`. This is what omaremote believes Typeless is doing.
 - `streaming`: the latest ATVVoice streaming value, updated in **every** state, including while a tap is
   outstanding.
-- `needRelease`: set by `reset`, the `maxSessionSec` deadline, `quiesce`, `sourceLost`, or a failed start. It is
-  cleared only by observing `streaming = false`. This is what keeps one physical hold from restarting after
-  being ended.
+- `streaming` is either *trusted* or *unknown*. It is trusted once a `State` value has been read from the
+  current ATVVoice source (sender and generation). `sourceLost` makes it unknown until the next source's first
+  `State` read. For `desired`, unknown counts as `false`.
+- `needRelease` keeps one physical hold from restarting after it was ended. **Arming it** means: if `streaming`
+  is trusted and already `false`, the release has already happened and the flag stays clear. Otherwise it is set.
+  - **Armed by** `reset`, the `maxSessionSec` deadline, `quiesce`, a `notSent` start, and `sourceLost` (which
+    always sets it, because streaming is unknown).
+  - **Cleared** by a trusted `streaming = false`. That includes the first `State` read of a new source that
+    reports not streaming. A new source that reports `streaming` keeps the flag set until that hold ends, so a
+    daemon restart in mid-hold never starts a session for a hold that began under the old daemon.
 - `outstanding`: the id and kind (`start`/`stop`) of the single tap in flight, or none.
 
 **desired** = `streaming && !needRelease && !quiesced`.
@@ -262,15 +273,19 @@ and every tap result.
 | kind | outcome | effect, then reconcile |
 |---|---|---|
 | start | sent | `typeless = on` |
-| start | notSent | `typeless` stays `off`, `needRelease = true`, HUD "Typeless trigger failed: <reason>" (no retry within this hold) |
+| start | notSent | `typeless` stays `off`, arm `needRelease` (no retry within this hold, and no effect if the button was already released), HUD "Typeless trigger failed: <reason>" |
 | start/stop | unknown | `typeless = unsynced`, HUD "Typeless state unknown — check Typeless; press reset when it is stopped" |
 | stop | sent | `typeless = off` |
 | stop | notSent | `typeless = unsynced`. Typeless is certainly still recording, and a retry would hit the same failure. Same HUD. |
 
 **`unsynced`** sends nothing.
 - `streaming on` only repeats the HUD.
-- `reset` sets `typeless = off` and `needRelease = true`. It does not tap.
-- An outstanding tap is still awaited, and its result is recorded but not acted on.
+- An outstanding tap is still awaited. When it resolves, `typeless` stays `unsynced`, whatever the outcome; the
+  result is logged only. That is the single rule for results in `unsynced`.
+- **`reset` with no outstanding tap:** sets `typeless = off` and arms `needRelease`. It does not tap.
+- **`reset` while a tap is outstanding:** does nothing beyond HUD "a Typeless trigger is still pending — wait a
+  moment, check Typeless is stopped, then reset again". `unsynced` is never left while a result can still
+  arrive, so a late `sent` can never be applied to a state the user has already declared `off`.
 
 **Worked interleavings** (each is a required test, §9):
 - *release during start, re-press before the result:* starting → off → on → start `sent`. `desired` is true
@@ -280,6 +295,11 @@ and every tap result.
 - *re-press during stop:* stop `sent`, `desired` true → start.
 - *reset or deadline mid-hold:* stop. The still-held button does not restart because of `needRelease`. The next
   hold starts normally.
+- *engine switch while idle and released, then switch back:* `quiesce` finds trusted `streaming = false` and does
+  not arm `needRelease`, so the first hold afterwards starts normally.
+- *release first, then start `notSent`:* the trusted `false` means arming is a no-op, and the next hold starts.
+- *ATVVoice restarts mid-hold:* the new source reports `streaming`, `needRelease` stays set, and nothing starts
+  until the hold ends.
 
 `hidPress` does nothing in `remote` mode (remote-mic design §4.2). A short press makes a ~1 s stream:
 Typeless records about 1 s of silence and stops. This is harmless and not filtered.
@@ -320,7 +340,15 @@ promises no automatic recovery. To recover, the user stops Typeless by hand, the
   - VoiceSession receives none of them. It keeps following `voxtype status`, so F9 dictation and its HUD still work.
   - The mic key's release edge is dropped.
 - **Tap effects** run `python3 -I ~/.local/lib/omaremote/omaremote-keytap tap <chord>` through the existing
-  command runner, with a 2 s kill. The exit code maps to `sent`/`notSent`/`unknown` per §4.1.
+  command runner with a 2 s deadline. The exit code maps to `sent`/`notSent`/`unknown` per §4.1.
+- **CommandRunner gains a bounded completion.** Today its deadline only sends SIGTERM, and completion waits on
+  process exit and stream end.
+  - 500 ms after SIGTERM, if the process is still running, it sends SIGKILL.
+  - At deadline + 1 s, the job completes with code 124, whatever its stream or exit state; later signals from
+    that process are dropped.
+  - Every job therefore reports exactly once, within deadline + 1 s. For keytap that is 3 s.
+  - Codes 124 and 137 map to `unknown`.
+  - Existing callers keep their deadlines and gain only the guaranteed completion.
 
 ### 6.2 Lifecycle: draining both engines
 
@@ -345,7 +373,7 @@ promises no automatic recovery. To recover, the user stops Typeless by hand, the
 1. Drain both sessions: `quiesce()` on TypelessSession and `drain()` on VoiceSession, each with its own bound.
    - VoiceSession: 3 s, then abort.
    - TypelessSession: 3 s. On expiry it is forced to `unsynced`, but its outstanding tap stays outstanding. It
-     still resolves within the runner's 2 s kill, and no further tap can be issued until it does (§5.1). The
+     still resolves within the runner's 3 s bound, and no further tap can be issued until it does (§5.1). The
      HUD says "Typeless may still be recording".
 2. Commit `voice.engine` (an internal `commit`).
 3. `setConfig()` on both sessions.
@@ -385,8 +413,11 @@ is a drain. A new hold after a release may start at once.
 
 ### 6.3 Presentation
 
-- `remote` + `active`: the bar and HUD show recording with elapsed time, labelled "Typeless".
-- `remote` + `unsynced`: the bar shows a warning state, and the HUD shows the §5.2 text until reset.
+- `remote`, recording display (the bar and HUD show recording with elapsed time from the start tap, labelled
+  "Typeless"): `typeless = on`, or a `start` tap outstanding. A `stop` outstanding keeps the display until its
+  result arrives.
+- `remote` + `unsynced`: the bar shows a warning state, and the HUD shows the §5.2 text until a reset is accepted.
+- `remote` + `off` with nothing outstanding: idle.
 - `system`: each tap flashes "Typeless ⏯". Typeless's own Status bar shows the real state.
 - Typeless taps are not counted in Voxtype session stats.
 
@@ -438,16 +469,24 @@ which `remote` mode still needs.
     - shell exit sending a stop only for `on` with nothing outstanding;
     - system mode never tapping on reset, quiesce or a deadline, after a history that looks active
       (discriminating);
-    - the `unsynced` exit only through reset.
+    - the `unsynced` exit only through reset;
+    - the first hold after an engine switch made while idle and released starts;
+    - release first, then start `notSent`: the next hold starts;
+    - an ATVVoice restart mid-hold (sourceLost, then a new source reporting streaming): nothing starts until a
+      trusted release;
+    - switch timeout → reset (refused while outstanding) → the old start resolves `sent` → still `unsynced` →
+      reset accepted → `off`.
   - `VoiceSession.test.mjs` adds drain cases:
     - a plugin-owned recording gets `record stop` and is drained at `transcribing`;
     - a keyboard-owned session is untouched and does not block;
     - 3 s without draining falls back to abort;
     - new plugin starts are refused while draining.
   - ConfigStore write serialization, as a pure helper:
-    - two writes in flight resolve their own seqs;
-    - a queued write coalesces and carries both seqs;
-    - a failure marks exactly its seqs;
+    - FIFO order, and each signal resolving exactly one seq;
+    - A → B(X) → C(Y), where B is `saved`, but setup's disk check reports "changed again";
+    - a failure marks exactly its seq;
+    - the 8-deep limit;
+    - a late watcher echo of a completed earlier write being ignored, with no `external`;
     - the `typelessHotkey` equal-value cases (pending, failed, saved).
   - Config normalization of `engine` and `hotkey`, including a stored invalid hotkey.
   - The Doctor rows, with canonical comparison and `unknown` for an unparsable Typeless value.
@@ -455,6 +494,8 @@ which `remote` mode still needs.
   - The routing and quiesce orchestration, extracted as pure functions:
     - an engine switch in both directions, with a plugin-owned session running on the outgoing engine;
     - an engine switch timing out at 3 s;
+    - CommandRunner escalating to SIGKILL and completing at deadline + 1 s with a child that ignores SIGTERM
+      and keeps its stdout open (a fake process in the harness);
     - an external reload that changes the hotkey mid-session;
     - a mic apply under Typeless waiting for settled, then rolling back without a tap.
 - **keytap (python unittest, stdlib):**
