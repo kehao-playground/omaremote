@@ -30,8 +30,14 @@ ATV_REV=0e8f6413dc4bad7a04e3c6b648945439d7a22fac
 # Built from the pinned rev plus a repo patch (the RC003 never sends AUDIO_SYNC, which upstream needs to reset its
 # ADPCM decoder; the patch resets it at AUDIO_START). Located from $0, like tests/inject-key.py.
 # Absolute: git -C <workdir> apply would otherwise resolve a relative path inside the work dir.
-ATV_PATCH=${OMAREMOTE_ATV_PATCH:-$(dirname "$0")/../host/patches/atvvoice-reset-decoder.patch}
-[[ $ATV_PATCH == /* ]] || ATV_PATCH=$(cd "$(dirname "$ATV_PATCH")" 2>/dev/null && pwd)/$(basename "$ATV_PATCH")
+# SELF_DIR follows a symlinked invocation to the real script, so host/patches and tests/ are found.
+SELF_DIR=$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")
+ATV_PATCH=${OMAREMOTE_ATV_PATCH:-$SELF_DIR/../host/patches/atvvoice-reset-decoder.patch}
+# A failed cd keeps the value as given, so the later die names the path the user passed.
+if [[ $ATV_PATCH != /* ]]; then
+  _d=$(cd "$(dirname "$ATV_PATCH")" 2>/dev/null && pwd) && ATV_PATCH=$_d/$(basename "$ATV_PATCH")
+  unset _d
+fi
 ATV_BIN=${OMAREMOTE_ATV_BIN:-$HOME/.cargo/bin/atvvoice}
 # One line, `rev=<ATV_REV> patch=<sha256 of the patch>`; written only after a successful install.
 ATV_STAMP=${OMAREMOTE_ATV_STAMP:-${XDG_STATE_HOME:-$HOME/.local/state}/omaremote/atvvoice.build}
@@ -76,6 +82,7 @@ trap cleanup_tmp EXIT
 say()  { printf '%s\n' "$*"; }
 step() { printf '\n==> %s\n' "$*"; }
 die()  { printf 'omaremote-setup: %s\n' "$*" >&2; exit 1; }
+warn() { printf 'omaremote-setup: warning: %s\n' "$*" >&2; }
 
 need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
 
@@ -425,7 +432,7 @@ cmd_verify() {
     # verify", distinct from 1, which means "verified and failed".
     return 2
   fi
-  local inject; inject=$(dirname "$0")/../tests/inject-key.py
+  local inject; inject=$SELF_DIR/../tests/inject-key.py
   [[ -x $inject ]] || die "injector not found at $inject"
 
   # A refused arm names its blocker. backendStale is the common one and it is self-clearing:
@@ -619,8 +626,6 @@ cmd_atvvoice() {
   if [[ ! -x $ATV_BIN || $(cat "$ATV_STAMP" 2>/dev/null) != "$want" ]]; then
     say "building ATVVoice $ATV_REV + reset-decoder patch (a few minutes)"
     atv_build
-    mkdir -p "$(dirname "$ATV_STAMP")"
-    printf '%s\n' "$want" > "$ATV_STAMP"
     built=1
     say "built atvvoice ${ATV_REV:0:7} + reset-decoder patch"
   else
@@ -648,8 +653,12 @@ cmd_atvvoice() {
   else
     say "ALSA PCM $ATV_NODE: unchanged"
   fi
-  # A running Voxtype read ALSA's config at start; make it re-read.
-  if (( alsa_changed )) && systemctl --user is-active --quiet voxtype; then systemctl --user try-restart voxtype; fi
+  # A running Voxtype read ALSA's config at start; make it re-read. Not fatal: a failure here must not stop
+  # the atvvoice restart below, which is what repairs a running old build.
+  if (( alsa_changed )) && systemctl --user is-active --quiet voxtype; then
+    systemctl --user try-restart voxtype \
+      || warn "could not restart voxtype to pick up the new ALSA PCM; run:  systemctl --user restart voxtype"
+  fi
 
   # Three separate rules (spec §3): rewrite only on change; always ensure enabled+active, which repairs a
   # stopped or disabled service; restart a running service only when its unit or binary changed.
@@ -657,6 +666,13 @@ cmd_atvvoice() {
   systemctl --user is-active --quiet atvvoice && was_active=1
   systemctl --user enable --now atvvoice
   if (( was_active && (changed || built) )); then systemctl --user restart atvvoice; fi
+  # The stamp is the "this build is live" record, so it is written last: a run that died after the install
+  # (reload, ALSA write, enable, restart) rebuilds and restarts on the next run instead of leaving the old
+  # unpatched process running with a stamp that says it is current.
+  if (( built )); then
+    mkdir -p "$(dirname "$ATV_STAMP")"
+    printf '%s\n' "$want" > "$ATV_STAMP"
+  fi
   say "ATVVoice: node $ATV_NODE, D-Bus org.atvvoice.$ATV_NAME"
 }
 
@@ -700,6 +716,7 @@ Environment:
   OMAREMOTE_ATV_PATCH  patch applied to the pinned rev (default host/patches/atvvoice-reset-decoder.patch)
   OMAREMOTE_ATV_STAMP  build stamp the atvvoice step compares (default ~/.local/state/omaremote/atvvoice.build)
   OMAREMOTE_NODE_WAIT_MS  how long `mic remote` waits for the remote's audio node (default 30000)
+  OMAREMOTE_NODE_POLL_MS  how often `mic remote` polls for that node (default 500)
 USAGE
 }
 

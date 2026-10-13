@@ -18,7 +18,7 @@ REV=0e8f6413dc4bad7a04e3c6b648945439d7a22fac
 
 # run <scenario-env...> : source the script in a subshell with stubs; prints the call log and the exit code
 run() {
-  unstamp                                  # each scenario starts from "nothing installed" unless it asks for a stamp
+  [[ -n ${KEEPSTATE:-} ]] || unstamp       # each scenario starts from "nothing installed" unless it asks for a stamp (or KEEPSTATE=1: a re-run)
   if [[ -n ${STAMPED:-} ]]; then stamp "${STAMP_TEXT:-}"; [[ -z ${NOBIN:-} ]] || rm -f "$T/bin/atvvoice"; fi
   (
     export OMAREMOTE_ATV_UNIT=$T/unit/atvvoice.service
@@ -33,6 +33,7 @@ run() {
     cargo() {
       printf 'cargo %s\n' "$*" >> "$LOG"
       [[ -n ${CARGO_FAILS:-} ]] && { echo "error: failed to fetch" >&2; return 101; }
+      if [[ $1 == install ]]; then mkdir -p "$(dirname "$OMAREMOTE_ATV_BIN")"; : > "$OMAREMOTE_ATV_BIN"; chmod +x "$OMAREMOTE_ATV_BIN"; fi   # a real install leaves the binary
       return 0
     }
     git() {
@@ -54,11 +55,13 @@ run() {
     }
     systemctl() {
       printf 'systemctl %s\n' "$*" >> "$LOG"
+      [[ " $* " == *" try-restart voxtype"* && -n ${VOX_RESTART_FAILS:-} ]] && return 1
       [[ " $* " == *" is-active "*" voxtype"* ]] && { [[ -n ${VOX_ACTIVE:-} ]]; return; }
       [[ " $* " == *" is-active "* ]] && { [[ -n ${WAS_ACTIVE:-} ]]; return; }
       return 0
     }
     command() { if [[ $1 == -v && $2 == cargo ]]; then [[ -z ${NO_CARGO:-} ]]; return; fi; if [[ $1 == -v && $2 == git ]]; then [[ -z ${NO_GIT:-} ]]; return; fi; builtin command "$@"; }
+    [[ -z ${ERREXIT:-} ]] || set -e         # ERREXIT=1: behave like the real script, where any failing command ends the run
     ( cmd_atvvoice ) > "$T/out.log" 2>&1   # die() exits: run it in its own subshell so the code is still recorded
     echo "exit=$?" >> "$LOG"
   )
@@ -179,6 +182,36 @@ rm -rf "$T/unit" "$T/alsa"
 out=$(cd "$REPO" && BT_ATV=$ADDR OMAREMOTE_ATV_PATCH=host/patches/atvvoice-reset-decoder.patch run)
 check "relative override: apply still succeeds" "yes" "$(has "$out" "exit=0")"
 check "relative override: reaches cargo"        "yes" "$(has "$out" "cargo install --locked --path")"
+
+# a failed cd keeps the path as given (it used to become /<basename>), so the die message names it
+check "failed cd keeps the relative patch path" "nodir/x.patch" "$(cd "$T" && OMAREMOTE_ATV_PATCH=nodir/x.patch bash -c 'source "$1"; echo "$ATV_PATCH"' x "$LIB")"
+out=$(cd "$T" && BT_ATV=$ADDR OMAREMOTE_ATV_PATCH=nodir/x.patch run)
+check "missing patch: dies naming the given path" "yes" "$(has "$(cat "$T/out.log")" "patch is missing: nodir/x.patch")"
+# invoked through a symlink elsewhere: SELF_DIR must follow it to the real host/patches
+mkdir -p "$T/elsewhere"; ln -sf "$REPO/host/omaremote-setup" "$T/elsewhere/omaremote-setup"
+check "symlinked \$0 still finds the patch"    "yes" "$(cd "$T" && bash -c 'source "$1"; [[ -f $ATV_PATCH ]] && echo yes || echo no' "$T/elsewhere/omaremote-setup" "$LIB")"
+
+# 9d. the run dies after the install (Important 1): the stamp must not claim the old process is current
+rm -rf "$T/unit" "$T/alsa"; : > "$T/alsa"      # $T/alsa is a file, so mkdir -p "$T/alsa" fails at the ALSA write
+out=$(BT_ATV=$ADDR WAS_ACTIVE=1 ERREXIT=1 run)
+check "interrupted: first run fails after build"  "yes" "$(has "$out" "cargo install")"
+check "interrupted: first run exits non-zero"     "no"  "$(has "$out" "exit=0")"
+check "interrupted: no stamp written"             "no"  "$([[ -e $T/state/atvvoice.build ]] && echo yes || echo no)"
+rm -f "$T/alsa"
+out=$(BT_ATV=$ADDR WAS_ACTIVE=1 KEEPSTATE=1 run)
+check "re-run after interruption: rebuilds"       "yes" "$(has "$out" "cargo install")"
+check "re-run after interruption: restarts atvvoice" "yes" "$(has "$out" "systemctl --user restart atvvoice")"
+check "re-run after interruption: stamp written"  "$STAMP_LINE" "$(cat "$T/state/atvvoice.build" 2>/dev/null)"
+out=$(BT_ATV=$ADDR WAS_ACTIVE=1 KEEPSTATE=1 run)
+check "then settled: no rebuild, no restart"      "no no" "$(has "$out" "cargo install") $(has "$out" "restart atvvoice")"
+
+# 9e. voxtype try-restart fails: a warning, not an abort; atvvoice is still restarted in the same run
+rm -rf "$T/unit" "$T/alsa"
+out=$(BT_ATV=$ADDR WAS_ACTIVE=1 VOX_ACTIVE=1 VOX_RESTART_FAILS=1 ERREXIT=1 run)
+check "voxtype restart fails: exits 0"            "yes" "$(has "$out" "exit=0")"
+check "voxtype restart fails: warns with the fix" "yes" "$(has "$(cat "$T/out.log")" "systemctl --user restart voxtype")"
+check "voxtype restart fails: atvvoice restarted" "yes" "$(has "$out" "systemctl --user restart atvvoice")"
+check "voxtype restart fails: stamp written"      "$STAMP_LINE" "$(cat "$T/state/atvvoice.build" 2>/dev/null)"
 
 # static: the patch ships in the repo (git apply --check needs the network-fetched source, so it cannot run here)
 check "patch file exists in the repo"          "yes" "$([[ -f $PATCH ]] && echo yes || echo no)"
