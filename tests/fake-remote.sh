@@ -604,6 +604,23 @@ s_system_toggle_ignores_remote_stream() {   # plan 4 §4.2b: in system mode the 
   no_line "$F/vox.log" "voxtype record cancel"
 }
 scenario system_toggle_ignores_remote_stream s_system_toggle_ignores_remote_stream
+s_remote_switch_stream_not_dropped() {   # the mirror: system -> remote through the real apply; a remote press right after must work
+  ready || return 1
+  use_system || return 1
+  printf 'default' > "$F/vox.config"                           # a system-mode host: Voxtype records the system default
+  ipc voice audioDevice - > /dev/null
+  wait_for '.audioDevice' default 3 || return 1
+  echo 1.5 > "$F/vox.get-delay"                       # keeps the post-commit audio.device probe in flight, so voxAudioDevice is still "default"
+  local id; id=$(ipc mic remote | jq -r .operationId)
+  [[ $(mic_wait "$id" 20) == succeeded ]] || { ipc micStatus "$id"; return 1; }
+  wait_for '.voiceMode' remote 5 || return 1
+  [[ $(jget '.remote.warning') == false ]] || { echo "    a stale probe value raised the warning"; return 1; }
+  echo streaming >> "$F/atv.signals"
+  wait_for '.voice.state' recording 3 || { echo "    the stream was dropped: $(jget '.voice.state'), warning $(jget '.remote.warning')"; return 1; }
+  [[ $(jget '.voice.owner') == dbus ]] || { echo "    owner is $(jget '.voice.owner')"; return 1; }
+  has_line "$F/vox.log" "voxtype record start"
+}
+scenario remote_switch_stream_not_dropped s_remote_switch_stream_not_dropped
 
 scenario mic_apply_second_request_is_busy s_mic_apply_second_request_is_busy
 scenario mic_apply_unknown_id_is_failure s_mic_apply_unknown_id_is_failure

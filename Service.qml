@@ -184,7 +184,9 @@ Item {
     if (kind === "commit") {                                        // §6.2: the internal voice.mic write reloads and aborts nothing,
       if (voice) {                                                  // but _write replaced the config object: refresh what reads voice.mic
         root.guarded("voice.setConfig", function() { voice.setConfig(configStore.config); return [] })
-        root.updateRemoteWarning()
+        // Only a switch to system can be settled here. After a switch to remote the old voxAudioDevice is stale,
+        // so a warning computed now would be false; the audioDeviceProbe callback recomputes it with the new value.
+        if (configStore.config.voice.mic === "system") root.updateRemoteWarning()
       }
       return
     }

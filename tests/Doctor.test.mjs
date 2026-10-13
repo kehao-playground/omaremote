@@ -194,6 +194,7 @@ test("remote voxtype-device: ALSA PCM list unavailable -> unknown", () => {
     const r = row(evaluate(f, config), "voxtype-device");
     assert.equal(r.status, "unknown");
     assert.equal(r.detail, "audio.device: G20S PRO; ALSA PCM list unavailable");
+    assert.equal(r.fix, "sudo pacman -S --needed alsa-utils");
   }
 });
 

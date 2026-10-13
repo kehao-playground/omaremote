@@ -3,7 +3,7 @@
 #   vox.state      idle|recording|transcribing (default idle)      vox.config   audio.device literal (absent = unset)
 #   vox.log        every invocation                                 vox.stopped  status reports "stopped"
 #   knobs: vox.start-fails (start exits 1), vox.no-confirm (start never records), vox.start-delay (seconds),
-#          vox.stop-fails, vox.stop-hangs (stop never leaves recording), vox.cancel-ignored, vox.set-fails,
+#          vox.get-delay (seconds, audio.device reads only), vox.stop-fails, vox.stop-hangs (stop never leaves recording), vox.cancel-ignored, vox.set-fails,
 #          vox.hang (daemon hung: one-shot status never answers, follow stream goes silent; cleared by a fake restart)
 set -u
 d=${OMAREMOTE_FAKE_DIR:?}
@@ -40,6 +40,7 @@ case "${1:-}" in
       get)
         case "${3:-}" in
           audio.device)
+            [[ -e $d/vox.get-delay ]] && sleep "$(cat "$d/vox.get-delay")"
             if [[ -e $d/vox.config ]]; then v=$(cat "$d/vox.config"); printf '{"file_value":"%s","key":"audio.device","value":"%s"}\n' "$v" "$v"
             else printf '{"file_value":null,"key":"audio.device","value":"default"}\n'; fi ;;
           output.mode) printf '{"file_value":"type","key":"output.mode","value":"type"}\n' ;;
