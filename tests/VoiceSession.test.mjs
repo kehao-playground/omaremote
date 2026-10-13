@@ -334,6 +334,36 @@ test("arbitration still runs in system mode: streaming, then recording at 100ms 
   assert.equal(vs.snapshot().owner, "keyboard");
 });
 
+// ---- system mode: the D-Bus stream is not a trigger (plan 4 §4.2b) ----
+function sysIdle(remoteOnDemand = false) {
+  const vs = createVoiceSession(cfg({ voice: { ...DEFAULT_CONFIG.voice, mic: "system", remoteOnDemand } }));
+  vs.setDbusSource({ sender: ":1.42", generation: 0 });
+  vs.status("idle", 0, { fresh: true });
+  return vs;
+}
+test("system mode without on-demand: a streaming transition starts nothing", () => {
+  const vs = sysIdle();
+  assert.equal(vs.snapshot().state, "idle");
+  const fx = vs.dbus(D("streaming"), 0);
+  assert.deepEqual(fx, []);
+  assert.equal(vs.snapshot().state, "idle");
+});
+test("system mode: streaming first, then the toggle press, starts an hid session the stream's end does not stop", () => {
+  const vs = sysIdle();
+  vs.dbus(D("streaming"), 0);
+  const fx = vs.hidToggle(10);
+  assert.ok(kinds(fx).includes("start"));
+  assert.equal(vs.snapshot().owner, "hid");
+  vs.cmdExit(cmdId(fx, "start"), 0, 20);
+  vs.status("recording", 100);
+  const end = vs.dbus(D("connected"), 110);
+  assert.deepEqual(kinds(end).filter((k) => k === "stop"), []);
+  assert.equal(vs.snapshot().state, "recording");
+  assert.equal(vs.snapshot().owner, "hid");
+  const stop = vs.hidToggle(500);
+  assert.ok(kinds(stop).includes("stop"));
+});
+
 // ---- direct D-Bus start, no on-demand (plan 4 §4.1) ----
 function directIdle() {
   const vs = createVoiceSession(cfg());                     // remoteOnDemand defaults to false

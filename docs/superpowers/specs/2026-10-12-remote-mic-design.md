@@ -152,6 +152,20 @@ The key is dropped even while `remoteWarning` is set. Voxtype's device is then t
 so an HID-started session would record silence. Status and the HUD already say that the remote mic
 is unavailable.
 
+### 4.2b The D-Bus stream in system mode
+
+The symmetric rule: with `voice.mic = "system"` and `voice.remoteOnDemand = false`, a D-Bus
+`streaming` transition starts nothing, neither the direct start of §4.1 nor arbitration, and does not
+adopt a keyboard session. The mic button belongs to `keys.mic.trigger`. The stream is still recorded
+as the remote's state, so later transitions stay correct. With `remoteOnDemand = true` in system mode
+arbitration is unchanged.
+
+Measured reason (hardware acceptance, 2026-10-13): the remote's hold-to-talk stream is reported over
+D-Bus about 10 ms before the HID press edge reaches keyd. With the direct start of §4.1 a dbus-owned
+session was already running when `hidToggle` arrived, so the toggle ignored the press, and the release
+(`AUDIO_STOP`, not streaming) stopped the dbus session: 0.1 s taps and no working toggle. Before Plan 4
+ATVVoice streamed only on demand, which never happens in system mode, so the D-Bus path was inert there.
+
 ### 4.3 End
 
 No change. When the owner is `dbus` and the remote leaves `streaming`, the existing re-read runs and
@@ -312,7 +326,8 @@ Hardware acceptance (user):
    session.
 2. Hold the remote's mic and speak for 3 s or more, then release. Text appears without a second press.
 3. The Status tab's "Last capture" row shows `atvvoice-xiaomi · remote`.
-4. After `omarchy-shell omaremote mic system`, the toggle behaves as before.
+4. After `omarchy-shell omaremote mic system`, the toggle behaves as before: one press of the remote's
+   mic button starts a session, the next press stops it, and the remote's own stream changes nothing (§4.2b).
 
 ## 7. Documentation changes
 

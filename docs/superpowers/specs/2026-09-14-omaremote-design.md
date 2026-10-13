@@ -169,7 +169,7 @@ and appends `require("hypr.omaremote")` to `hyprland.lua` once if absent (after 
 | mode | Voxtype `audio.device` | remote button (D-Bus) | keyboard F9 | prerequisites for `ready` |
 |---|---|---|---|---|
 | `remote` (default after setup) | ATVVoice `NodeName` | hold to talk; release ends the session | no audio unless the remote's button is held (no on-demand); use `system` mode for F9. **No microphone while the remote is disconnected** (Status shows "remote mic: disconnected") | Voxtype healthy + ATVVoice active + device == `NodeName` |
-| `system` | `"default"` | still starts a session (if ATVVoice is present), audio from the system mic — the remote acts as a PTT button | normal Voxtype behaviour | Voxtype healthy only; ATVVoice rows are informational |
+| `system` | `"default"` | the remote's D-Bus stream starts nothing without `--mic-on-demand` (remote-mic design §4.2b); the HID mic key (`keys.mic.trigger`, toggle by default) starts and stops the session, audio from the system mic | normal Voxtype behaviour | Voxtype healthy only; ATVVoice rows are informational |
 
 **Mic apply contract** (one implementation, in the plugin; the Voice tab and setup use it). `omarchy-shell` has a short IPC timeout, so `mic remote|system` returns immediately with JSON `{ "ok": true, "operationId": "…", "state": "queued" }`. `micStatus <operationId>` returns `queued|applying|verifying|rollingBack|succeeded|failed`, including an error and rollback result when applicable. Both clients inspect this payload, not just the shell exit code. Only one operation may be pending; a second request returns `busy`. Results remain available for the Service lifetime; an unknown ID or lost Service connection is a failure, never assumed success.
 

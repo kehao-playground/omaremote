@@ -1944,3 +1944,21 @@ now fetches the pinned rev with git, applies the patch, and runs `cargo install 
 Installed-build detection is a stamp file (`rev=<rev> patch=<sha256>`) plus the binary's presence, so the
 unpatched upstream install on the current host rebuilds once. `git` is a new prerequisite. The patch is a
 candidate for upstream; reporting it is the user's decision.
+
+## Task 12
+
+Hardware acceptance, fourth finding (2026-10-13). After `mic system`, two short presses of the remote's mic
+button did not toggle a session. Per press:
+
+```
+08:39:00.086 atvvoice AUDIO_START (reason=HoldToTalk)
+08:39:00.097 voxtype  Recording started (external trigger) ... Using audio device: default
+08:39:00.212 atvvoice AUDIO_STOP (reason=HttButtonRelease)
+08:39:00.223 voxtype  Recording stopped (0.1s)
+```
+
+The stream is reported over D-Bus about 10 ms before the HID press edge. Since Task 2 `dbus()` started a
+dbus-owned session at once in system mode too, so `hidToggle` met a non-idle session it did not own and
+ignored the press; the release stopped the dbus session. Fix (spec §4.2b): in system mode without
+`remoteOnDemand`, a `streaming` transition starts nothing. Tests: two unit tests and the integration
+scenario `system_toggle_ignores_remote_stream`.
