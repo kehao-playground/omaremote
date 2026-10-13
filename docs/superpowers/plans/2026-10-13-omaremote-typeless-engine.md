@@ -25,19 +25,31 @@ Typeless rows, an Engine row and a `typeless` subcommand.
 `docs/superpowers/specs/2026-09-14-omaremote-design.md` §3, §5 and §6.2, and
 `docs/superpowers/specs/2026-10-12-remote-mic-design.md` §5. Section numbers like §5.2 below refer to the Typeless spec.
 
-**Validation:** on 2026-10-13, every code block in this plan was applied in a scratch worktree, and
-`make check` passed there:
-- 354 unit tests;
+**Validation (revision 2, after review):** the plan was applied to a fresh worktree from its own text. The script
+used every whole-file block and every `Replace`/`with` pair as written, and every `Replace` matched exactly once.
+`make check` then passed:
+- 361 unit tests;
 - 21 keytap tests;
 - `runner-bound: ok`;
 - `setup-typeless: all ok`;
-- 68 integration scenarios.
+- 71 integration scenarios.
 
-That run found four defects, and they are fixed in the text below:
-- FileView sends no `saved` for a write issued inside `loadFailed` (Task 5);
+Each test added for the review was also run against the reverted defect, and it failed there.
+
+Defects found by running the plan:
+- FileView answers a `setText` issued inside its own `loadFailed` with no `saved` (Task 5);
 - jq's `// empty` turns `false` into nothing (Task 13);
-- `KEYTAP_SRC` resolved wrongly from a test (Task 13);
+- `KEYTAP_SRC` resolved wrongly when a test sources setup (Task 13);
 - the CommandRunner harness could not observe the hard bound until it gained `escalationSignal` (Task 8).
+
+Defects found by review:
+- a save-watchdog failure let a late `saved` be credited to the next write. Fixed with one writer FileView per seq
+  (Tasks 4–5).
+- startup seeded before going dormant, so a held button tapped under Voxtype. Fixed with `startTypeless`
+  (Tasks 9–10).
+- a refused second mic request released the first apply's `mic` holder (Task 10).
+- the session bound was not scheduled while the start tap was in flight (Task 6).
+- under Typeless, the Voxtype rows still decided the Doctor summary and the bar (Task 12).
 
 If a step's expected output differs from what you see, stop and report it. Do not adjust the test to match.
 
@@ -1062,14 +1074,17 @@ Claude-Session: https://claude.ai/code/session_014vQpzXWTp1gDwYSU3hmyiL"
   - `MAX_PENDING = 8` and `KEEP = 16`.
   - `createConfigWrites()` returns:
     - `request(text) → { ok: true, seq, effects } | { ok: false, reason, effects: [] }`;
-    - `saved() → effects`, `failed(reason) → effects`, `notify() → effects`;
+    - `saved(seq) → effects`, `failed(seq, reason) → effects`, `notify() → effects`. A report for a seq that is not
+      the one in flight resolves nothing: it is a late answer to a write already resolved, e.g. by the save watchdog.
+    - `inFlightSeq() → number` (0 when idle);
     - `diskRead(text, memText) → boolean` (true means adopt the disk text as an external change);
     - `busy() → boolean`;
     - `saves() → { "<seq>": "pending"|"saved"|"failed" }` and `errors() → { "<seq>": reason }`;
     - `lastCarrying(pred) → { seq, state } | null`.
   - Effects are `{ type: "setText", seq, text }` and `{ type: "reload" }`.
   - `hotkeyWritePlan(storedCanonical, requested, last) → { write: boolean, seq: number|null }`.
-  - Task 5 drives FileView with these.
+  - Task 5 drives FileView with these. It gives every write its own FileView object, so `saved`/`saveFailed` arrive
+    tagged with that write's seq and the attribution never depends on order.
 
 - [ ] **Step 1: Write the failing tests** `tests/ConfigWrites.test.mjs`
 
@@ -1082,19 +1097,45 @@ const T = (hotkey) => JSON.stringify({ voice: { typeless: { hotkey } } }) + "\n"
 const hk = (text) => JSON.parse(text).voice.typeless.hotkey;
 const sets = (fx) => fx.filter(e => e.type === "setText");
 const reloads = (fx) => fx.filter(e => e.type === "reload").length;
+// FileView reports a write's outcome on that write's own object, so a report always names its seq.
+const ok = (w) => w.saved(w.inFlightSeq());
 
-test("writes go out one at a time in FIFO order, and each signal resolves exactly the in-flight seq", () => {
+test("writes go out one at a time in FIFO order, and each report resolves exactly its own seq", () => {
   const w = createConfigWrites();
   const a = w.request("A"), b = w.request("B"), c = w.request("C");
   assert.deepEqual(sets(a.effects), [{ type: "setText", seq: a.seq, text: "A" }]);
   assert.deepEqual(b.effects, [], "B waits behind A");
   assert.deepEqual(c.effects, []);
-  assert.deepEqual(sets(w.saved()), [{ type: "setText", seq: b.seq, text: "B" }]);
+  assert.equal(w.inFlightSeq(), a.seq);
+  assert.deepEqual(sets(w.saved(a.seq)), [{ type: "setText", seq: b.seq, text: "B" }]);
   assert.deepEqual(w.saves(), { [a.seq]: "saved", [b.seq]: "pending", [c.seq]: "pending" });
-  assert.deepEqual(sets(w.saved()), [{ type: "setText", seq: c.seq, text: "C" }]);
-  assert.deepEqual(w.saved(), []);
+  assert.deepEqual(sets(w.saved(b.seq)), [{ type: "setText", seq: c.seq, text: "C" }]);
+  assert.deepEqual(w.saved(c.seq), []);
   assert.equal(w.busy(), false);
+  assert.equal(w.inFlightSeq(), 0);
   assert.deepEqual(w.saves(), { [a.seq]: "saved", [b.seq]: "saved", [c.seq]: "saved" });
+});
+
+test("a report for a seq that is not in flight resolves nothing", () => {
+  const w = createConfigWrites();
+  const a = w.request("A"), b = w.request("B");
+  assert.deepEqual(w.saved(b.seq), [], "B is queued, not in flight");
+  assert.deepEqual(w.saved(99), [], "never issued");
+  assert.equal(w.saves()[a.seq], "pending");
+  assert.equal(w.saves()[b.seq], "pending");
+  assert.equal(w.inFlightSeq(), a.seq);
+});
+
+test("A times out (watchdog) → B starts → A's late saved is ignored and B resolves only on its own report", () => {
+  const w = createConfigWrites();
+  const a = w.request("A"), b = w.request("B");
+  const fx = w.failed(a.seq, "no save confirmation");      // the watchdog's verdict
+  assert.deepEqual(sets(fx), [{ type: "setText", seq: b.seq, text: "B" }]);
+  assert.deepEqual(w.saved(a.seq), [], "A's late saved names A, which is no longer in flight");
+  assert.equal(w.saves()[a.seq], "failed");
+  assert.equal(w.saves()[b.seq], "pending", "B is not marked saved by A's signal");
+  assert.equal(reloads(w.saved(b.seq)), 1, "B saved; A's failure still forces the reconcile");
+  assert.equal(w.saves()[b.seq], "saved");
 });
 
 test("writes are never merged: B saved means B's own text reached disk, even though C later replaced it", () => {
@@ -1104,19 +1145,18 @@ test("writes are never merged: B saved means B's own text reached disk, even tho
   const a = w.request(T("RightAlt")); apply(a.effects);
   const b = w.request(T("RightAlt+RightShift"));        // B carries X
   const c = w.request(T("RightCtrl+Space"));            // C carries Y
-  apply(w.saved());                                     // A done, B written
+  apply(w.saved(a.seq));                                // A done, B written
   assert.equal(hk(disk), "RightAlt+RightShift", "B's own text was what reached disk");
-  apply(w.saved());                                     // B done, C written
+  apply(w.saved(b.seq));                                // B done, C written
   assert.equal(w.saves()[b.seq], "saved");
-  w.saved();
+  w.saved(c.seq);
   assert.notEqual(hk(disk), "RightAlt+RightShift", "setup's disk re-read sees Y and reports 'changed again'");
-  assert.equal(c.ok, true);
 });
 
 test("a failure marks exactly its own seq and the next write still goes out", () => {
   const w = createConfigWrites();
   const a = w.request("A"), b = w.request("B");
-  const fx = w.failed("EACCES");
+  const fx = w.failed(a.seq, "EACCES");
   assert.deepEqual(sets(fx), [{ type: "setText", seq: b.seq, text: "B" }]);
   assert.equal(w.saves()[a.seq], "failed");
   assert.equal(w.saves()[b.seq], "pending");
@@ -1129,15 +1169,15 @@ test("at most 8 writes may be pending, the in-flight one included; a ninth fails
   for (let i = 0; i < MAX_PENDING; i++) { const r = w.request("t" + i); assert.equal(r.ok, true); seqs.push(r.seq); }
   const ninth = w.request("t8");
   assert.deepEqual(ninth, { ok: false, reason: "too many pending config writes", effects: [] });
-  w.saved();
+  ok(w);
   assert.equal(w.request("t9").seq, seqs[seqs.length - 1] + 1);
 });
 
 test("a late watcher notification after our own writes re-reads, finds memory, and adopts nothing", () => {
   const w = createConfigWrites();
-  w.request("A");
+  const a = w.request("A");
   assert.deepEqual(w.notify(), [], "while busy a notification only marks dirty");
-  assert.equal(reloads(w.saved()), 1, "the reconcile runs once the queue drains");
+  assert.equal(reloads(w.saved(a.seq)), 1, "the reconcile runs once the queue drains");
   assert.equal(w.diskRead("A", "A"), false);
   assert.equal(reloads(w.notify()), 1, "a notification while idle re-reads at once");
   assert.equal(w.diskRead("A", "A"), false, "the disk holds our latest text: no external change");
@@ -1146,8 +1186,8 @@ test("a late watcher notification after our own writes re-reads, finds memory, a
 test("save X, save Y, then an external edit back to X: the re-read adopts X (no text-history rule)", () => {
   const w = createConfigWrites();
   const X = T("RightCtrl+Space"), Y = T("RightAlt+RightShift");
-  w.request(X); w.saved();
-  w.request(Y); w.saved();
+  w.request(X); ok(w);
+  w.request(Y); ok(w);
   assert.equal(reloads(w.notify()), 1);
   assert.equal(w.diskRead(X, Y), true, "X differs from memory (Y): adopt it");
 });
@@ -1157,30 +1197,30 @@ test("notifications during a write only mark dirty; exactly one reconcile follow
   w.request("A"); w.request("B");
   assert.deepEqual(w.notify(), []);
   assert.deepEqual(w.notify(), []);
-  const mid = w.saved();
+  const mid = ok(w);
   assert.equal(reloads(mid), 0, "B is still to go: no re-read yet");
   assert.equal(sets(mid).length, 1);
-  assert.equal(reloads(w.saved()), 1);
-  assert.equal(reloads(w.saved()), 0, "a stray saved with nothing in flight does nothing");
+  assert.equal(reloads(ok(w)), 1);
+  assert.equal(reloads(w.saved(1)), 0, "a stray report with nothing in flight does nothing");
 });
 
 test("a disk read that lands while a write is pending is not adopted, and forces a reconcile after the drain", () => {
   const w = createConfigWrites();
   w.request("A");
   assert.equal(w.diskRead("OLD", "A"), false);
-  assert.equal(reloads(w.saved()), 1);
+  assert.equal(reloads(ok(w)), 1);
 });
 
 test("a failed last write triggers a reconcile, which adopts the disk text", () => {
   const w = createConfigWrites();
-  w.request("A");
-  assert.equal(reloads(w.failed("ENOSPC")), 1);
+  const a = w.request("A");
+  assert.equal(reloads(w.failed(a.seq, "ENOSPC")), 1);
   assert.equal(w.diskRead("OLD", "A"), true);
 });
 
 test("saves() keeps the last 16 outcomes", () => {
   const w = createConfigWrites();
-  for (let i = 0; i < 20; i++) { w.request("t" + i); w.saved(); }
+  for (let i = 0; i < 20; i++) { w.request("t" + i); ok(w); }
   const keys = Object.keys(w.saves()).map(Number);
   assert.equal(keys.length, KEEP);
   assert.equal(Math.min(...keys), 5);
@@ -1188,7 +1228,7 @@ test("saves() keeps the last 16 outcomes", () => {
 
 test("lastCarrying finds the newest write whose text satisfies the predicate", () => {
   const w = createConfigWrites();
-  w.request(T("RightAlt")); w.saved();
+  w.request(T("RightAlt")); ok(w);
   w.request(T("RightCtrl+Space"));
   assert.deepEqual(w.lastCarrying(t => hk(t) === "RightCtrl+Space"), { seq: 2, state: "pending" });
   assert.deepEqual(w.lastCarrying(t => hk(t) === "RightAlt"), { seq: 1, state: "saved" });
@@ -1214,9 +1254,9 @@ Expected: FAIL with `Cannot find module '…/lib/ConfigWrites.mjs'`.
 
 ```js
 // Typeless spec §4.3: serialized, never-merged config writes, and watcher notifications that only trigger a re-read.
-// Pure: ConfigStore.qml feeds FileView's saved / saveFailed / fileChanged / loaded in and performs the effects
-// ({type:"setText"}, {type:"reload"}). FileView's signals carry no identity, so exactly one setText may be in flight
-// and each signal resolves it.
+// Pure: ConfigStore.qml performs the effects ({type:"setText", seq, text}, {type:"reload"}) and reports each write's
+// outcome by seq; one FileView per write gives the signals that identity. Exactly one write is in flight. A report for
+// a seq that is not in flight is a late answer to a write already resolved (e.g. failed by the save watchdog).
 export const MAX_PENDING = 8;     // in flight + queued
 export const KEEP = 16;           // outcomes published as status.configWrites
 
@@ -1233,8 +1273,8 @@ export function createConfigWrites() {
     inFlight = true;
     return [{ type: "setText", seq: queue[0].seq, text: queue[0].text }];
   }
-  function resolve(state, reason) {
-    if (!inFlight) return [];                     // no write of ours is in flight: the signal resolves nothing
+  function resolve(s, state, reason) {
+    if (!inFlight || queue[0].seq !== s) return [];   // not the write in flight: a late answer resolves nothing
     const w = queue.shift();
     inFlight = false;
     for (const e of log) if (e.seq === w.seq) { e.state = state; e.reason = reason; }
@@ -1253,8 +1293,9 @@ export function createConfigWrites() {
       while (log.length > KEEP) log.shift();
       return { ok: true, seq: s, effects: startNext() };
     },
-    saved() { return resolve("saved", ""); },
-    failed(reason) { return resolve("failed", String(reason)); },
+    saved(s) { return resolve(s, "saved", ""); },
+    failed(s, reason) { return resolve(s, "failed", String(reason)); },
+    inFlightSeq() { return inFlight ? queue[0].seq : 0; },
     notify() {
       if (busy()) { dirty = true; return []; }
       return [{ type: "reload" }];
@@ -1287,7 +1328,7 @@ export function hotkeyWritePlan(storedCanonical, requested, last) {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `node --test tests/ConfigWrites.test.mjs`
-Expected: PASS, 12 tests.
+Expected: PASS, 14 tests.
 
 - [ ] **Step 5: Add the module to the QML load check.** In `tests/harness/ModuleLoad.qml`, add the import
   `import "../../lib/ConfigWrites.mjs" as ConfigWrites` and this element to `checks`:
@@ -1394,8 +1435,9 @@ that the method does not exist.
 ```qml
 // Spec §3 plugin-side files (config.json created with defaults on first run), §4.2 (unknown fields preserved),
 // §6.2 (hot reload; the internal voice.mic commit reloads nothing), §8 (corrupt config → defaults, never overwritten).
-// Typeless spec §4.3: writes are a serialized, never-merged FIFO (lib/ConfigWrites.mjs), so each saved/saveFailed
-// resolves one seq; a watcher event only triggers a re-read of the current disk text once the queue is idle.
+// Typeless spec §4.3: writes are a serialized, never-merged FIFO (lib/ConfigWrites.mjs). Each write gets its own
+// FileView object, so its saved/saveFailed names its seq and can never be credited to another write. The reading
+// FileView only watches; a change notification only triggers a re-read of the current disk text once the queue is idle.
 import QtQuick
 import Quickshell.Io
 import "../lib/ConfigFile.mjs" as ConfigFile
@@ -1421,13 +1463,32 @@ Item {
     id: file
     path: root.ready ? root.path : ""
     watchChanges: true
-    atomicWrites: true
     printErrors: false
     onLoaded: root._ingest(file.text(), false)
     onLoadFailed: function(error) { root._ingest("", error === FileViewError.FileNotFound) }
     onFileChanged: root._run(root.writes.notify())
-    onSaved: { saveWatchdog.stop(); root._settle(root.writes.saved()) }
-    onSaveFailed: function(error) { saveWatchdog.stop(); root.saveFailed(String(error)); root._settle(root.writes.failed(String(error))) }
+  }
+  // One FileView per write (measured with Quickshell 0.3.1, 2026-10-13: each instance answers its own setText with
+  // saved, a file that does not exist yet included). blockAllReads: a writer never loads the file.
+  Component {
+    id: writerComponent
+    FileView {
+      property int seq: 0
+      atomicWrites: true
+      printErrors: false
+      blockAllReads: true
+      onSaved: { root._answer(seq, true, ""); destroy() }
+      onSaveFailed: function(error) { root._answer(seq, false, String(error)); destroy() }
+    }
+  }
+  // Every write must resolve, or the FIFO stalls and external edits are never adopted again. A write unanswered for
+  // 3 s is counted as failed; if its writer answers later, that answer names a seq no longer in flight and is ignored.
+  Timer {
+    id: saveWatchdog; interval: 3000; repeat: false
+    onTriggered: {
+      var s = root.writes.inFlightSeq()
+      if (s) { root.saveFailed("no save confirmation from FileView"); root._settle(root.writes.failed(s, "no save confirmation")) }
+    }
   }
   // §3/§8: an in-place external edit (`cat new > config.json`) truncates then writes; the watcher can fire and be read
   // in that gap, landing an empty read that is NOT a real "file missing". Only the very first load, or a genuine
@@ -1437,16 +1498,19 @@ Item {
 
   function _run(effects) {
     for (var i = 0; i < effects.length; i++) {
-      if (effects[i].type === "setText") { saveWatchdog.restart(); file.setText(effects[i].text) }
-      else if (effects[i].type === "reload") file.reload()
+      var e = effects[i]
+      if (e.type === "setText") {
+        var w = writerComponent.createObject(root, { seq: e.seq, path: root.path })
+        if (!w) { root._answer(e.seq, false, "could not create a writer"); continue }
+        saveWatchdog.restart()
+        w.setText(e.text)
+      } else if (e.type === "reload") file.reload()
     }
   }
-  // Every write must resolve, or the FIFO stalls and external edits are never adopted again. FileView answers each
-  // setText with saved or saveFailed within milliseconds; one that has not answered in 3 s is counted as failed,
-  // and the reconcile that follows a failure re-reads the disk.
-  Timer {
-    id: saveWatchdog; interval: 3000; repeat: false
-    onTriggered: if (root.writes.busy()) { root.saveFailed("no save confirmation from FileView"); root._settle(root.writes.failed("no save confirmation")) }
+  function _answer(seq, ok, reason) {
+    if (seq === root.writes.inFlightSeq()) saveWatchdog.stop()
+    if (!ok) root.saveFailed(reason)
+    root._settle(ok ? root.writes.saved(seq) : root.writes.failed(seq, reason))
   }
   function _settle(effects) {
     root.saves = root.writes.saves()
@@ -1468,8 +1532,7 @@ Item {
     var first = !root.loaded
     root.loaded = true
     root._memText = text
-    // Deferred: a setText issued inside FileView's own loadFailed handler is written but never answered with
-    // `saved` (measured with Quickshell 0.3.1, 2026-10-13), which would leave that seq in flight forever.
+    // Deferred so the first write is not issued from inside the reading FileView's own loadFailed handler.
     if (r.missing && createIfMissing) Qt.callLater(function() { root._write(r.raw) })
     root.changed(first ? "load" : "external")
   }
@@ -1506,13 +1569,14 @@ Item {
 }
 ```
 
-Two details in this file come from measuring Quickshell 0.3.1 on 2026-10-13. Keep both, or the integration
-scenarios fail:
-- **The first-run create is deferred with `Qt.callLater`.** A `setText` issued inside FileView's own `loadFailed`
-  handler is written, but it is never answered with `saved`. Without the deferral, seq 1 stays in flight forever, every
-  later write queues behind it, and every external edit is ignored.
-- **`saveWatchdog`.** Every write must resolve, or the FIFO stalls. A write that has had no answer for 3 s is counted
-  as failed, and the reconcile that follows re-reads the disk.
+Three details in this file come from measuring Quickshell 0.3.1 on 2026-10-13 and from review. Keep all three:
+- **One writer FileView per write.** FileView's `saved`/`saveFailed` carry no identity. With a single shared
+  FileView, a watchdog that fails write A and starts B would let A's late `saved` mark B saved. Each writer object
+  carries its seq, and `ConfigWrites` ignores a report for a seq that is not in flight.
+- **The first-run create is deferred with `Qt.callLater`.** A `setText` issued from inside a FileView's own
+  `loadFailed` handler was written but never answered with `saved`.
+- **`saveWatchdog`.** Every write must resolve, or the FIFO stalls. A write unanswered for 3 s counts as failed, and
+  the reconcile that follows re-reads the disk.
 
 - [ ] **Step 4: Service: imports, config kinds, IPC and status.** In `Service.qml`:
 
@@ -1769,6 +1833,20 @@ test("the maxSessionSec deadline stops with HUD, the held button does not restar
   assert.equal(r.taps().length, 2);
   r.off(6000);
   assert.deepEqual(taps(r.on(6100)).map(t => t.kind), ["start"]);
+});
+
+test("a maxSessionSec shorter than the start reply: the bound fires while the start is in flight, and the late sent stops", () => {
+  const r = rig(cfg({ maxSessionSec: 1 }));
+  r.on(0);                                       // start 1 in flight
+  assert.equal(r.s.nextDeadline(), 1000, "scheduled before the start result arrives");
+  const fx = r.advance(1000);
+  assert.deepEqual(huds(fx), ["max session reached"]);
+  assert.deepEqual(taps(fx), [], "single flight: nothing more while the start is outstanding");
+  assert.equal(r.snap().needRelease, true);
+  assert.equal(r.s.nextDeadline(), null);
+  assert.deepEqual(taps(r.res(1, "sent", 1500)).map(t => t.kind), ["stop"], "the late success reconciles into a stop");
+  r.res(2, "sent", 1520);
+  assert.equal(r.taps().length, 2, "the still-held button does not restart");
 });
 
 test("streaming off during start, then start unknown → unsynced, and no stop is ever emitted", () => {
@@ -2249,16 +2327,19 @@ export function createTypelessSession(config) {
     return finish(out, now);
   }
 
+  // The bound runs from the start tap, so it also applies while that tap is in flight: arming then means a late
+  // `sent` reconciles straight into a stop.
+  const sessionLive = () => typeless === "on" || (outstanding !== null && outstanding.kind === "start");
   function advance(now) {
     const out = [];
-    if (typeless === "on" && deadline !== null && now >= deadline) { deadline = null; hud(out, HUD.maxSession); arm(); }
+    if (sessionLive() && deadline !== null && now >= deadline) { deadline = null; hud(out, HUD.maxSession); arm(); }
     return finish(out, now);
   }
 
   return {
     streaming: onStreaming, sourceLost, hidPress, reset, quiesce, resume, forceUnsynced, tapResult, advance,
     setConfig(c, now) { cfg = c; return finish([], now); },
-    nextDeadline() { return typeless === "on" ? deadline : null; },   // never a past deadline nothing will act on
+    nextDeadline() { return sessionLive() ? deadline : null; },        // never a past deadline nothing will act on
     settled,
     exitStop() { return mode() === "remote" && typeless === "on" && !outstanding ? chord : null; },
     config() { return cfg; },
@@ -2270,7 +2351,7 @@ export function createTypelessSession(config) {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `node --test tests/TypelessSession.test.mjs`
-Expected: PASS, 38 tests.
+Expected: PASS, 39 tests.
 
 - [ ] **Step 5: Mutation check.** The negative tests (no tap, no restart) must be able to fail. Make each change
   below, run the file, see at least one named test fail, and revert:
@@ -2754,6 +2835,8 @@ Claude-Session: https://claude.ai/code/session_014vQpzXWTp1gDwYSU3hmyiL"
     `micUp`, `reset`.
   - `tapOutcome(code) → { outcome, reason }`.
   - `reloadNeedsDrain(heldCfg, nextCfg) → bool`.
+  - `startTypeless(session, engine, seedState, now) → effects`: the shell-start order, dormant first and seeded
+    second. Task 10 calls it from `startModules`.
   - `micVoiceView(voice, typeless, engineOf) → { snapshot(), gate }`.
   - `createEngineSwitch()` returns:
     - `busy()`;
@@ -2778,7 +2861,7 @@ Claude-Session: https://claude.ai/code/session_014vQpzXWTp1gDwYSU3hmyiL"
 ```js
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { routeTargets, tapOutcome, reloadNeedsDrain, micVoiceView, createEngineSwitch, DRAIN_MS } from "../lib/EngineSwitch.mjs";
+import { routeTargets, tapOutcome, reloadNeedsDrain, micVoiceView, createEngineSwitch, startTypeless, DRAIN_MS } from "../lib/EngineSwitch.mjs";
 import { createTypelessSession } from "../lib/TypelessSession.mjs";
 import { createVoiceSession } from "../lib/VoiceSession.mjs";
 import { createMicApply } from "../lib/MicApply.mjs";
@@ -2970,6 +3053,26 @@ test("a switch made while idle commits at once, in the same call", () => {
   assert.deepEqual(h.typeless.snapshot().quiesced, []);
 });
 
+test("review: shell start under Voxtype with the button already streaming sends no tap at all", () => {
+  const s = createTypelessSession(cfg());
+  const fx = startTypeless(s, "voxtype", "streaming", 0);
+  assert.equal(fx.filter(e => e.type === "tap").length, 0);
+  assert.equal(s.snapshot().trusted, true, "the State was taken in");
+  assert.equal(s.snapshot().needRelease, true, "the hold that began before the shell never starts Typeless later");
+  assert.deepEqual(s.snapshot().quiesced, ["dormant"]);
+});
+
+test("shell start: under Typeless a streaming seed starts (discriminating); a released seed arms nothing; no source seeds nothing", () => {
+  const t = createTypelessSession(cfg({ engine: "typeless" }));
+  assert.deepEqual(startTypeless(t, "typeless", "streaming", 0).filter(e => e.type === "tap").map(e => e.kind), ["start"]);
+  const r = createTypelessSession(cfg());
+  startTypeless(r, "voxtype", "connected", 0);
+  assert.equal(r.snapshot().needRelease, false);
+  const n = createTypelessSession(cfg());
+  startTypeless(n, "voxtype", null, 0);
+  assert.equal(n.snapshot().trusted, false);
+});
+
 test("micVoiceView: under Typeless, MicApply sees a busy session until TypelessSession is settled", () => {
   const voice = createVoiceSession(cfg());
   const typeless = createTypelessSession(cfg({ engine: "typeless" }));
@@ -3052,6 +3155,16 @@ export function reloadNeedsDrain(held, next) {
       || held.voice.typeless.hotkey !== next.voice.typeless.hotkey;
 }
 
+// §6.1 shell start: dormant first, seeded second. Seeding a streaming State into a session that is not yet quiesced
+// would tap at once, even under Voxtype. `seedState` is the current source's last State, or null without a source.
+export function startTypeless(session, engine, seedState, now) {
+  const out = [];
+  if (engine !== "typeless") out.push(...session.quiesce(now, "dormant", ""));
+  if (seedState === "streaming" || seedState === "connected" || seedState === "disconnected")
+    out.push(...session.streaming(seedState === "streaming", now));
+  return out;
+}
+
 // §6.2 mic apply under Typeless: MicApply waits for an idle voice session; under Typeless it must also wait until
 // TypelessSession is settled. This view is what MicApply is given instead of VoiceSession itself.
 export function micVoiceView(voice, typeless, engineOf) {
@@ -3107,7 +3220,8 @@ export function createEngineSwitch() {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `node --test tests/EngineSwitch.test.mjs`
-Expected: PASS, 11 tests.
+Expected: PASS, 13 tests. Mutation check: swap the two statements in `startTypeless`, so it seeds first and goes
+dormant second. "review: shell start under Voxtype…" must fail. Revert afterwards.
 
 Run: `node --test "tests/*.test.mjs"`
 Expected: PASS.
@@ -3182,6 +3296,26 @@ and add to `reset_fakes()`, after the line that starts `echo idle > "$F/vox.stat
 
 ```bash
   : > "$F/keytap.log"
+```
+
+Give `scenario` an optional third argument, a function run after `reset_fakes` and before the harness starts, for
+state that must exist at shell start. Replace its first three lines:
+
+```bash
+scenario() {   # scenario <name> <function>
+  local name=$1 fn=$2
+  [[ -n $ONLY && $ONLY != "$name" ]] && return 0
+  reset_fakes
+```
+
+with:
+
+```bash
+scenario() {   # scenario <name> <function> [prestart-function]
+  local name=$1 fn=$2 pre=${3:-}
+  [[ -n $ONLY && $ONLY != "$name" ]] && return 0
+  reset_fakes
+  [[ -n $pre ]] && "$pre"
 ```
 
 - [ ] **Step 2: Write the failing scenarios** (append to `tests/fake-remote.sh`, before `# ---- summary`)
@@ -3298,6 +3432,37 @@ s_typeless_reset_while_holding() {           # §9 hardware item 4, without hard
   [[ $(taps_n) == 2 ]] || { echo "    the still-held button restarted Typeless"; return 1; }
 }
 scenario typeless_reset_while_holding s_typeless_reset_while_holding
+
+# Review: a shell started while the button streams. The startup order itself is pinned by EngineSwitch.test.mjs
+# (startTypeless); these two check the wired result end to end, whichever of State and config arrives first.
+pre_streaming() { echo streaming > "$F/atv.state"; }
+pre_streaming_typeless() { pre_streaming; mkdir -p "$XDG_CONFIG_HOME/omaremote"; echo '{"voice":{"engine":"typeless"}}' > "$XDG_CONFIG_HOME/omaremote/config.json"; }
+s_startup_streaming_under_voxtype_no_tap() {
+  wait_for '.config' true 5 || return 1
+  wait_for '.typeless.state.streaming' true 3 || return 1          # the State was seen...
+  sleep 0.5
+  [[ $(taps_n) == 0 ]] || { echo "    startup tapped under Voxtype:"; sed 's/^/      /' "$F/keytap.log"; return 1; }   # ...and nothing tapped
+}
+scenario startup_streaming_under_voxtype_no_tap s_startup_streaming_under_voxtype_no_tap pre_streaming
+s_startup_streaming_under_typeless_taps() {      # discriminating: the same start under Typeless does tap
+  wait_for '.engine' typeless 5 || return 1
+  wait_taps 1
+}
+scenario startup_streaming_under_typeless_taps s_startup_streaming_under_typeless_taps pre_streaming_typeless
+
+# Review: a refused second mic request must not release the "mic" holder of the apply still running.
+s_typeless_second_mic_request_keeps_first_paused() {
+  ready || return 1
+  use_typeless || return 1
+  echo 1 > "$F/vox.get-delay"                                       # keep the first apply pending for a while
+  [[ $(ipc mic system | jq -r '.ok') == true ]] || return 1
+  wait_for '.typeless.state.quiesced | index("mic") != null' true 3 || return 1
+  [[ $(ipc mic system | jq -r '.reason') == busy ]] || { echo "    the second request was not refused"; return 1; }
+  [[ $(jget '.typeless.state.quiesced | index("mic") != null') == true ]] || { echo "    the first apply lost its pause"; return 1; }
+  wait_for '.mic.pending' false 20 || return 1
+  wait_for '.typeless.state.quiesced | length' 0 3
+}
+scenario typeless_second_mic_request_keeps_first_paused s_typeless_second_mic_request_keeps_first_paused
 ```
 
 - [ ] **Step 3: Run them to verify they fail**
@@ -3544,12 +3709,12 @@ with:
 
 ```qml
     typeless = TypelessSession.createTypelessSession(configStore.config)
-    // Seed it with the current source's last State, read before the session existed (Typeless §5.2: trusted), then
-    // make it dormant under Voxtype. Seeding first means a released button arms nothing.
+    // Typeless §6.1: dormant first, then seeded with the current source's last State (read before the session
+    // existed). startTypeless owns that order; tests/EngineSwitch.test.mjs pins it.
     root._typelessSender = atv.sender || ""; root._typelessGeneration = atv.generation
-    if (atv.sender && ["streaming", "connected", "disconnected"].indexOf(root.remoteState) >= 0)
-      root.typelessCall("streaming", function(n) { return typeless.streaming(root.remoteState === "streaming", n) })
-    root.applyDormancy()
+    root.dispatch(root.guarded("typeless.start", function() {
+      return EngineSwitch.startTypeless(typeless, configStore.config.voice.engine, atv.sender ? root.remoteState : null, now)
+    }), "typeless")
     root.typelessSnap = typeless.snapshot()
     mic = MicApply.createMicApply({ voice: EngineSwitch.micVoiceView(voice, typeless, function() { return root.engineName }) })
 ```
@@ -3709,7 +3874,8 @@ with:
 
 ```qml
     if (!mic) return JSON.stringify({ ok: false, reason: "not-ready" })
-    if (root.switcher.busy()) return JSON.stringify({ ok: false, reason: "busy" })
+    // Refused before any quiesce: a second request must never touch the "mic" holder the pending apply owns.
+    if (root.switcher.busy() || mic.pending()) return JSON.stringify({ ok: false, reason: "busy" })
     var now = Date.now()
     // Typeless §6.2: under Typeless the apply first quiesces TypelessSession; MicApply (through micVoiceView) waits
     // until it is settled. The "done" effect resumes it after the terminal outcome.
@@ -3876,11 +4042,11 @@ with:
 
 - [ ] **Step 6: Run the new scenarios, then everything**
 
-Run each: `bash tests/fake-remote.sh <name>` for the eight scenarios added in Step 2.
+Run each: `bash tests/fake-remote.sh <name>` for the eleven scenarios added in Step 2.
 Expected: `ok` for each.
 
 Run: `bash tests/fake-remote.sh`
-Expected: `integration: 67 passed, 0 failed`. That is the 56 existing scenarios, plus 3 from Task 5 and 8 from this
+Expected: `integration: 70 passed, 0 failed`. That is the 56 existing scenarios, plus 3 from Task 5 and 11 from this
 task. The voice scenarios exercise the refactored `onAtvState`, `onSource` and reset paths under Voxtype.
 
 Run: `make check; echo MAKE_CHECK_EXIT=$?`
@@ -3929,7 +4095,6 @@ Claude-Session: https://claude.ai/code/session_014vQpzXWTp1gDwYSU3hmyiL"
   `../lib/Presentation.mjs` with `typelessView, engineStatusLine, TYPELESS_FLASH`, then append:
 
 ```js
-
 // ---- Typeless engine (Typeless spec §6.3) ----
 test("typelessView: recording while on or a start is in flight, a warning while unsynced, idle otherwise and in system mode", () => {
   const snap = (o) => Object.assign({ mode: "remote", typeless: "off", outstanding: null }, o);
@@ -4354,7 +4519,7 @@ Expected: `module-load: ok` and `LINT_EXIT=0`. qmllint prints warnings about `qs
 before this task too.
 
 Run: `bash tests/fake-remote.sh`
-Expected: `integration: 67 passed, 0 failed`. The HUD and status strings the scenarios wait on are unchanged.
+Expected: `integration: 70 passed, 0 failed`. The HUD and status strings the scenarios wait on are unchanged.
 
 - [ ] **Step 5: Commit**
 
@@ -4373,15 +4538,18 @@ Claude-Session: https://claude.ai/code/session_014vQpzXWTp1gDwYSU3hmyiL"
 **Files:**
 - Modify: `lib/Doctor.mjs`:
   - five rows;
-  - the informational `voxtype-device` row under Typeless;
-  - `summarize`.
+  - every Voxtype row (`voxtype-version`, `-status`, `-output`, `-device`, `last-capture`) informational under
+    Typeless, and `voxtype` dropped from the required tools there;
+  - `summarize`: under Typeless only `config-valid`, the keytap/uinput rows and the ATVVoice rows count.
+- Modify: `lib/Presentation.mjs` (`glyphLook`), `BarWidget.qml`, `Service.qml` (`unconfigured`): under Typeless, a
+  VoiceSession `unconfigured` (Voxtype not responding) does not mark the plugin unconfigured.
 - Modify: `host/omaremote-facts`: the `typeless` object and `atvvoice.nodeDescription`.
 - Create: `tests/fixtures/typeless-settings.json`
 - Modify: `tests/fake-remote.sh`:
   - copy the fixture;
   - export `OMAREMOTE_TYPELESS_SETTINGS`;
   - one scenario.
-- Test: `tests/Doctor.test.mjs` (append)
+- Test: `tests/Doctor.test.mjs`, `tests/Presentation.test.mjs` (append)
 
 **Interfaces:**
 - Consumes: `canonicalChord` (Task 1).
@@ -4396,7 +4564,6 @@ Claude-Session: https://claude.ai/code/session_014vQpzXWTp1gDwYSU3hmyiL"
   `summarize`, `normalizeConfig` and `DEFAULT_CONFIG` already exist there)
 
 ```js
-
 // ---- Typeless engine (Typeless spec §8) ----
 const tlConfig = (voice = {}) => normalizeConfig({ ...DEFAULT_CONFIG, keys: { ...DEFAULT_CONFIG.keys, mic: { supported: false } },
                                                    voice: { ...DEFAULT_CONFIG.voice, engine: "typeless", ...voice } }).config;
@@ -4469,12 +4636,42 @@ test("under Typeless the remote-mode Voxtype device row is informational; the AT
   assert.equal(row(evaluate(f, tlConfig()), "atvvoice-service").status, "fail");
   assert.equal(row(evaluate(f, config), "voxtype-device").status, "fail", "under Voxtype the same facts still fail");
 });
+
+test("review: Typeless prerequisites all pass while Voxtype is unusable → Voxtype rows informational, summary ready", () => {
+  const broken = () => {
+    const f = tlFacts();
+    f.tools.voxtype = false;
+    f.voxtype = { version: null, statusClass: "stopped", outputMode: "clipboard", audioDevice: "default" };
+    f.lastCapture = { node: "elsewhere", at: 1000 };
+    return f;
+  };
+  const rows = evaluate(broken(), tlConfig());
+  for (const id of ["voxtype-version", "voxtype-status", "voxtype-output", "voxtype-device", "last-capture"]) assert.equal(row(rows, id).status, "info", id);
+  assert.equal(row(rows, "tools").status, "pass", "voxtype is not a required tool under Typeless");
+  assert.equal(summarize(rows, tlConfig()), "ready");
+  const sysRows = evaluate(broken(), tlConfig({ mic: "system" }));
+  assert.equal(summarize(sysRows, tlConfig({ mic: "system" })), "ready");
+  const voxCfg = normalizeConfig({ ...DEFAULT_CONFIG, keys: { ...DEFAULT_CONFIG.keys, mic: { supported: false } } }).config;
+  assert.equal(summarize(evaluate(broken(), voxCfg), voxCfg), "unconfigured", "discriminating: the same host under Voxtype is unconfigured");
+});
+```
+
+Also append to `tests/Presentation.test.mjs`:
+
+```js
+test("review: under Typeless a Voxtype that is not responding does not make the bar unconfigured", () => {
+  assert.equal(glyphLook({ voiceState: "unconfigured", engine: "typeless" }), "ready");
+  assert.equal(glyphLook({ voiceState: "unconfigured", engine: "voxtype" }), "unconfigured");
+  assert.equal(glyphLook({ voiceState: "unconfigured", engine: "typeless", unconfigured: true }), "unconfigured", "a real Typeless problem still shows");
+  assert.equal(glyphLook({ voiceState: "recording", engine: "typeless" }), "recording", "an F9 dictation still shows");
+});
 ```
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `node --test tests/Doctor.test.mjs`
-Expected: FAIL. No `typeless-*` rows exist, and `voxtype-device` is `fail` under Typeless.
+Run: `node --test tests/Doctor.test.mjs tests/Presentation.test.mjs`
+Expected: FAIL. No `typeless-*` rows exist, the Voxtype rows are not `info` under Typeless, and `glyphLook` still
+reports `unconfigured`.
 
 - [ ] **Step 3: Implement.** Apply these replacements. The facts script keeps its read-only, bounded style:
 
@@ -4496,41 +4693,171 @@ import { canonicalChord } from "./Chord.mjs";
 Replace:
 
 ```js
-  const dev = get(facts, "voxtype.audioDevice");
-  const node = get(facts, "atvvoice.nodeName");
-  if (dev === undefined) push("voxtype-device", "Voxtype audio.device", "unknown", BOTH, "", "");
-  else if (mode === "remote") {
+  const mode = get(config, "voice.mic") === "system" ? "system" : "remote";
+  const supported = KEY_NAMES.filter(k => get(config, `keys.${k}.supported`) !== false);
+  const rows = [];
+  const push = (id, label, status, modes, detail = "", fix = "") => rows.push({ id, label, status, modes, detail, fix });
 ```
 
 with:
 
 ```js
-  const dev = get(facts, "voxtype.audioDevice");
-  const node = get(facts, "atvvoice.nodeName");
-  // Typeless spec §8: under Typeless the remote-mode Voxtype device row is informational (Typeless picks its own
-  // microphone); the ATVVoice rows above still count, because remote mode needs the remote's stream either way.
+  const mode = get(config, "voice.mic") === "system" ? "system" : "remote";
+  const supported = KEY_NAMES.filter(k => get(config, `keys.${k}.supported`) !== false);
+  const rows = [];
+  const push = (id, label, status, modes, detail = "", fix = "") => rows.push({ id, label, status, modes, detail, fix });
+  // Typeless spec §8: under Typeless the remote never drives Voxtype, so every Voxtype row is informational (F9 is
+  // Omarchy's own binding). The ATVVoice rows still count: remote mode needs the remote's stream either way.
   const typelessEngine = get(config, "voice.engine") === "typeless";
-  const remoteRow = (id, label, status, detail, fix) => push(id, label, typelessEngine ? "info" : status, ["remote"], detail, fix);
-  if (dev === undefined) push("voxtype-device", "Voxtype audio.device", "unknown", BOTH, "", "");
-  else if (mode === "remote") {
+  const vox = (status) => (typelessEngine ? "info" : status);
 ```
 
 Replace:
 
 ```js
-    if (!node || dev !== node) push("voxtype-device", label, "fail", ["remote"], `audio.device: ${dev}${node ? `, node: ${node}` : ""}`, "omarchy-shell omaremote mic remote");
-    else if (Array.isArray(pcms) && !pcms.includes(node)) push("voxtype-device", label, "fail", ["remote"], `audio.device: ${dev}, but ALSA has no PCM named ${node}`, "bash <plugin-dir>/host/omaremote-setup atvvoice");
-    else if (!Array.isArray(pcms)) push("voxtype-device", label, "unknown", ["remote"], `audio.device: ${dev}; ALSA PCM list unavailable`, "sudo pacman -S --needed alsa-utils");
-    else push("voxtype-device", label, "pass", ["remote"], `audio.device: ${dev}, node: ${node}`, "");
+    const missing = REQUIRED_TOOLS.filter(t => !tools[t]);
 ```
 
 with:
 
 ```js
-    if (!node || dev !== node) remoteRow("voxtype-device", label, "fail", `audio.device: ${dev}${node ? `, node: ${node}` : ""}`, "omarchy-shell omaremote mic remote");
-    else if (Array.isArray(pcms) && !pcms.includes(node)) remoteRow("voxtype-device", label, "fail", `audio.device: ${dev}, but ALSA has no PCM named ${node}`, "bash <plugin-dir>/host/omaremote-setup atvvoice");
-    else if (!Array.isArray(pcms)) remoteRow("voxtype-device", label, "unknown", `audio.device: ${dev}; ALSA PCM list unavailable`, "sudo pacman -S --needed alsa-utils");
-    else remoteRow("voxtype-device", label, "pass", `audio.device: ${dev}, node: ${node}`, "");
+    const missing = REQUIRED_TOOLS.filter(t => !tools[t] && !(typelessEngine && t === "voxtype"));
+```
+
+Replace:
+
+```js
+    push("voxtype-version", "Voxtype ≥ 0.8", "fail", BOTH, "voxtype not installed", "omarchy-update  # Voxtype >= 0.8 ships with Omarchy");
+```
+
+with:
+
+```js
+    push("voxtype-version", "Voxtype ≥ 0.8", vox("fail"), BOTH, "voxtype not installed", "omarchy-update  # Voxtype >= 0.8 ships with Omarchy");
+```
+
+Replace:
+
+```js
+    push("voxtype-version", "Voxtype ≥ 0.8", vok === null ? "unknown" : tri(vok), BOTH,
+```
+
+with:
+
+```js
+    push("voxtype-version", "Voxtype ≥ 0.8", vox(vok === null ? "unknown" : tri(vok)), BOTH,
+```
+
+Replace:
+
+```js
+  push("voxtype-status", "Voxtype daemon answering", cls === undefined ? "unknown" : tri(isHealthy(cls)), BOTH,
+```
+
+with:
+
+```js
+  push("voxtype-status", "Voxtype daemon answering", vox(cls === undefined ? "unknown" : tri(isHealthy(cls))), BOTH,
+```
+
+Replace:
+
+```js
+  push("voxtype-output", 'Voxtype output.mode is "type"', om === undefined ? "unknown" : tri(om === "type"), BOTH,
+```
+
+with:
+
+```js
+  push("voxtype-output", 'Voxtype output.mode is "type"', vox(om === undefined ? "unknown" : tri(om === "type")), BOTH,
+```
+
+Replace:
+
+```js
+  if (dev === undefined) push("voxtype-device", "Voxtype audio.device", "unknown", BOTH, "", "");
+```
+
+with:
+
+```js
+  if (dev === undefined) push("voxtype-device", "Voxtype audio.device", vox("unknown"), BOTH, "", "");
+```
+
+Replace:
+
+```js
+    if (!node || dev !== node) push("voxtype-device", label, "fail", ["remote"],
+```
+
+with:
+
+```js
+    if (!node || dev !== node) push("voxtype-device", label, vox("fail"), ["remote"],
+```
+
+Replace:
+
+```js
+    else if (Array.isArray(pcms) && !pcms.includes(node)) push("voxtype-device", label, "fail", ["remote"],
+```
+
+with:
+
+```js
+    else if (Array.isArray(pcms) && !pcms.includes(node)) push("voxtype-device", label, vox("fail"), ["remote"],
+```
+
+Replace:
+
+```js
+    else if (!Array.isArray(pcms)) push("voxtype-device", label, "unknown", ["remote"],
+```
+
+with:
+
+```js
+    else if (!Array.isArray(pcms)) push("voxtype-device", label, vox("unknown"), ["remote"],
+```
+
+Replace:
+
+```js
+    else push("voxtype-device", label, "pass", ["remote"],
+```
+
+with:
+
+```js
+    else push("voxtype-device", label, vox("pass"), ["remote"],
+```
+
+Replace:
+
+```js
+    push("voxtype-device", "Voxtype audio.device resolves to a PipeWire source", Array.isArray(sources) || dev === "default" ? tri(ok) : "unknown", ["system"],
+```
+
+with:
+
+```js
+    push("voxtype-device", "Voxtype audio.device resolves to a PipeWire source", vox(Array.isArray(sources) || dev === "default" ? tri(ok) : "unknown"), ["system"],
+```
+
+Replace:
+
+```js
+  if (lc === undefined) push("last-capture", "Last session captured from expected node", "unknown", BOTH, "", "");
+  else if (lc === null) push("last-capture", "Last session captured from expected node", "unknown", BOTH, "not yet verified", "");
+  else push("last-capture", "Last session captured from expected node", lc.node === expected ? "pass" : "warn", BOTH, `captured from: ${lc.node}`, "");
+```
+
+with:
+
+```js
+  if (lc === undefined) push("last-capture", "Last session captured from expected node", vox("unknown"), BOTH, "", "");
+  else if (lc === null) push("last-capture", "Last session captured from expected node", vox("unknown"), BOTH, "not yet verified", "");
+  else push("last-capture", "Last session captured from expected node", vox(lc.node === expected ? "pass" : "warn"), BOTH, `captured from: ${lc.node}`, "");
 ```
 
 Replace:
@@ -4584,14 +4911,21 @@ Replace:
 
 ```js
   if (failed(VOX_ROWS)) return "unconfigured";
+  if (mode === "system" && rows.some(r => r.id === "voxtype-device" && r.status === "fail")) return "unconfigured";
 ```
 
 with:
 
 ```js
+  if (get(config, "voice.engine") === "typeless") {
+    // Typeless spec §8: Voxtype rows are informational here; without keytap or uinput access no tap can be sent.
+    if (failed(["config-valid"])) return "unconfigured";
+    if (rows.some(r => (r.id === "typeless-keytap" || r.id === "typeless-uinput") && r.status === "fail")) return "unconfigured";
+    if (mode === "remote" && failed(REMOTE_ROWS)) return "remoteWarning";
+    return "ready";
+  }
   if (failed(VOX_ROWS)) return "unconfigured";
-  // Typeless spec §8: without keytap or uinput access the Typeless engine cannot send a single tap.
-  if (get(config, "voice.engine") === "typeless" && rows.some(r => (r.id === "typeless-keytap" || r.id === "typeless-uinput") && r.status === "fail")) return "unconfigured";
+  if (mode === "system" && rows.some(r => r.id === "voxtype-device" && r.status === "fail")) return "unconfigured";
 ```
 
 
@@ -4686,6 +5020,55 @@ with:
 ```
 
 
+In `lib/Presentation.mjs`:
+
+Replace:
+
+```js
+export function glyphLook(s) {
+  const st = s.voiceState || "idle";
+```
+
+with:
+
+```js
+export function glyphLook(s) {
+  // Typeless spec §8: under Typeless a Voxtype that is not responding is not this engine's problem.
+  const st = s.engine === "typeless" && s.voiceState === "unconfigured" ? "idle" : (s.voiceState || "idle");
+```
+
+
+In `BarWidget.qml`:
+
+Replace:
+
+```qml
+selftest: service.selftestActive, typeless: service.typelessView }) : "disconnected"
+```
+
+with:
+
+```qml
+selftest: service.selftestActive, typeless: service.typelessView, engine: service.engineName }) : "disconnected"
+```
+
+
+In `Service.qml`:
+
+Replace:
+
+```qml
+  readonly property bool unconfigured: root.voiceState === "unconfigured" || root.doctorSummary === "unconfigured" || root.configInvalid
+```
+
+with:
+
+```qml
+  // Typeless spec §8: under Typeless, VoiceSession's own "voxtype not responding" does not make the plugin unconfigured.
+  readonly property bool unconfigured: (root.engineName !== "typeless" && root.voiceState === "unconfigured") || root.doctorSummary === "unconfigured" || root.configInvalid
+```
+
+
 - [ ] **Step 4: The fixture and an integration scenario.** Create `tests/fixtures/typeless-settings.json`. Its label
   equals the fake ATVVoice node's description in `tests/fixtures/pw-dump.json`.
 
@@ -4750,7 +5133,7 @@ installed, and `d` is the remote's description when ATVVoice runs.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add lib/Doctor.mjs host/omaremote-facts tests/Doctor.test.mjs tests/fixtures/typeless-settings.json tests/fake-remote.sh
+git add lib/Doctor.mjs host/omaremote-facts lib/Presentation.mjs BarWidget.qml Service.qml tests/Doctor.test.mjs tests/Presentation.test.mjs tests/fixtures/typeless-settings.json tests/fake-remote.sh
 git commit -m "feat(doctor): Typeless rows — keytap, uinput, running, hotkey and microphone match
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
@@ -5230,6 +5613,10 @@ Voxtype. Typeless records, transcribes and pastes on its own; choose its microph
     2026-10-13 while writing Plan 5) ``.
   - In §4.3, wherever `config.saves[N]` appears, write `configWrites.saves[N]`, and add one sentence:
     `` (`status.config` was already a boolean, so the outcomes are published as `configWrites`.) ``
+  - In §8, replace the sentence that starts "The Voxtype rows that `remote` mode makes mandatory" with:
+    `Under Typeless every Voxtype row is informational: voxtype-version, -status, -output, -device and last-capture,
+    and voxtype is not a required tool. The remote never drives Voxtype then; F9 is Omarchy's own binding. The
+    ATVVoice rows still count. A VoiceSession "voxtype not responding" does not make the plugin unconfigured.`
 
 - [ ] **Step 3: Final automated check**
 
@@ -5237,7 +5624,7 @@ Run: `make check; echo MAKE_CHECK_EXIT=$?`
 Expected:
 - `MAKE_CHECK_EXIT=0`;
 - the output includes `runner-bound: ok`, `setup-typeless: all ok`, the keytap unittest `OK`, and
-  `integration: 68 passed, 0 failed`.
+  `integration: 71 passed, 0 failed`.
 
 - [ ] **Step 4: Commit**
 
