@@ -347,7 +347,7 @@ omaremote-setup deps         # pacman -S --needed keyd; verify jq, wtype, pw-dum
 omaremote-setup keyd         # seed conf, keyd check, id verification, install, foreground prompt, enable on confirmation
 omaremote-setup binds        # generate omaremote.lua, require line, hyprctl reload, description verification
 omaremote-setup plugin       # omarchy plugin add --enable, rescanPlugins, wait for selftestPing
-omaremote-setup atvvoice     # build pinned ATVVoice plus host/patches/atvvoice-reset-decoder.patch, write the user unit (--device <addr> --name xiaomi), enable it
+omaremote-setup atvvoice     # build pinned ATVVoice plus host/patches/atvvoice-reset-decoder.patch, write the user unit (--device <addr> --name xiaomi), define the ALSA PCM atvvoice-xiaomi (marker block in ~/.config/alsa/asoundrc), enable it
 omaremote-setup mic remote   # as `mic system`, with Voxtype audio.device = atvvoice-xiaomi
 omaremote-setup mic system   # drive the main spec §3 mic-apply contract, poll micStatus to a terminal state
 omaremote-setup verify       # description check plus one selftest arm/report sweep with the injector

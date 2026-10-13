@@ -1943,7 +1943,8 @@ three..."; a patched build transcribed "1 2 3, 1 2 3, ... testing, 1 2 3" live.
 now fetches the pinned rev with git, applies the patch, and runs `cargo install --locked --path --force`.
 Installed-build detection is a stamp file (`rev=<rev> patch=<sha256>`) plus the binary's presence, so the
 unpatched upstream install on the current host rebuilds once. `git` is a new prerequisite. The patch is a
-candidate for upstream; reporting it is the user's decision.
+candidate for upstream; see the Plan 4 outcome (b0o/ATVVoice#28 filed; PR #27 carries the same reset and was
+tested twice on the RC003).
 
 ## Task 12
 
@@ -1989,6 +1990,10 @@ The plugin noticed the ATVVoice daemon the moment it registered (`retryMs: 0`), 
 - Once, a transcription took 34.7 s while another ran concurrently, and omaremote reported `stop-timeout`. CPU-only Whisper on this host.
 - A hold made while the previous transcription is still running is ignored by design.
 - Voxtype's model here is `ggml-base.en` (English only). Mixed Chinese/English dictation is handled separately.
+
+**Open at-the-machine checks:**
+- System-mode transcription with an external microphone (e.g. DJI Mic Mini): only the toggle behaviour was verified in system mode.
+- A full interactive `omaremote-setup` run from a bare host (the steps above were run one subcommand at a time).
 
 **Upstream (user-approved):**
 - Filed b0o/ATVVoice#28 (empty name suffix for an all-non-ASCII BLE name).

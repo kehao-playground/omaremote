@@ -1,7 +1,7 @@
 # omaremote — remote microphone via ATVVoice (Plan 4)
 
 **Date:** 2026-10-12
-**Status:** Draft for review
+**Status:** Implemented (Plan 4)
 **Amends:** `2026-09-14-omaremote-design.md` §2, §3 (ATVVoice), §5.1, §5.2; `2026-10-02-omaremote-host-setup-design.md` (adds a step)
 
 ## 1. Goal
@@ -61,7 +61,8 @@ All measured on 2026-10-09..12 against the Xiaomi Bluetooth Remote 2 Pro / RC003
    and Voxtype transcribed "one two three..."; carrying the state over reproduced the saturation. A
    patched build then transcribed "1 2 3, 1 2 3, ... testing, 1 2 3" live. The fix is
    `host/patches/atvvoice-reset-decoder.patch` (reset on AUDIO_START), applied by setup to the pinned
-   rev. It is a candidate for upstream; reporting it is the user's decision.
+   rev. Upstream: b0o/ATVVoice#28 is filed (the naming bug), and PR #27 carries the same reset and was tested
+   twice on the RC003 (see the Plan 4 outcome). If #27 merges, bump the pin and drop the patch.
 
 ## 3. Host (setup)
 
@@ -81,7 +82,9 @@ The `atvvoice` step:
   A failure in fetch, apply or cargo dies with the tool's error and leaves the unit, service, ALSA
   file and stamp untouched. A path install does not record its rev in `cargo install --list`, so
   setup keeps a stamp, `${OMAREMOTE_ATV_STAMP:-~/.local/state/omaremote/atvvoice.build}`, holding
-  `rev=<rev> patch=<sha256 of the patch file>`, written only after `cargo install` succeeds. The
+  `rev=<rev> patch=<sha256 of the patch file>`, written last, after the enable/restart step has succeeded:
+  a run that dies after the install (unit, ALSA write, enable) then rebuilds and restarts on the next run,
+  instead of leaving an old unpatched process running behind a stamp that says it is current. The
   build is skipped only when the stamp equals the expected line and `~/.cargo/bin/atvvoice` exists
   (so a host with the unpatched upstream install and no stamp rebuilds once).
 - **Device.** Resolve the remote's address from `bluetoothctl devices` plus
@@ -112,15 +115,16 @@ The `atvvoice` step:
   (`/usr/share/alsa/alsa.conf.d/50-pipewire.conf` or `libasound_module_pcm_pipewire.so`), checked
   with the device resolution, before the build; if absent the step stops with
   `sudo pacman -S --needed pipewire-alsa`. When the block changed and the `voxtype` user service is
-  active it is `try-restart`ed so it re-reads ALSA's config. Order: resolve device and prerequisite,
-  build, unit, ALSA block, enable/restart.
+  active it is `try-restart`ed so it re-reads ALSA's config; a failure there is a warning naming
+  `systemctl --user restart voxtype`, not an abort. Order: resolve device and prerequisite,
+  build, unit, ALSA block, enable/restart, stamp.
 - **Mic apply.** The existing `omaremote mic remote` sets Voxtype `audio.device` to
   `atvvoice-xiaomi`. The plugin refuses it until it has read ATVVoice's `NodeName`, and
   `enable --now` returns before ATVVoice has connected to the remote, so setup first polls
   `status → .remote.node` for up to 30 s, asks once for a button press to wake the remote, and on
   timeout stops naming `omaremote-setup mic remote` as the retry.
 
-The upstream naming bug is worked around with `--name`. Reporting it upstream is outside this plan.
+The upstream naming bug is worked around with `--name`. It is filed as b0o/ATVVoice#28 (see the Plan 4 outcome).
 
 ## 4. Plugin — voice session
 
