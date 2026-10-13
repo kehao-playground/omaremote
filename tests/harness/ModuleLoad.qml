@@ -1,6 +1,7 @@
 // Spec §2 verification item: every lib/*.mjs module must load and run under the QML JS engine (Qt 6.11 V4). Run: QT_QPA_PLATFORM=offscreen qml tests/harness/ModuleLoad.qml
 import QtQuick
 import "../../lib/Actions.mjs" as Actions
+import "../../lib/EngineSwitch.mjs" as EngineSwitch
 import "../../lib/TypelessSession.mjs" as TypelessSession
 import "../../lib/ConfigWrites.mjs" as ConfigWrites
 import "../../lib/Chord.mjs" as Chord
@@ -44,6 +45,7 @@ QtObject {
             Stats.createStats([]).entries().length,
             ConfigFile.load("").missing,
             Actions.toArgv({ type: "none" }).kind
+            , EngineSwitch.routeTargets("typeless", "state").length
             , TypelessSession.createTypelessSession(normalized).snapshot().typeless
             , ConfigWrites.createConfigWrites().request("{}").seq
             , Chord.parseChord("RightAlt+RightShift").canonical
