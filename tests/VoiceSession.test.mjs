@@ -881,3 +881,111 @@ test("toggle is inert unless the mic trigger selects it", () => {
   asKey.status("idle", 0, { fresh: true });
   assert.deepEqual(asKey.hidToggle(10), [], "key mode ignores a toggle");
 });
+
+// ---- Typeless spec §6.2: drain for an engine switch ----
+function dbusRecording() {
+  const vs = createVoiceSession(cfg());
+  vs.setDbusSource({ sender: ":1.42", generation: 0 });
+  vs.status("idle", 0, { fresh: true });
+  const fx = vs.dbus(D("streaming"), 10);
+  vs.cmdExit(cmdId(fx, "start"), 0, 20);
+  vs.status("recording", 100);
+  return vs;
+}
+
+test("drain stops a plugin-owned recording and counts it drained once it is transcribing", () => {
+  const vs = dbusRecording();
+  const fx = vs.drain(200);
+  assert.deepEqual(kinds(fx), ["stop"]);
+  assert.equal(vs.snapshot().draining, true);
+  assert.equal(vs.drained(), false);
+  vs.cmdExit(cmdId(fx, "stop"), 0, 220);
+  assert.equal(vs.drained(), false, "stopping: the audio is not complete yet");
+  vs.status("transcribing", 300);
+  assert.equal(vs.drained(), true);
+});
+
+test("drain leaves a keyboard-owned session alone and does not wait for it", () => {
+  const vs = createVoiceSession(cfg());
+  vs.status("idle", 0, { fresh: true });
+  vs.status("recording", 10);                       // F9: adopted as keyboard-owned
+  const fx = vs.drain(20);
+  assert.deepEqual(kinds(fx), []);
+  assert.equal(vs.drained(), true);
+  assert.equal(vs.snapshot().owner, "keyboard");
+  assert.deepEqual(kinds(vs.advance(5000)), [], "the 3 s bound never touches it");
+});
+
+test("a plugin-owned session not drained within 3 s falls back to abort", () => {
+  const vs = dbusRecording();
+  const fx = vs.drain(200);
+  vs.cmdExit(cmdId(fx, "stop"), 0, 220);            // Voxtype never reports transcribing
+  assert.equal(vs.nextDeadline() <= 3200, true);
+  assert.deepEqual(kinds(vs.advance(3199)), []);
+  const ab = vs.advance(3200);
+  assert.deepEqual(kinds(ab), ["cancel"]);
+  assert.equal(stateOf(ab), "recovering");
+  assert.equal(vs.drained(), true);
+});
+
+test("new plugin-owned starts are refused while draining, with HUD; undrain re-allows them", () => {
+  const vs = createVoiceSession(cfg({ keys: { ...DEFAULT_CONFIG.keys, mic: { trigger: "toggle" } }, voice: { ...DEFAULT_CONFIG.voice, mic: "system" } }));
+  vs.setDbusSource({ sender: ":1.42", generation: 0 });
+  vs.status("idle", 0, { fresh: true });
+  vs.drain(10);
+  const t = vs.hidToggle(20);
+  assert.deepEqual(kinds(t), []);
+  assert.deepEqual(byType(t, "hud").map(h => h.text), ["switching engine"]);
+  vs.undrain(30, "connected");
+  assert.deepEqual(kinds(vs.hidToggle(40)), ["start"]);
+});
+
+test("a D-Bus stream is refused while draining", () => {
+  const vs = createVoiceSession(cfg());
+  vs.setDbusSource({ sender: ":1.42", generation: 0 });
+  vs.status("idle", 0, { fresh: true });
+  vs.drain(10);
+  const fx = vs.dbus(D("streaming"), 20);
+  assert.deepEqual(kinds(fx), []);
+  assert.deepEqual(byType(fx, "hud").map(h => h.text), ["switching engine"]);
+});
+
+test("undrain resyncs the remote state, so the first hold after switching back is a transition (discriminating)", () => {
+  const finishOne = (vs, t) => {                     // a whole dbus session that leaves remote = "streaming"
+    const fx = vs.dbus(D("streaming"), t);
+    vs.cmdExit(cmdId(fx, "start"), 0, t + 10);
+    vs.status("recording", t + 20);
+    vs.status("idle", t + 30, { fresh: true });
+  };
+  const stale = createVoiceSession(cfg());
+  stale.setDbusSource({ sender: ":1.42", generation: 0 });
+  stale.status("idle", 0, { fresh: true });
+  finishOne(stale, 10);
+  stale.drain(100); stale.undrain(200);              // no remoteState: still "streaming"
+  assert.deepEqual(kinds(stale.dbus(D("streaming"), 300)), [], "without a resync the hold is lost");
+  const synced = createVoiceSession(cfg());
+  synced.setDbusSource({ sender: ":1.42", generation: 0 });
+  synced.status("idle", 0, { fresh: true });
+  finishOne(synced, 10);
+  synced.drain(100); synced.undrain(200, "connected");
+  assert.deepEqual(kinds(synced.dbus(D("streaming"), 300)), ["start"]);
+});
+
+test("drain while starting stops on confirmation; drain while arbitrating abandons it", () => {
+  const vs = createVoiceSession(cfg());
+  vs.setDbusSource({ sender: ":1.42", generation: 0 });
+  vs.status("idle", 0, { fresh: true });
+  const fx = vs.dbus(D("streaming"), 10);
+  vs.drain(15);
+  vs.cmdExit(cmdId(fx, "start"), 0, 20);
+  assert.equal(vs.drained(), false);
+  assert.deepEqual(kinds(vs.status("recording", 30)), ["stop"]);
+  const arb = createVoiceSession(onDemandCfg());
+  arb.setDbusSource({ sender: ":1.42", generation: 0 });
+  arb.status("idle", 0, { fresh: true });
+  arb.dbus(D("streaming"), 10);
+  assert.equal(arb.snapshot().state, "arbitrating");
+  arb.drain(20);
+  assert.equal(arb.snapshot().state, "idle");
+  assert.equal(arb.drained(), true);
+});
