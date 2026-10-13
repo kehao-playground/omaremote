@@ -16,6 +16,7 @@ export XDG_CONFIG_HOME=$OMAREMOTE_FAKE_DIR/config XDG_DATA_HOME=$OMAREMOTE_FAKE_
 export OMAREMOTE_IPC_TARGET=omaremote-test OMAREMOTE_APPID=omaremote-test
 export OMAREMOTE_DISPATCH=hyprctl            # dispatch actions go to the fake hyprctl, never to the live compositor
 export OMAREMOTE_KEYTAP=$ROOT/tests/fakes/bin/omaremote-keytap   # Typeless taps go to the fake client, never to uinput
+export OMAREMOTE_TYPELESS_SETTINGS=$OMAREMOTE_FAKE_DIR/typeless-settings.json   # never ~/.config/Typeless
 SYS_PATH=$PATH                                # captured before the fakes are prefixed: HARNESS_PATH scenarios build from this
 export PATH=$ROOT/tests/fakes/bin:$PATH
 ONLY=${1:-}
@@ -50,6 +51,7 @@ reset_fakes() {
   : > "$F/keytap.log"
   : > "$F/atv.present"; echo connected > "$F/atv.state"; printf 'atvvoice_mic' > "$F/vox.config"
   cp "$ROOT/tests/fixtures/pw-dump.json" "$F/pw-dump.json"
+  cp "$ROOT/tests/fixtures/typeless-settings.json" "$F/typeless-settings.json"
 }
 start_harness() {   # HARNESS_PATH, if set, is used verbatim (a complete, self-contained PATH — see
                      # s_voxtype_missing_command_is_bounded); it never falls back to $SYS_PATH, so a binary
@@ -1050,6 +1052,24 @@ s_typeless_second_mic_request_keeps_first_paused() {
   wait_for '.typeless.state.quiesced | length' 0 3
 }
 scenario typeless_second_mic_request_keeps_first_paused s_typeless_second_mic_request_keeps_first_paused
+
+# ---- Plan 5 Task 12: Typeless Doctor rows from host/omaremote-facts ----
+doctor_row() { ipc doctor | jq -r --arg id "$1" '[.rows[] | select(.id == $id) | .status][0] // "absent"'; }
+wait_doctor_row() {   # wait_doctor_row <id> <status>
+  local i=0 got=""
+  while (( i < 100 )); do got=$(doctor_row "$1"); [[ $got == "$2" ]] && return 0; sleep 0.1; i=$((i + 1)); done
+  echo "    doctor row $1: want $2, last $got"; return 1
+}
+s_doctor_typeless_rows() {
+  ready || return 1
+  wait_doctor_row typeless-hotkey absent || return 1               # only under the Typeless engine
+  use_typeless || return 1
+  wait_doctor_row typeless-hotkey pass || return 1                 # fixture: dictationMode[0] = RightAlt
+  wait_doctor_row typeless-mic pass || return 1                    # fixture label = the fake node's description
+  local seq; seq=$(ipc typelessHotkey RightCtrl+Space | jq -r '.writeSeq'); wait_saved "$seq" || return 1
+  wait_doctor_row typeless-hotkey warn
+}
+scenario doctor_typeless_rows s_doctor_typeless_rows
 
 # ---- summary ---------------------------------------------------------------------
 echo "integration: $pass passed, $fail failed"

@@ -94,7 +94,8 @@ Item {
   property var doctorFacts: null
   property double doctorAt: 0
   property int doctorSeq: 0
-  readonly property bool unconfigured: root.voiceState === "unconfigured" || root.doctorSummary === "unconfigured" || root.configInvalid
+  // Typeless spec §8: under Typeless, VoiceSession's own "voxtype not responding" does not make the plugin unconfigured.
+  readonly property bool unconfigured: (root.engineName !== "typeless" && root.voiceState === "unconfigured") || root.doctorSummary === "unconfigured" || root.configInvalid
   readonly property string hudLine: Presentation.hudLine({ voiceState: root.voiceState, hudText: root.hudText, elapsedMs: root.elapsedMs, flash: root.flash, typeless: root.typelessView })
   Timer { interval: 250; repeat: true; running: root.voiceState === "recording" || root.typelessView === "recording"; onTriggered: root.elapsedMs = Date.now() - root.recordingSince }
 

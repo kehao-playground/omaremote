@@ -22,7 +22,7 @@ BarWidget {
 
   readonly property string look: service ? Presentation.glyphLook({
       voiceState: service.voiceState, unconfigured: service.unconfigured, remoteState: service.remoteState,
-      micPending: service.micPending, selftest: service.selftestActive, typeless: service.typelessView }) : "disconnected"
+      micPending: service.micPending, selftest: service.selftestActive, typeless: service.typelessView, engine: service.engineName }) : "disconnected"
   readonly property string glyph: look === "selftest" ? "󰙨" : (look === "unconfigured" || look === "disconnected" ? "󰍭" : "󰍬")
   readonly property color fg: bar ? bar.barForeground : Color.foreground
   readonly property color glyphColor: look === "recording" ? (bar ? bar.urgent : Color.urgent)

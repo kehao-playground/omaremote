@@ -212,3 +212,94 @@ test("system voxtype-device ignores the ALSA list", () => {
   const f = good(); f.voxtype.audioDevice = "default"; delete f.alsa;
   assert.equal(row(evaluate(f, sys), "voxtype-device").status, "pass");
 });
+
+// ---- Typeless engine (Typeless spec §8) ----
+const tlConfig = (voice = {}) => normalizeConfig({ ...DEFAULT_CONFIG, keys: { ...DEFAULT_CONFIG.keys, mic: { supported: false } },
+                                                   voice: { ...DEFAULT_CONFIG.voice, engine: "typeless", ...voice } }).config;
+const tlFacts = (typeless = {}) => {
+  const f = good();
+  f.atvvoice.nodeDescription = "小米蓝牙语音遥控器";
+  f.typeless = Object.assign({ keytapActive: true, keytapDevice: true, inInput: true, uinputWritable: true, running: true,
+                               settingsReadable: true, hotkey: "RightAlt", micId: "a79c", micLabel: "小米蓝牙语音遥控器" }, typeless);
+  return f;
+};
+const TL_ROWS = ["typeless-keytap", "typeless-uinput", "typeless-running", "typeless-hotkey", "typeless-mic"];
+
+test("the five Typeless rows appear only when the Typeless engine is selected", () => {
+  const ids = (rows) => rows.map(r => r.id).filter(id => id.startsWith("typeless-"));
+  assert.deepEqual(ids(evaluate(tlFacts(), config)), []);
+  assert.deepEqual(ids(evaluate(tlFacts(), tlConfig())), TL_ROWS);
+  for (const id of TL_ROWS) assert.equal(row(evaluate(tlFacts(), tlConfig()), id).status, "pass", id);
+});
+
+test("keytap and uinput rows fail with their fixes, and either failure makes the summary unconfigured", () => {
+  const down = evaluate(tlFacts({ keytapDevice: false }), tlConfig());
+  assert.equal(row(down, "typeless-keytap").status, "fail");
+  assert.match(row(down, "typeless-keytap").fix, /omaremote-setup typeless/);
+  assert.equal(summarize(down, tlConfig()), "unconfigured");
+  const ui = evaluate(tlFacts({ inInput: false }), tlConfig());
+  assert.equal(row(ui, "typeless-uinput").status, "fail");
+  assert.match(row(ui, "typeless-uinput").fix, /usermod -aG input/);
+  assert.equal(summarize(ui, tlConfig()), "unconfigured");
+  assert.equal(summarize(evaluate(tlFacts(), tlConfig()), tlConfig()), "ready");
+});
+
+test("Typeless not running is a warning", () => {
+  const r = row(evaluate(tlFacts({ running: false }), tlConfig()), "typeless-running");
+  assert.equal(r.status, "warn");
+  assert.equal(r.fix, "start Typeless");
+});
+
+test("the hotkey row compares canonical forms and is unknown for an unreadable or unparsable Typeless value", () => {
+  const st = (t, v) => row(evaluate(tlFacts(t), tlConfig(v)), "typeless-hotkey").status;
+  assert.equal(st({ hotkey: "rightalt" }), "pass", "case differs, canonical equal");
+  assert.equal(st({ hotkey: "RightShift+RightAlt" }, { typeless: { hotkey: "RightShift+RightAlt" } }), "pass");
+  assert.equal(st({ hotkey: "RightAlt+RightShift" }), "warn");
+  assert.match(row(evaluate(tlFacts({ hotkey: "RightAlt+RightShift" }), tlConfig()), "typeless-hotkey").fix, /--hotkey-from-typeless/);
+  assert.equal(st({ hotkey: "Fn+Q" }), "unknown", "review focus 5: an unparsable value is not a mismatch");
+  assert.equal(st({ hotkey: null }), "unknown", "review focus 5: no dictationMode");
+  assert.equal(st({ settingsReadable: false }), "unknown");
+});
+
+test("the microphone row: remote mode wants the remote's label; system mode wants anything else", () => {
+  const st = (t, v) => row(evaluate(tlFacts(t), tlConfig(v)), "typeless-mic");
+  assert.equal(st({}).status, "pass");
+  assert.equal(st({ micId: "default", micLabel: "Auto-detect (C922 Pro Stream Webcam Analog Stereo)" }).status, "warn");
+  assert.equal(st({ micId: "c922", micLabel: "C922 Pro Stream Webcam Analog Stereo" }).status, "warn");
+  assert.match(st({ micId: "c922", micLabel: "C922 Pro Stream Webcam Analog Stereo" }).detail, /Typeless: C922.*remote: 小米蓝牙语音遥控器/);
+  assert.equal(st({}, { mic: "system" }).status, "warn", "system mode recording from the remote hears nothing between presses");
+  assert.equal(st({ micId: "default", micLabel: "Auto-detect (C922)" }, { mic: "system" }).status, "pass");
+  assert.equal(st({ micId: "c922", micLabel: "C922" }, { mic: "system" }).status, "pass");
+  assert.equal(st({ settingsReadable: false }).status, "unknown");
+  const noNode = tlFacts(); delete noNode.atvvoice.nodeDescription;
+  assert.equal(row(evaluate(noNode, tlConfig()), "typeless-mic").status, "unknown");
+});
+
+test("under Typeless the remote-mode Voxtype device row is informational; the ATVVoice rows still count", () => {
+  const f = tlFacts();
+  f.voxtype.audioDevice = "default";                       // Voxtype not pointed at the remote: irrelevant to Typeless
+  const rows = evaluate(f, tlConfig());
+  assert.equal(row(rows, "voxtype-device").status, "info");
+  assert.equal(summarize(rows, tlConfig()), "ready");
+  f.atvvoice.active = false;
+  assert.equal(row(evaluate(f, tlConfig()), "atvvoice-service").status, "fail");
+  assert.equal(row(evaluate(f, config), "voxtype-device").status, "fail", "under Voxtype the same facts still fail");
+});
+
+test("review: Typeless prerequisites all pass while Voxtype is unusable → Voxtype rows informational, summary ready", () => {
+  const broken = () => {
+    const f = tlFacts();
+    f.tools.voxtype = false;
+    f.voxtype = { version: null, statusClass: "stopped", outputMode: "clipboard", audioDevice: "default" };
+    f.lastCapture = { node: "elsewhere", at: 1000 };
+    return f;
+  };
+  const rows = evaluate(broken(), tlConfig());
+  for (const id of ["voxtype-version", "voxtype-status", "voxtype-output", "voxtype-device", "last-capture"]) assert.equal(row(rows, id).status, "info", id);
+  assert.equal(row(rows, "tools").status, "pass", "voxtype is not a required tool under Typeless");
+  assert.equal(summarize(rows, tlConfig()), "ready");
+  const sysRows = evaluate(broken(), tlConfig({ mic: "system" }));
+  assert.equal(summarize(sysRows, tlConfig({ mic: "system" })), "ready");
+  const voxCfg = normalizeConfig({ ...DEFAULT_CONFIG, keys: { ...DEFAULT_CONFIG.keys, mic: { supported: false } } }).config;
+  assert.equal(summarize(evaluate(broken(), voxCfg), voxCfg), "unconfigured", "discriminating: the same host under Voxtype is unconfigured");
+});

@@ -112,3 +112,10 @@ test("engineStatusLine reports the hotkey and whether keytap runs", () => {
   assert.equal(engineStatusLine(c, { typeless: { keytapActive: false, keytapDevice: false } }), "hotkey: RightAlt+RightShift · keytap: not running");
   assert.equal(TYPELESS_FLASH, "Typeless ⏯");
 });
+
+test("review: under Typeless a Voxtype that is not responding does not make the bar unconfigured", () => {
+  assert.equal(glyphLook({ voiceState: "unconfigured", engine: "typeless" }), "ready");
+  assert.equal(glyphLook({ voiceState: "unconfigured", engine: "voxtype" }), "unconfigured");
+  assert.equal(glyphLook({ voiceState: "unconfigured", engine: "typeless", unconfigured: true }), "unconfigured", "a real Typeless problem still shows");
+  assert.equal(glyphLook({ voiceState: "recording", engine: "typeless" }), "recording", "an F9 dictation still shows");
+});

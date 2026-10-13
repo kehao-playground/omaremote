@@ -56,12 +56,19 @@ else
 fi
 atv_first=$(jq -r '.[0] // empty' <<<"$atv_names")
 atv_node=null
+atv_desc=null
 if [[ -n $atv_first ]] && raw=$(bounded busctl --user get-property "$atv_first" /org/atvvoice/Daemon org.atvvoice.Daemon NodeName); then
   atv_node=$(jstr "$(sed -n 's/^s "\(.*\)"$/\1/p' <<<"$raw")")
 fi
 
 if has pw-dump && raw=$(bounded pw-dump); then
   pw_sources=$(jq -c '[.[] | select(.type == "PipeWire:Interface:Node") | select((.info.props["media.class"] // "") == "Audio/Source") | .info.props["node.name"]]' <<<"$raw" 2>/dev/null)
+  # Typeless spec §8: Typeless labels a microphone by its PipeWire node.description, so the Doctor compares that.
+  atv_node_raw=$(jq -r '. // empty' <<<"$atv_node" 2>/dev/null)
+  if [[ -n $atv_node_raw ]]; then
+    atv_desc=$(jq -c --arg n "$atv_node_raw" '[.[] | select(.type == "PipeWire:Interface:Node") | select((.info.props["node.name"] // "") == $n) | .info.props["node.description"]] | .[0] // null' <<<"$raw" 2>/dev/null)
+    atv_desc=${atv_desc:-null}
+  fi
 fi
 pw_sources=${pw_sources:-null}
 
@@ -72,12 +79,29 @@ if has arecord && raw=$(timeout "$TO" arecord -L 2>/dev/null); then   # not boun
 fi
 alsa_pcms=${alsa_pcms:-null}
 
+# Typeless engine (Typeless spec §8). Read-only, like everything here.
+TL_SETTINGS=${OMAREMOTE_TYPELESS_SETTINGS:-${XDG_CONFIG_HOME:-$HOME/.config}/Typeless/app-settings.json}
+kt_active=$(jbool_bounded systemctl --user is-active omaremote-keytap)
+kt_device=$(jbool_bounded grep -qxs 'omaremote keytap' /sys/class/input/event*/device/name)
+tl_input=$(jbool bash -c 'id -nG | tr " " "\n" | grep -qx input')
+tl_uinput=$(jbool test -w "${OMAREMOTE_UINPUT:-/dev/uinput}")
+tl_running=$(jbool_bounded pgrep -x -u "$(id -u)" typeless)
+tl='{"settingsReadable":false,"hotkey":null,"micId":null,"micLabel":null}'
+if [[ -r $TL_SETTINGS ]]; then
+  t=$(jq -c '{settingsReadable: true,
+              hotkey: ((.featureShortcutBindings.dictationMode // null) | if type == "array" then (.[0] // null) else null end | if type == "string" then . else null end),
+              micId: (.selectedMicrophoneDevice | if type == "object" then (.deviceId // null) else null end),
+              micLabel: (.selectedMicrophoneDevice | if type == "object" then (.label // null) else null end)}' "$TL_SETTINGS" 2>/dev/null) && [[ -n $t ]] && tl=$t
+fi
+
 cat <<JSON
 {"tools":$tools,
  "keyd":{"enabled":$keyd_enabled,"active":$keyd_active,"checkOk":$keyd_check,"grabbed":$keyd_grab},
  "hypr":{"required":$hypr_required,"descriptions":$hypr_desc},
  "voxtype":{"version":$vox_version,"statusClass":$vox_class,"outputMode":$vox_out,"audioDevice":$vox_dev},
- "atvvoice":{"active":$atv_active,"micOnDemand":$atv_ondemand,"busNames":$atv_names,"nodeName":$atv_node},
+ "atvvoice":{"active":$atv_active,"micOnDemand":$atv_ondemand,"busNames":$atv_names,"nodeName":$atv_node,"nodeDescription":$atv_desc},
  "pipewire":{"sources":$pw_sources},
- "alsa":{"pcms":$alsa_pcms}}
+ "alsa":{"pcms":$alsa_pcms},
+ "typeless":{"keytapActive":$kt_active,"keytapDevice":$kt_device,"inInput":$tl_input,"uinputWritable":$tl_uinput,"running":$tl_running,
+             "settingsReadable":$(jq -r '.settingsReadable' <<<"$tl"),"hotkey":$(jq -c '.hotkey' <<<"$tl"),"micId":$(jq -c '.micId' <<<"$tl"),"micLabel":$(jq -c '.micLabel' <<<"$tl")}}
 JSON
