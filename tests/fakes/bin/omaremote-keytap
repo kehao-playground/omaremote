@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Typeless spec §9: fake omaremote-keytap client for the harness (OMAREMOTE_KEYTAP). Logs "tap <chord>" to keytap.log.
+#   knobs in $OMAREMOTE_FAKE_DIR: keytap.code (exit code, default 0), keytap.sleep (seconds before answering)
+set -u
+d=${OMAREMOTE_FAKE_DIR:?}
+printf '%s\n' "$*" >> "$d/keytap.log"
+[[ -e $d/keytap.sleep ]] && sleep "$(cat "$d/keytap.sleep")"
+exit "$(cat "$d/keytap.code" 2>/dev/null || echo 0)"

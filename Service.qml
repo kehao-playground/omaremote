@@ -16,6 +16,8 @@ import "lib/SelfTest.mjs" as SelfTest
 import "lib/Doctor.mjs" as Doctor
 import "lib/Chord.mjs" as Chord
 import "lib/ConfigWrites.mjs" as ConfigWrites
+import "lib/TypelessSession.mjs" as TypelessSession
+import "lib/EngineSwitch.mjs" as EngineSwitch
 import "components"
 
 Item {
@@ -29,6 +31,7 @@ Item {
   readonly property string dataHome: Quickshell.env("XDG_DATA_HOME") || (Quickshell.env("HOME") + "/.local/share")
   readonly property string pluginDir: Qt.resolvedUrl(".").toString().replace(/^file:\/\//, "").replace(/\/$/, "")
   readonly property bool dispatchViaHyprctl: Quickshell.env("OMAREMOTE_DISPATCH") === "hyprctl"   // harness only
+  readonly property string keytapOverride: Quickshell.env("OMAREMOTE_KEYTAP") || ""                // harness only: a fake keytap client
 
   // ---- host constants --------------------------------------------------------
   readonly property int flashMs: 600
@@ -54,6 +57,14 @@ Item {
   // ---- modules ---------------------------------------------------------------
   property var engine: null
   property var voice: null
+  property var typeless: null                     // Typeless spec §5; dormant (held quiesced) under Voxtype
+  readonly property var switcher: EngineSwitch.createEngineSwitch()
+  property bool switching: false                  // an engine switch or engine/mic/hotkey reload is draining
+  property var typelessSnap: null
+  property bool _pumping: false
+  property string _typelessSender: ""             // the ATVVoice source TypelessSession's facts belong to
+  property int _typelessGeneration: -1
+  readonly property string engineName: root.config ? root.config.voice.engine : "voxtype"
   property string voiceState: "idle"
   property string voiceOwner: ""
   property bool voiceInferred: false
@@ -126,7 +137,13 @@ Item {
         if (src === "mic" && e.kind === "restart") { verifier.markRestart(); vox.restart() }
         runner.run(src, e.id, e.argv, e.kind === "restart" ? root.restartCmdMs : root.shortCmdMs)
         break
-      case "state": root.onVoiceState(e); break
+      case "state": if (src === "typeless") root.onTypelessState(e); else root.onVoiceState(e); break
+      // ---- Typeless engine effects (Typeless spec §5, §6) ----
+      case "tap": root.runTap(e); break
+      case "log": console.log("omaremote: " + src + ": " + e.text); break
+      case "drainStart": root.onDrainStart(); break
+      case "typelessExpired": root.typelessCall("forceUnsynced", function(n) { return root.typeless.forceUnsynced(n) }); break
+      case "switchCommit": root.onSwitchCommit(e); break
       case "poll": vox.poll(); break
       case "readAtv": atv.readState(e.requestId); break
       case "micClose": atv.micClose(); voice.micClosed(); break
@@ -134,7 +151,10 @@ Item {
       case "show": verifier.pollJob(); break                                                            // Fix round 1 (Ruling 14): mic needs a fresh systemd job reading
       case "verify": verifier.beginVerify("mic", e.id, Date.now()); break
       case "commit": configStore.setVoiceMic(e.mode); root.refreshAudioDevice(); break                 // §3 step 4
-      case "done": root.micLast = e; root.micPending = mic.pending(); if (e.state !== "queued") root.refreshDoctor(); break
+      case "done":
+        root.micLast = e; root.micPending = mic.pending(); if (e.state !== "queued") root.refreshDoctor()
+        if (!mic.pending()) root.typelessCall("resume", function(n) { return root.typeless.resume(n, "mic") })   // §6.2: after the terminal outcome
+        break
       case "conflict": root.micConflict = { expected: e.expected, found: e.found }; break
       case "unconfigured": root.unconfiguredReason = e.reason; break
       case "stat": stats.add(e.session); statsStore.save(stats.entries()); root.statsSummary = stats.summary(Date.now()); break
@@ -147,9 +167,10 @@ Item {
   Timer { id: tick; repeat: false; onTriggered: root.advanceAll() }
   function deadlines() {
     return [engine ? engine.nextDeadline() : null, voice ? voice.nextDeadline() : null, mic ? mic.nextDeadline() : null, verifier.nextDeadline(),
-      selftest ? selftest.nextDeadline() : null]
+      selftest ? selftest.nextDeadline() : null, typeless ? typeless.nextDeadline() : null, root.switcher.nextDeadline()]
   }
   function rearm() {
+    root.pumpOrchestration()
     root.micPending = mic ? mic.pending() : false; verifier.jobPolling = root.micPending
     var ds = root.deadlines(), d = null
     for (var i = 0; i < ds.length; i++) if (ds[i] !== null && ds[i] !== undefined && (d === null || ds[i] < d)) d = ds[i]
@@ -161,9 +182,11 @@ Item {
     var now = Date.now()
     if (engine) root.dispatch(root.guarded("engine.advance", function() { return engine.advance(now) }), "engine")
     if (voice) root.dispatch(root.guarded("voice.advance", function() { return voice.advance(now) }), "voice")
+    if (typeless) root.dispatch(root.guarded("typeless.advance", function() { return typeless.advance(now) }), "typeless")
     if (mic) root.dispatch(root.guarded("mic.advance", function() { return mic.advance(now) }), "mic")
     root.guarded("verifier.advance", function() { verifier.advance(now); return [] })
     if (selftest) root.dispatch(root.guarded("selftest.advance", function() { return selftest.advance(now) }), "selftest")
+    root.runSwitch(root.guarded("switch.advance", function() { return root.switcher.advance(now) }))
     root.rearm()
   }
 
@@ -188,12 +211,14 @@ Item {
     if (kind === "engine") { root.rearm(); return }
     if (kind === "hotkey") {
       if (voice) root.guarded("voice.setConfig", function() { voice.setConfig(configStore.config); return [] })
+      root.typelessCall("setConfig", function(n) { return typeless.setConfig(configStore.config, n) })   // the running session keeps its chord
       root.rearm()
       return
     }
     if (kind === "commit") {                                        // §6.2: the internal voice.mic write reloads and aborts nothing,
       if (voice) {                                                  // but _write replaced the config object: refresh what reads voice.mic
         root.guarded("voice.setConfig", function() { voice.setConfig(configStore.config); return [] })
+        root.typelessCall("setConfig", function(n) { return typeless.setConfig(configStore.config, n) })
         // Only a switch to system can be settled here. After a switch to remote the old voxAudioDevice is stale,
         // so a warning computed now would be false; the audioDeviceProbe callback recomputes it with the new value.
         if (configStore.config.voice.mic === "system") root.updateRemoteWarning()
@@ -206,8 +231,17 @@ Item {
       if (!selftestActive) root.rebuildSelftest()
     }
     if (voice) {
+      // Typeless spec §6.2: an external edit of engine, mic or hotkey drains both sessions with their old config;
+      // the commit applies the new one. If a drain is already running, its commit applies configStore.config,
+      // which already holds this edit. Every other external reload keeps the §5.2 abort.
+      if (kind === "external" && typeless && EngineSwitch.reloadNeedsDrain(typeless.config(), configStore.config)) {
+        root.beginDrain("reload", configStore.config.voice.engine)
+        root.rearm()
+        return
+      }
       if (kind === "external") root.dispatch(root.guarded("voice.abort", function() { return voice.abort(now) }), "voice")     // §5.2: config reload aborts
       root.guarded("voice.setConfig", function() { voice.setConfig(configStore.config); return [] })
+      root.typelessCall("setConfig", function(n) { return typeless.setConfig(configStore.config, n) })
       root.updateRemoteWarning()
     }
     root.rearm()
@@ -223,7 +257,15 @@ Item {
     vox.start()
     atv.start()
     root.refreshAudioDevice()
-    mic = MicApply.createMicApply({ voice: voice })
+    typeless = TypelessSession.createTypelessSession(configStore.config)
+    // Typeless §6.1: dormant first, then seeded with the current source's last State (read before the session
+    // existed). startTypeless owns that order; tests/EngineSwitch.test.mjs pins it.
+    root._typelessSender = atv.sender || ""; root._typelessGeneration = atv.generation
+    root.dispatch(root.guarded("typeless.start", function() {
+      return EngineSwitch.startTypeless(typeless, configStore.config.voice.engine, atv.sender ? root.remoteState : null, now)
+    }), "typeless")
+    root.typelessSnap = typeless.snapshot()
+    mic = MicApply.createMicApply({ voice: EngineSwitch.micVoiceView(voice, typeless, function() { return root.engineName }) })
     stats = Stats.createStats(statsStore.loaded ? statsStore.entries : [])
     root.statsSummary = stats.summary(now)
     root.rebuildSelftest()
@@ -253,6 +295,13 @@ Item {
     // stream (D-Bus) is the trigger there, and the HID key is a press-time pulse from the same press:
     // acting on it too would start a second session. Dropped even under remoteWarning, because
     // Voxtype's device is then the ATVVoice node and an HID-started session would record silence.
+    // Typeless spec §6.1: under Typeless the mic key's press edge goes to TypelessSession (one tap in system mode,
+    // nothing in remote mode) and its release is dropped, whatever keys.mic.trigger says.
+    if (name === "mic" && root.engineName === "typeless") {
+      if (edge === "down") root.typelessCall("hidPress", function(n) { return typeless.hidPress(n) })
+      root.rearm()
+      return true
+    }
     if (name === "mic" && root.config.voice.mic === "remote") { root.rearm(); return true }
     var micTrigger = root.config.keys.mic.trigger                              // §5.1 HID mic key
     if (name === "mic" && micTrigger === "toggle") {
@@ -343,7 +392,9 @@ Item {
     root.heldKeys = []
     root.lastStuckKey = null
     root.showFlash("Reset", root.resetFlashMs)     // §6.3 1 s
-    if (voice) root.dispatch(root.guarded("voice.abort", function() { return voice.abort(Date.now()) }), "voice")                // §4.3: cancel, never stop
+    var targets = EngineSwitch.routeTargets(root.engineName, "reset")                                                       // Typeless §6.1/§6.2
+    if (voice && targets.indexOf("voice") >= 0) root.dispatch(root.guarded("voice.abort", function() { return voice.abort(Date.now()) }), "voice")   // §4.3: cancel, never stop
+    if (targets.indexOf("typeless") >= 0) root.typelessCall("reset", function(n) { return typeless.reset(n) })
     root.resetHappened()
   }
   function doReset(origin) {
@@ -372,7 +423,8 @@ Item {
   }
   function updateRemoteWarning() {                                              // §5.4
     var mode = root.config ? root.config.voice.mic : "remote"
-    var warn = mode === "remote" && (!root.atvBusName || !root.remoteNode || root.voxAudioDevice !== root.remoteNode)
+    // Under Typeless, Voxtype's audio.device plays no part in remote mode; only the ATVVoice source must be ready.
+    var warn = mode === "remote" && (!root.atvBusName || !root.remoteNode || (root.engineName !== "typeless" && root.voxAudioDevice !== root.remoteNode))
     root.remoteWarning = warn
     if (voice) voice.setDbusEnabled(!warn)
   }
@@ -393,6 +445,10 @@ Item {
       var now = Date.now()
       if (src === "voice" && root.voice) root.dispatch(root.guarded("voice.cmdExit", function() { return root.voice.cmdExit(id, code, now) }), "voice")
       if (src === "mic" && root.mic) root.dispatch(root.guarded("mic.cmdExit", function() { return root.mic.cmdExit(id, code, stdout, now) }), "mic")
+      if (src === "keytap" && root.typeless) {
+        var o = EngineSwitch.tapOutcome(code)
+        root.typelessCall("tapResult", function(n) { return root.typeless.tapResult(id, o.outcome, o.reason, n) })
+      }
       if (src === "doctor") {
         if (code === 0) {
           try { root.doctorFacts = JSON.parse(stdout) } catch (e) { console.log("omaremote: facts parse failed: " + e); root.doctorFacts = null }
@@ -426,16 +482,18 @@ Item {
       if (root.voice) {
         root.voice.setDbusSource({ sender: sender || null, generation: generation })
         // Plan 4 §4.5: a revoked/lost source can never send the `connected` that ends a dbus session.
-        if (!sender) root.dispatch(root.guarded("voice.sourceLost", function() { return root.voice.sourceLost(Date.now()) }), "voice")
+        if (!sender && EngineSwitch.routeTargets(root.engineName, "sourceLost").indexOf("voice") >= 0)
+          root.dispatch(root.guarded("voice.sourceLost", function() { return root.voice.sourceLost(Date.now()) }), "voice")
       }
+      // Typeless §5.2: a lost or replaced source makes streaming unknown. A first discovery does not: the session's
+      // streaming is already unknown, and arming then would swallow the first hold.
+      if (root.typeless && root._typelessSender !== "" && (sender !== root._typelessSender || generation !== root._typelessGeneration))
+        root.typelessCall("sourceLost", function(n) { return root.typeless.sourceLost(n) })
+      root._typelessSender = sender || ""; root._typelessGeneration = generation
       root.updateRemoteWarning()
       root.rearm()
     }
-    onSignalEvent: function(ev) {
-      root.remoteState = ev.state
-      if (root.voice) root.dispatch(root.guarded("voice.dbus", function() { return root.voice.dbus(ev, Date.now()) }), "voice")
-      root.rearm()
-    }
+    onSignalEvent: function(ev) { root.onAtvState(ev) }
     onStateRead: function(requestId, state, generation) {
       if (state) root.remoteState = state
       if (root.voice) root.dispatch(root.guarded("voice.atvRead", function() { return root.voice.atvRead({ state: state || "unknown", requestId: requestId, generation: generation }, Date.now()) }), "voice")
@@ -479,9 +537,16 @@ Item {
   }
   function ipcMic(mode) {
     if (!mic) return JSON.stringify({ ok: false, reason: "not-ready" })
+    // Refused before any quiesce: a second request must never touch the "mic" holder the pending apply owns.
+    if (root.switcher.busy() || mic.pending()) return JSON.stringify({ ok: false, reason: "busy" })
     var now = Date.now()
+    // Typeless §6.2: under Typeless the apply first quiesces TypelessSession; MicApply (through micVoiceView) waits
+    // until it is settled. The "done" effect resumes it after the terminal outcome.
+    var underTypeless = root.engineName === "typeless"
+    if (underTypeless) root.typelessCall("quiesce", function(n) { return typeless.quiesce(n, "mic", "changing microphone") })
     var r = root.guarded("mic.request", function() { return mic.request(mode, now, { nodeName: root.remoteNode }) },
                           { effects: [], result: { ok: false, reason: "error" } })
+    if (underTypeless && !r.result.ok) root.typelessCall("resume", function(n) { return typeless.resume(n, "mic") })
     root.dispatch(r.effects, "mic")
     if (r.result.ok) { root.micCurrentId = r.result.operationId; root.micConflict = null }
     root.rearm()
@@ -521,9 +586,7 @@ Item {
     if (!voice) return JSON.stringify({ ok: false, reason: "not-ready" })
     if (verb === "state") {
       if (!atv.sender) return JSON.stringify({ ok: false, reason: "no-atvvoice" })
-      root.dispatch(root.guarded("voice.dbus", function() { return voice.dbus({ state: arg, sender: atv.sender, path: atv.path, interface: atv.iface, member: "MicStateChanged", generation: atv.generation }, now) }), "voice")
-      root.remoteState = arg
-      root.rearm()
+      root.onAtvState({ state: arg, sender: atv.sender, path: atv.path, interface: atv.iface, member: "MicStateChanged", generation: atv.generation })
       return JSON.stringify({ ok: true })
     }
     if (verb === "poll") { vox.poll(); return JSON.stringify({ ok: true }) }
@@ -613,6 +676,90 @@ Item {
   function resetKeys() { configStore.resetKeys() }
   function setVoiceField(field, value) { configStore.setVoiceField(field, value) }
 
+  // ---- Typeless engine (Typeless spec §5, §6) ----------------------------------------
+  function typelessCall(label, fn) {
+    if (!root.typeless) return
+    var now = Date.now()
+    root.dispatch(root.guarded("typeless." + label, function() { return fn(now) }), "typeless")
+  }
+  function onTypelessState(e) { root.typelessSnap = e.state }
+  function onAtvState(ev) {                                     // §6.1: State changes reach TypelessSession under both engines
+    var now = Date.now()
+    root.remoteState = ev.state
+    var targets = EngineSwitch.routeTargets(root.engineName, "state")
+    if (root.voice && targets.indexOf("voice") >= 0) root.dispatch(root.guarded("voice.dbus", function() { return root.voice.dbus(ev, now) }), "voice")
+    if (root.typeless && targets.indexOf("typeless") >= 0 && ev.sender === atv.sender && ev.generation === atv.generation)
+      root.typelessCall("streaming", function(n) { return root.typeless.streaming(ev.state === "streaming", n) })
+    root.rearm()
+  }
+  function keytapArgv(chord) {
+    return root.keytapOverride ? [root.keytapOverride, "tap", chord]
+                               : ["python3", "-I", Quickshell.env("HOME") + "/.local/lib/omaremote/omaremote-keytap", "tap", chord]
+  }
+  function runTap(e) {
+    runner.run("keytap", e.id, root.keytapArgv(e.chord), EngineSwitch.KEYTAP_DEADLINE_MS)
+    if (e.kind === "press") root.showFlash(Presentation.TYPELESS_FLASH, root.flashMs)   // §6.3: system mode flashes each tap
+  }
+  function applyDormancy() {                                    // §6.1: held quiesced (silently) whenever Voxtype is selected
+    if (root.engineName === "typeless") root.typelessCall("resume", function(n) { return root.typeless.resume(n, "dormant") })
+    else root.typelessCall("quiesce", function(n) { return root.typeless.quiesce(n, "dormant", "") })
+  }
+  // §6.2: the switch commits once both sessions are drained, and a queued mic apply under Typeless retries its
+  // reservation once TypelessSession settles. Runs at the start of every rearm(), which follows every module call,
+  // and never re-enters: switch effects run with _pumping set, so a commit cannot land in the middle of drainStart.
+  function pumpOrchestration() {
+    if (root._pumping || !root.voice || !root.typeless) return
+    root._pumping = true
+    try {
+      var now = Date.now()
+      if (root.switcher.busy()) {
+        var fx = root.switcher.progress({ voiceDrained: root.voice.drained(), typelessSettled: root.typeless.settled() }, now)
+        if (fx.length) root.dispatch(fx, "switch")
+      }
+      if (root.mic && root.mic.pending() && root.engineName === "typeless") root.dispatch(root.mic.advance(now), "mic")
+    } catch (err) { root.errorCount++; root.lastError = "orchestration: " + err; console.log("omaremote: orchestration threw: " + err) }
+    finally { root._pumping = false }
+  }
+  function runSwitch(effects) {
+    var was = root._pumping
+    root._pumping = true
+    try { root.dispatch(effects, "switch") } finally { root._pumping = was }
+  }
+  function beginDrain(kind, target) {
+    var r = root.switcher.begin(kind, target, Date.now())
+    if (r.ok) { root.switching = true; root.runSwitch(r.effects) }
+    root.rearm()
+    return r.ok
+  }
+  function setEngine(name) {                                    // the Panel's Engine row and the `engine` IPC
+    if (name !== "voxtype" && name !== "typeless") return "invalid-engine"
+    if (!root.voice || !root.typeless) return "not-ready"
+    if (root.switcher.busy() || (root.mic && root.mic.pending()) || root.selftestActive) return "busy"
+    if (root.engineName === name) return "ok"
+    root.beginDrain("switch", name)
+    return "ok"
+  }
+  function onDrainStart() {
+    root.hudText = "switching engine"
+    root.typelessCall("quiesce", function(n) { return root.typeless.quiesce(n, "switch", "switching engine") })
+    var now = Date.now()
+    root.dispatch(root.guarded("voice.drain", function() { return root.voice.drain(now) }), "voice")
+  }
+  function onSwitchCommit(e) {
+    var now = Date.now()
+    if (e.kind === "switch") configStore.setVoiceEngine(e.target)          // emits changed("engine"), applied here
+    var c = configStore.config
+    root.guarded("voice.setConfig", function() { root.voice.setConfig(c); return [] })
+    root.typelessCall("setConfig", function(n) { return root.typeless.setConfig(c, n) })
+    root.dispatch(root.guarded("voice.undrain", function() { return root.voice.undrain(now, root.remoteState) }), "voice")
+    root.applyDormancy()
+    root.typelessCall("resume", function(n) { return root.typeless.resume(n, "switch") })
+    root.switching = false
+    if (root.hudText === "switching engine") root.hudText = ""
+    root.updateRemoteWarning()
+    root.refreshDoctor()
+  }
+
   // ---- Typeless hotkey (Typeless spec §4.3 step 5) -----------------------------------
   function ipcTypelessHotkey(chord) {
     if (!configStore.loaded) return JSON.stringify({ ok: false, reason: "not-ready" })
@@ -661,7 +808,9 @@ Item {
       , selftest: { active: root.selftestActive, id: root.selftestActive ? root.selftestId : null,
                     remainingMs: root.selftestActive && root.selftest && root.selftestId !== null ? (function(s) { return s ? s.remainingMs : 0 })(root.selftest.status(root.selftestId, Date.now())) : 0 }
       , configWrites: { saves: configStore.saves, errors: configStore.saveErrors }
-      , typeless: { hotkey: root.config ? root.config.voice.typeless.hotkey : null, hotkeyStored: root.hotkeyStored() }
+      , engine: root.engineName
+      , typeless: { hotkey: root.config ? root.config.voice.typeless.hotkey : null, hotkeyStored: root.hotkeyStored(),
+                    state: root.typeless ? root.typeless.snapshot() : null, switching: root.switching }
       , doctorSummary: root.doctorSummary
       , unconfigured: root.unconfigured
     })
@@ -687,6 +836,7 @@ Item {
     function doctor(): string { root.refreshDoctor(); return JSON.stringify({ rows: root.doctorRows, summary: root.doctorSummary, facts: root.doctorFacts, at: root.doctorAt }) }
     function micToggle(): string { return root.micToggle() }
     function typelessHotkey(chord: string): string { return root.ipcTypelessHotkey(chord) }
+    function engine(name: string): string { return root.setEngine(name) }
   }
 
   // Finding #5 (final-review.md): spec §5.2 "shell exit makes a best-effort `voxtype record cancel`, closes
@@ -702,6 +852,9 @@ Item {
           Quickshell.execDetached(["voxtype", "record", "cancel"])
         if (snap.pluginMic) atv.micClose()
       }
+      // Typeless §6.2: only a remote `on` session with nothing outstanding; a stop after an unconfirmed start could
+      // itself start a recording.
+      if (typeless) { var chord = typeless.exitStop(); if (chord) Quickshell.execDetached(root.keytapArgv(chord)) }
     } catch (e) { }
   }
 }

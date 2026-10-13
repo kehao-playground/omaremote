@@ -15,6 +15,7 @@ OMAREMOTE_FAKE_DIR=$(mktemp -d /tmp/omaremote-fake.XXXXXX); export OMAREMOTE_FAK
 export XDG_CONFIG_HOME=$OMAREMOTE_FAKE_DIR/config XDG_DATA_HOME=$OMAREMOTE_FAKE_DIR/data
 export OMAREMOTE_IPC_TARGET=omaremote-test OMAREMOTE_APPID=omaremote-test
 export OMAREMOTE_DISPATCH=hyprctl            # dispatch actions go to the fake hyprctl, never to the live compositor
+export OMAREMOTE_KEYTAP=$ROOT/tests/fakes/bin/omaremote-keytap   # Typeless taps go to the fake client, never to uinput
 SYS_PATH=$PATH                                # captured before the fakes are prefixed: HARNESS_PATH scenarios build from this
 export PATH=$ROOT/tests/fakes/bin:$PATH
 ONLY=${1:-}
@@ -46,6 +47,7 @@ no_line() { ! grep -qxF "$2" "$1" || { echo "    unexpected line '$2' in $(basen
 reset_fakes() {
   rm -rf "${F:?}"/*; mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME"
   echo idle > "$F/vox.state"; echo inv-0 > "$F/sysd.invocation"; : > "$F/actions.log"
+  : > "$F/keytap.log"
   : > "$F/atv.present"; echo connected > "$F/atv.state"; printf 'atvvoice_mic' > "$F/vox.config"
   cp "$ROOT/tests/fixtures/pw-dump.json" "$F/pw-dump.json"
 }
@@ -62,10 +64,11 @@ start_harness() {   # HARNESS_PATH, if set, is used verbatim (a complete, self-c
 stop_harness() {   # kill the whole group — a follow/monitor fake left behind would spin on its state file for hours
   [[ -n $HPID ]] && { kill -- -"$HPID" 2>/dev/null; kill "$HPID" 2>/dev/null; wait "$HPID" 2>/dev/null; }; HPID=""
 }
-scenario() {   # scenario <name> <function>
-  local name=$1 fn=$2
+scenario() {   # scenario <name> <function> [prestart-function]
+  local name=$1 fn=$2 pre=${3:-}
   [[ -n $ONLY && $ONLY != "$name" ]] && return 0
   reset_fakes
+  [[ -n $pre ]] && "$pre"
   if ! start_harness; then fail=$((fail + 1)); failed+=("$name (harness)"); stop_harness; return 0; fi
   if "$fn"; then pass=$((pass + 1)); echo "ok   $name"; else fail=$((fail + 1)); failed+=("$name"); echo "FAIL $name"; grep -i 'omaremote\|error\|warn' "$F/harness.log" | tail -20 | sed 's/^/      /'; fi
   stop_harness
@@ -904,6 +907,149 @@ s_config_external_edit_back_to_earlier_value() {   # spec §4.3: X, Y, then an e
   wait_for '.typeless.hotkey' RightCtrl+Space 5
 }
 scenario config_external_edit_back_to_earlier_value s_config_external_edit_back_to_earlier_value
+
+# ---- Plan 5 Task 10: the Typeless engine through the Service ----
+taps_n() { wc -l < "$F/keytap.log" | tr -d ' '; }
+wait_taps() {   # wait_taps <n>: keytap.log holds exactly n taps within 3 s
+  local i=0
+  while (( i < 60 )); do [[ $(taps_n) == "$1" ]] && return 0; sleep 0.05; i=$((i + 1)); done
+  echo "    keytap.log has $(taps_n) taps, want $1:"; sed 's/^/      /' "$F/keytap.log"; return 1
+}
+settled_switch() { wait_for '.typeless.switching' false 5; }
+use_typeless() { set_cfg '.voice.engine = "typeless"' '.engine' typeless && settled_switch && wait_for '.typeless.state.quiesced | length' 0 3; }
+
+s_typeless_remote_hold_taps_start_and_stop() {
+  ready || return 1
+  use_typeless || return 1
+  ipc voice state streaming >/dev/null
+  wait_taps 1 || return 1
+  has_line "$F/keytap.log" "tap RightAlt" || return 1
+  wait_for '.typeless.state.typeless' on 3 || return 1
+  ipc voice state connected >/dev/null
+  wait_taps 2 || return 1
+  wait_for '.typeless.state.typeless' off 3 || return 1
+  ! grep -q 'record start' "$F/vox.log" || { echo "    voxtype was started under Typeless"; return 1; }
+}
+scenario typeless_remote_hold_taps_start_and_stop s_typeless_remote_hold_taps_start_and_stop
+
+s_typeless_system_press_toggles() {
+  ready || return 1
+  set_cfg '.voice.engine = "typeless" | .voice.mic = "system"' '.voiceMode' system || return 1
+  settled_switch || return 1
+  wait_for '.engine' typeless 3 || return 1
+  ipc key mic down >/dev/null; ipc key mic up >/dev/null
+  wait_taps 1 || return 1
+  ipc key mic down >/dev/null; ipc key mic up >/dev/null
+  wait_taps 2 || return 1
+  ! grep -q 'record start' "$F/vox.log" || { echo "    voxtype was started under Typeless"; return 1; }
+}
+scenario typeless_system_press_toggles s_typeless_system_press_toggles
+
+s_typeless_keytap_not_running_shows_hud() {
+  ready || return 1
+  echo 3 > "$F/keytap.code"
+  use_typeless || return 1
+  ipc voice state streaming >/dev/null
+  wait_for '.hud' "Typeless trigger failed: keytap not running" 3 || return 1
+  wait_for '.typeless.state.typeless' off 3
+}
+scenario typeless_keytap_not_running_shows_hud s_typeless_keytap_not_running_shows_hud
+
+s_engine_switch_ipc_commits() {
+  ready || return 1
+  [[ $(ipc engine typeless) == ok ]] || return 1
+  wait_for '.engine' typeless 3 || return 1
+  settled_switch || return 1
+  wait_for '.typeless.state.quiesced | length' 0 3 || return 1
+  [[ $(jq -r '.voice.engine' "$XDG_CONFIG_HOME/omaremote/config.json") == typeless ]] || { echo "    engine not written"; return 1; }
+  [[ $(ipc engine bogus) == invalid-engine ]]
+}
+scenario engine_switch_ipc_commits s_engine_switch_ipc_commits
+
+s_engine_switch_drains_voxtype_session() {   # §9 hardware item 6, without hardware
+  ready || return 1
+  ipc voice state streaming >/dev/null
+  wait_for '.voice.state' recording 3 || return 1
+  [[ $(ipc engine typeless) == ok ]] || return 1
+  settled_switch || return 1
+  has_line "$F/vox.log" "voxtype record stop" || return 1
+  [[ $(jget '.engine') == typeless ]] || return 1
+  [[ $(taps_n) == 0 ]] || { echo "    the hold that began under Voxtype started Typeless"; return 1; }
+  ipc voice state connected >/dev/null
+  ipc voice state streaming >/dev/null
+  wait_taps 1
+}
+scenario engine_switch_drains_voxtype_session s_engine_switch_drains_voxtype_session
+
+s_typeless_switch_back_stops_typeless() {    # §9 hardware item 7, without hardware
+  ready || return 1
+  use_typeless || return 1
+  ipc voice state streaming >/dev/null
+  wait_for '.typeless.state.typeless' on 3 || return 1
+  [[ $(ipc engine voxtype) == ok ]] || return 1
+  wait_taps 2 || return 1
+  settled_switch || return 1
+  [[ $(jget '.engine') == voxtype ]] || return 1
+  ipc voice state connected >/dev/null
+  sleep 0.3
+  [[ $(taps_n) == 2 ]] || { echo "    dormant Typeless tapped"; return 1; }
+}
+scenario typeless_switch_back_stops_typeless s_typeless_switch_back_stops_typeless
+
+s_dormant_under_voxtype_never_taps() {
+  ready || return 1
+  local i
+  for i in 1 2 3; do
+    ipc voice state streaming >/dev/null; sleep 0.15
+    ipc voice state connected >/dev/null; wait_for '.voice.state' idle 5 || return 1
+  done
+  [[ $(taps_n) == 0 ]] || { echo "    a dormant TypelessSession tapped"; return 1; }
+}
+scenario dormant_under_voxtype_never_taps s_dormant_under_voxtype_never_taps
+
+s_typeless_reset_while_holding() {           # §9 hardware item 4, without hardware
+  ready || return 1
+  use_typeless || return 1
+  ipc voice state streaming >/dev/null
+  wait_for '.typeless.state.typeless' on 3 || return 1
+  ipc reset >/dev/null
+  wait_taps 2 || return 1
+  wait_for '.typeless.state.typeless' off 3 || return 1
+  sleep 0.3
+  [[ $(taps_n) == 2 ]] || { echo "    the still-held button restarted Typeless"; return 1; }
+}
+scenario typeless_reset_while_holding s_typeless_reset_while_holding
+
+# Review: a shell started while the button streams. The startup order itself is pinned by EngineSwitch.test.mjs
+# (startTypeless); these two check the wired result end to end, whichever of State and config arrives first.
+pre_streaming() { echo streaming > "$F/atv.state"; }
+pre_streaming_typeless() { pre_streaming; mkdir -p "$XDG_CONFIG_HOME/omaremote"; echo '{"voice":{"engine":"typeless"}}' > "$XDG_CONFIG_HOME/omaremote/config.json"; }
+s_startup_streaming_under_voxtype_no_tap() {
+  wait_for '.config' true 5 || return 1
+  wait_for '.typeless.state.streaming' true 3 || return 1          # the State was seen...
+  sleep 0.5
+  [[ $(taps_n) == 0 ]] || { echo "    startup tapped under Voxtype:"; sed 's/^/      /' "$F/keytap.log"; return 1; }   # ...and nothing tapped
+}
+scenario startup_streaming_under_voxtype_no_tap s_startup_streaming_under_voxtype_no_tap pre_streaming
+s_startup_streaming_under_typeless_taps() {      # discriminating: the same start under Typeless does tap
+  wait_for '.engine' typeless 5 || return 1
+  wait_taps 1
+}
+scenario startup_streaming_under_typeless_taps s_startup_streaming_under_typeless_taps pre_streaming_typeless
+
+# Review: a refused second mic request must not release the "mic" holder of the apply still running.
+s_typeless_second_mic_request_keeps_first_paused() {
+  ready || return 1
+  use_typeless || return 1
+  echo 1 > "$F/vox.get-delay"                                       # keep the first apply pending for a while
+  [[ $(ipc mic system | jq -r '.ok') == true ]] || return 1
+  wait_for '.typeless.state.quiesced | index("mic") != null' true 3 || return 1
+  [[ $(ipc mic system | jq -r '.reason') == busy ]] || { echo "    the second request was not refused"; return 1; }
+  [[ $(jget '.typeless.state.quiesced | index("mic") != null') == true ]] || { echo "    the first apply lost its pause"; return 1; }
+  wait_for '.mic.pending' false 20 || return 1
+  wait_for '.typeless.state.quiesced | length' 0 3
+}
+scenario typeless_second_mic_request_keeps_first_paused s_typeless_second_mic_request_keeps_first_paused
 
 # ---- summary ---------------------------------------------------------------------
 echo "integration: $pass passed, $fail failed"
