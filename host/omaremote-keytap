@@ -1,0 +1,272 @@
+#!/usr/bin/env python3
+"""omaremote-keytap: one persistent uinput keyboard that taps Typeless's dictation hotkey on request.
+
+Typeless reads raw evdev and opens only devices that look like full keyboards, within ~2 s of their creation, so
+this device advertises every key code and lives for the whole session (Typeless spec §2.1-§2.2). Only the allowlist
+below is ever sent (§4.2).
+
+  omaremote-keytap serve          create the device and serve $XDG_RUNTIME_DIR/omaremote-keytap.sock
+  omaremote-keytap tap <chord>    exit 0 sent, 2 rejected, 3 no daemon, 4 write failed (unknown), 5 no reply (unknown)
+  omaremote-keytap ping           same exit codes; sends no key
+
+Spec: docs/superpowers/specs/2026-10-13-typeless-engine-design.md §3.1, §4. Stdlib only; run with python3 -I."""
+import fcntl
+import os
+import select
+import signal
+import socket
+import struct
+import sys
+import time
+
+MODIFIERS = {"LeftCtrl": 29, "RightCtrl": 97, "LeftShift": 42, "RightShift": 54,
+             "LeftAlt": 56, "RightAlt": 100, "LeftMeta": 125, "RightMeta": 126}
+MAIN = {"Space": 57}
+for _i, _c in enumerate("QWERTYUIOP"):
+    MAIN[_c] = 16 + _i
+for _i, _c in enumerate("ASDFGHJKL"):
+    MAIN[_c] = 30 + _i
+for _i, _c in enumerate("ZXCVBNM"):
+    MAIN[_c] = 44 + _i
+for _d in range(1, 10):
+    MAIN[str(_d)] = 1 + _d
+MAIN["0"] = 11
+for _n in range(1, 11):
+    MAIN["F%d" % _n] = 58 + _n
+MAIN["F11"], MAIN["F12"] = 87, 88
+for _n in range(13, 25):
+    MAIN["F%d" % _n] = 170 + _n
+CODES = dict(MODIFIERS, **MAIN)
+ALIASES = {"leftsuper": "LeftMeta", "rightsuper": "RightMeta", "leftwin": "LeftMeta", "rightwin": "RightMeta",
+           "leftcontrol": "LeftCtrl", "rightcontrol": "RightCtrl"}
+CANON = {name.lower(): name for name in CODES}
+CANON.update(ALIASES)
+
+EV_SYN, EV_KEY, SYN_REPORT = 0, 1, 0
+EVENT = "llHHi"                                   # struct input_event on 64-bit Linux
+UI_SET_EVBIT, UI_SET_KEYBIT = 0x40045564, 0x40045565
+UI_DEV_SETUP, UI_DEV_CREATE, UI_DEV_DESTROY = 0x405C5503, 0x5501, 0x5502
+BUS_VIRTUAL = 0x06
+DEVICE_NAME = b"omaremote keytap"
+READ_DEADLINE, MAX_REQUEST, REPLY_TIMEOUT = 0.5, 128, 1.5
+PRESS_GAP, TRIGGER_HOLD = 0.03, 0.08
+
+
+class ChordError(ValueError):
+    pass
+
+
+def parse_chord(text):
+    """Return the names in tap order (modifiers as written, then the main key). Mirrors lib/Chord.mjs."""
+    parts = text.split("+")
+    if len(parts) > 4:
+        raise ChordError("too many names")
+    names = []
+    for p in parts:
+        if p == "":
+            raise ChordError("empty name")
+        c = CANON.get(p.lower())
+        if c is None:
+            raise ChordError("unknown name: " + p)
+        if c in names:
+            raise ChordError("duplicate name: " + c)
+        names.append(c)
+    mains = [n for n in names if n in MAIN]
+    if len(mains) > 1:
+        raise ChordError("two main keys")
+    return [n for n in names if n in MODIFIERS] + mains
+
+
+class Keyboard:
+    """Writes key events through `write(type, code, value)`. Every key it presses is released before tap() returns
+    or raises, and again by close(); `down` lists keys that may still be held."""
+
+    def __init__(self, write, sleep=time.sleep, destroy=None):
+        self.write, self.sleep, self._destroy, self.down = write, sleep, destroy, []
+
+    @classmethod
+    def open(cls, path):
+        fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+        fcntl.ioctl(fd, UI_SET_EVBIT, EV_KEY)
+        for code in range(1, 249):                # a full keyboard, or Typeless never opens it (§2.2)
+            fcntl.ioctl(fd, UI_SET_KEYBIT, code)
+        fcntl.ioctl(fd, UI_DEV_SETUP, struct.pack("HHHH80sI", BUS_VIRTUAL, 0, 0, 1, DEVICE_NAME, 0))
+        fcntl.ioctl(fd, UI_DEV_CREATE)
+
+        def write(etype, code, value):
+            os.write(fd, struct.pack(EVENT, 0, 0, etype, code, value))
+
+        def destroy():
+            try:
+                fcntl.ioctl(fd, UI_DEV_DESTROY)
+            finally:
+                os.close(fd)
+        return cls(write, destroy=destroy)
+
+    def _key(self, name, value):
+        self.write(EV_KEY, CODES[name], value)
+        self.write(EV_SYN, SYN_REPORT, 0)
+
+    def tap(self, names):
+        others, trigger = names[:-1], names[-1]
+        try:
+            for k in others:
+                self.down.append(k)               # recorded before the write: a half-written press is still released
+                self._key(k, 1)
+                self.sleep(PRESS_GAP)
+            self.down.append(trigger)
+            self._key(trigger, 1)
+            self.sleep(TRIGGER_HOLD)
+            self._key(trigger, 0)
+            self.down.remove(trigger)
+            for k in reversed(others):
+                self.sleep(PRESS_GAP)
+                self._key(k, 0)
+                self.down.remove(k)
+        finally:
+            self.release_all()
+
+    def release_all(self):
+        for k in reversed(self.down):
+            try:
+                self._key(k, 0)
+            except OSError:
+                pass
+        self.down = []
+
+    def close(self):
+        self.release_all()
+        if self._destroy:
+            self._destroy()
+
+
+def sock_path():
+    base = os.environ.get("XDG_RUNTIME_DIR") or "/run/user/%d" % os.getuid()
+    return os.path.join(base, "omaremote-keytap.sock")
+
+
+def process(line, kb):
+    if line == "ping":
+        return "ok"
+    if line.startswith("tap "):
+        try:
+            names = parse_chord(line[4:])
+        except ChordError as e:
+            return "err reject %s" % e
+        try:
+            kb.tap(names)
+        except OSError as e:
+            return "err write %s" % e
+        return "ok"
+    return "err reject unknown request"
+
+
+def _read_request(conn):
+    deadline = time.monotonic() + READ_DEADLINE
+    buf = b""
+    while b"\n" not in buf[:MAX_REQUEST]:
+        if len(buf) >= MAX_REQUEST:
+            return None, "err reject too long"
+        left = deadline - time.monotonic()
+        if left <= 0 or not select.select([conn], [], [], left)[0]:
+            return None, "err reject timeout"
+        chunk = conn.recv(MAX_REQUEST + 1 - len(buf))
+        if not chunk:
+            return None, None                    # the client went away: nothing to answer
+        buf += chunk
+    return buf.split(b"\n", 1)[0].decode("utf-8", "replace"), None
+
+
+def _handle(conn, kb):
+    line, early = _read_request(conn)
+    reply = early if line is None else process(line, kb)
+    if reply is not None:
+        try:
+            conn.sendall((reply + "\n").encode())
+        except OSError:
+            pass
+
+
+def serve(path, kb, ready=None):
+    """One connection at a time; a stuck client costs the next one at most READ_DEADLINE."""
+    try:
+        os.unlink(path)                           # a stale socket from a crashed run
+    except FileNotFoundError:
+        pass
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    old = os.umask(0o177)
+    try:
+        srv.bind(path)
+    finally:
+        os.umask(old)
+    os.chmod(path, 0o600)
+    srv.listen(8)
+    if ready is not None:
+        ready.set()
+    try:
+        while True:
+            conn, _ = srv.accept()
+            with conn:
+                _handle(conn, kb)
+    finally:
+        kb.close()
+        srv.close()
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def client(line, path=None, timeout=REPLY_TIMEOUT):
+    if "\n" in line:
+        return 2
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        try:
+            s.connect(path or sock_path())
+        except OSError:
+            return 3
+        deadline = time.monotonic() + timeout
+        buf = b""
+        try:
+            s.sendall((line + "\n").encode())
+            while b"\n" not in buf:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return 5
+                s.settimeout(left)
+                chunk = s.recv(256)
+                if not chunk:
+                    return 5
+                buf += chunk
+        except OSError:                           # includes socket.timeout
+            return 5
+        reply = buf.split(b"\n", 1)[0].decode("utf-8", "replace")
+        if reply == "ok":
+            return 0
+        if reply.startswith("err reject"):
+            print(reply, file=sys.stderr)
+            return 2
+        if reply.startswith("err write"):
+            print(reply, file=sys.stderr)
+            return 4
+        return 5
+    finally:
+        s.close()
+
+
+def main(argv):
+    if len(argv) == 2 and argv[1] == "serve":
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))   # SystemExit unwinds through tap()'s finally
+        serve(sock_path(), Keyboard.open(os.environ.get("OMAREMOTE_UINPUT", "/dev/uinput")))
+        return 0
+    if len(argv) == 3 and argv[1] == "tap":
+        return client("tap " + argv[2])
+    if len(argv) == 2 and argv[1] == "ping":
+        return client("ping")
+    print("usage: omaremote-keytap serve | tap <chord> | ping", file=sys.stderr)
+    return 64
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
