@@ -1,7 +1,8 @@
 # omaremote — Typeless as an alternative transcription engine
 
 **Date:** 2026-10-13
-**Status:** Draft rev 5 — fourth review addressed; awaiting user review
+**Status:** Approved rev 5 (2026-10-13); implemented by Plan 5
+(docs/superpowers/plans/2026-10-13-omaremote-typeless-engine.md)
 **Amends:** `2026-09-14-omaremote-design.md` §3 (adds a host component), §5 (voice session), §6.2 (Voice tab);
 `2026-10-12-remote-mic-design.md` §5 (Doctor)
 
@@ -43,7 +44,8 @@ The probe was a throwaway stdlib-Python uinput script, since deleted.
    while the remote's button is physically held (remote-mic design §2.3).
 6. Typeless keeps its settings in `~/.config/Typeless/app-settings.json`:
    - `featureShortcutBindings.dictationMode` holds `["RightAlt"]`, written as `+`-joined evdev-style names;
-   - `selectedMicrophoneDevice` is `null` for Auto-detect, otherwise a device id;
+   - `selectedMicrophoneDevice` is an object `{deviceId, label, …}`; Auto-detect is `deviceId: "default"` (measured
+     2026-10-13 while writing Plan 5);
    - `microphoneDevices[]` maps ids to labels.
 
    This is an undocumented internal file. omaremote only reads it, for defaults and Doctor hints, and nothing
@@ -172,7 +174,7 @@ classification only. The allowlist is what limits what is ever sent.
        and nothing is written.
      - `{"ok":false,"reason":"config.json is invalid"}`: the existing guard in `ConfigStore._write`.
    - **Confirm persistence.** This needs serialized writes in ConfigStore (below). setup polls `status` until
-     `config.saves[N]` is `saved` or `failed`, for up to 2 s.
+     `configWrites.saves[N]` is `saved` or `failed`, for up to 2 s.
      - On `saved` it re-reads `config.json` from disk with `jq`, read-only, as a sanity check, and compares
        canonical values.
      - `failed`, the timeout, or a mismatch exits 1 with the reason.
@@ -189,8 +191,8 @@ classification only. The allowlist is what limits what is ever sent.
    - `saved` therefore means "this request's text reached disk". A later write may still replace it. setup's
      re-read of `config.json` catches that case and exits 1 with "the hotkey was changed again before setup
      could confirm it" whenever the canonical value on disk differs from the requested one.
-   - `status` exposes the last 16 outcomes as `config.saves` (`seq → saved|failed|pending`), plus the reason
-     for a failure.
+   - `status` exposes the last 16 outcomes as `configWrites.saves` (`seq → saved|failed|pending`), plus the reason
+     for a failure. (`status.config` was already a boolean, so the outcomes are published as `configWrites`.)
    - For `typelessHotkey` when the value is already equal in memory:
      - the write that last carried it is still pending → return that pending seq;
      - that write failed → issue a new write and return its seq;
@@ -467,8 +469,9 @@ These rows appear only when `voice.engine = "typeless"`. `host/omaremote-facts` 
 | hotkey matches | canonical `voice.typeless.hotkey` equals canonical `dictationMode[0]` (§3.1) | warn · fix `omaremote-setup typeless --hotkey-from-typeless`; `unknown` when the file is unreadable |
 | microphone matches mode | `remote`: Typeless's selected device label equals the remote's name. `system`: it does not | warn with both values; `unknown` when unreadable |
 
-The Voxtype rows that `remote` mode makes mandatory become informational under Typeless, except the ATVVoice rows,
-which `remote` mode still needs.
+Under Typeless every Voxtype row is informational: voxtype-version, -status, -output, -device and last-capture,
+and voxtype is not a required tool. The remote never drives Voxtype then; F9 is Omarchy's own binding. The
+ATVVoice rows still count. A VoiceSession "voxtype not responding" does not make the plugin unconfigured.
 
 ## 9. Testing
 
@@ -551,7 +554,7 @@ which `remote` mode still needs.
   - an existing value kept;
   - an invalid `--hotkey` rejected, with nothing written;
   - an IPC with no Service;
-  - `config.saves[N]` failed, or not resolved within 2 s;
+  - `configWrites.saves[N]` failed, or not resolved within 2 s;
   - a stuck IPC hitting the `timeout 3` deadline.
 
   It never touches the real systemd, Typeless or `~/.config/omaremote`.
