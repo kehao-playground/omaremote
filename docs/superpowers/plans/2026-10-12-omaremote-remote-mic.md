@@ -1962,3 +1962,36 @@ dbus-owned session at once in system mode too, so `hidToggle` met a non-idle ses
 ignored the press; the release stopped the dbus session. Fix (spec §4.2b): in system mode without
 `remoteOnDemand`, a `streaming` transition starts nothing. Tests: two unit tests and the integration
 scenario `system_toggle_ignores_remote_stream`.
+
+## Plan 4 outcome (2026-10-13)
+
+**Step 1, full suite** (at b9f29fc): `make check` → unit 267 pass / 0 fail, integration 55 passed / 0 failed,
+three `RESULT: PASS`, `MAKE_CHECK_EXIT=0`. After the final review's fix wave (573d4d6) the counts were
+260 / 54. Tasks 10–12 added the rest.
+
+**Step 2, live install:** `make dev-restart`. Status showed `remoteOnDemand: false` and `remote.retryMs`/`retryAt`.
+The plugin noticed the ATVVoice daemon the moment it registered (`retryMs: 0`), with no backoff wait.
+
+**Step 3, hardware.** Results in order, including the steps that did not behave as written:
+
+1. `cargo` was already usable; the `sudo pacman` line could not run from `!` (no password prompt) and was not needed.
+2. `omaremote-setup atvvoice` built the pinned rev in ~3 min, wrote the unit (`--device C0:5D:39:C3:45:D1 --name xiaomi`) and enabled it.
+3. `mic remote` succeeded. Doctor: all remote rows `pass`, `last-capture` `unknown`. `tools` failed only for a missing `playerctl`, which is unrelated to Plan 4.
+4. **First press test failed: no text.** Voxtype logged `Audio device not found: 'atvvoice-xiaomi'`. Voxtype 1.1.0 opens only ALSA PCMs → **Task 10** (ALSA PCM bridge, doctor check).
+5. **Second press test failed: empty transcripts.** The whole hold was captured (`Recording stopped (6.0s)`, `lastCapture atvvoice-xiaomi · remote`), but the audio was saturated: ATVVoice carries ADPCM decoder state across streams and the RC003 never sends `AUDIO_SYNC` → **Task 11** (patched build). Verified live, then through setup:
+   - `built atvvoice 0e8f641 + reset-decoder patch`;
+   - two consecutive holds transcribed: "Micro testing 1-2-3." and "Micro testing 1, 2, 3, 1, 2".
+6. "Last capture" showed `atvvoice-xiaomi · remote`.
+7. **`mic system` toggle failed.** The remote's D-Bus stream arrived ~10 ms before the HID press, so the direct start preempted the toggle. The commit path also left VoiceSession with a stale `voice.mic` → **Task 12**. After the fix, the first short press started a session that survived the release, and the second stopped it (4.4 s). System-mode *transcription* is **not verified**: this host has no microphone. Retest with an external mic (e.g. DJI Mic Mini).
+
+**Side observations, not fixed:**
+- On 2026-10-12, 3 of 6 early presses streamed only 0.13–0.19 s. It did not recur in any later test (every hold since ran its full length).
+- Once, a transcription took 34.7 s while another ran concurrently, and omaremote reported `stop-timeout`. CPU-only Whisper on this host.
+- A hold made while the previous transcription is still running is ignored by design.
+- Voxtype's model here is `ggml-base.en` (English only). Mixed Chinese/English dictation is handled separately.
+
+**Upstream (user-approved):**
+- Filed b0o/ATVVoice#28 (empty name suffix for an all-non-ASCII BLE name).
+- Tested PR #27, which carries the same decoder reset, on the RC003, and reported back.
+- The PR author added a 1 s no-audio timeout for tap-opened streams (ea53135). Retested OK and reported back.
+- If #27 merges, bump the pin and drop host/patches/atvvoice-reset-decoder.patch.
