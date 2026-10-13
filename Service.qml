@@ -14,6 +14,8 @@ import "lib/Stats.mjs" as Stats
 import "lib/Pipewire.mjs" as Pipewire
 import "lib/SelfTest.mjs" as SelfTest
 import "lib/Doctor.mjs" as Doctor
+import "lib/Chord.mjs" as Chord
+import "lib/ConfigWrites.mjs" as ConfigWrites
 import "components"
 
 Item {
@@ -181,6 +183,14 @@ Item {
   function onConfigChanged(kind) {
     var now = Date.now()
     if (kind === "load") { root.startModules(now); root.rearm(); return }
+    // Typeless spec §6.2: the engine switch commits through its own path (Task 10 applies it there), and a hotkey
+    // change through IPC only refreshes the sessions' config. Neither reloads the key engine or aborts anything.
+    if (kind === "engine") { root.rearm(); return }
+    if (kind === "hotkey") {
+      if (voice) root.guarded("voice.setConfig", function() { voice.setConfig(configStore.config); return [] })
+      root.rearm()
+      return
+    }
     if (kind === "commit") {                                        // §6.2: the internal voice.mic write reloads and aborts nothing,
       if (voice) {                                                  // but _write replaced the config object: refresh what reads voice.mic
         root.guarded("voice.setConfig", function() { voice.setConfig(configStore.config); return [] })
@@ -603,6 +613,28 @@ Item {
   function resetKeys() { configStore.resetKeys() }
   function setVoiceField(field, value) { configStore.setVoiceField(field, value) }
 
+  // ---- Typeless hotkey (Typeless spec §4.3 step 5) -----------------------------------
+  function ipcTypelessHotkey(chord) {
+    if (!configStore.loaded) return JSON.stringify({ ok: false, reason: "not-ready" })
+    var p = Chord.parseChord(chord)
+    if (!p.ok) return JSON.stringify({ ok: false, reason: "invalid chord: " + p.reason })   // rejected, never defaulted
+    if (root.configInvalid) return JSON.stringify({ ok: false, reason: "config.json is invalid" })
+    var rawV = configStore.raw && configStore.raw.voice
+    var stored = rawV && rawV.typeless && rawV.typeless.hotkey !== undefined ? Chord.canonicalChord(rawV.typeless.hotkey) : undefined
+    var last = configStore.writes.lastCarrying(function(t) { return Chord.canonicalChord(configStore.hotkeyOfText(t)) === p.canonical })
+    var plan = ConfigWrites.hotkeyWritePlan(stored, p.canonical, last)
+    var seq = plan.seq
+    if (plan.write) {
+      seq = configStore.setTypelessHotkey(p.canonical)
+      if (!seq) return JSON.stringify({ ok: false, reason: root.lastError || "config write refused" })
+    }
+    return JSON.stringify({ ok: true, hotkey: p.canonical, writeSeq: seq })
+  }
+  function hotkeyStored() {
+    var v = configStore.raw && configStore.raw.voice
+    return !!(v && v.typeless && v.typeless.hotkey !== undefined)
+  }
+
   // ---- IPC (§2 hardware-free testability) ---------------------------------------
   function statusJson() {
     return JSON.stringify({
@@ -628,6 +660,8 @@ Item {
       , unconfiguredReason: root.unconfiguredReason
       , selftest: { active: root.selftestActive, id: root.selftestActive ? root.selftestId : null,
                     remainingMs: root.selftestActive && root.selftest && root.selftestId !== null ? (function(s) { return s ? s.remainingMs : 0 })(root.selftest.status(root.selftestId, Date.now())) : 0 }
+      , configWrites: { saves: configStore.saves, errors: configStore.saveErrors }
+      , typeless: { hotkey: root.config ? root.config.voice.typeless.hotkey : null, hotkeyStored: root.hotkeyStored() }
       , doctorSummary: root.doctorSummary
       , unconfigured: root.unconfigured
     })
@@ -652,6 +686,7 @@ Item {
     function selftestDisarm(id: string): string { return root.selftestDisarm(id) ? "ok" : "unknown" }
     function doctor(): string { root.refreshDoctor(); return JSON.stringify({ rows: root.doctorRows, summary: root.doctorSummary, facts: root.doctorFacts, at: root.doctorAt }) }
     function micToggle(): string { return root.micToggle() }
+    function typelessHotkey(chord: string): string { return root.ipcTypelessHotkey(chord) }
   }
 
   // Finding #5 (final-review.md): spec §5.2 "shell exit makes a best-effort `voxtype record cancel`, closes

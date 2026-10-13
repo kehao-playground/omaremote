@@ -864,6 +864,47 @@ s_config_slow_external_write() {   # finding #3: a slow in-place external edit (
 }
 scenario config_slow_external_write s_config_slow_external_write
 
+# ---- Plan 5 Task 5: serialized config writes, typelessHotkey IPC ----
+cfgfile() { echo "$XDG_CONFIG_HOME/omaremote/config.json"; }
+wait_saved() {   # wait_saved <seq>
+  wait_for ".configWrites.saves[\"$1\"]" saved 3
+}
+s_typeless_hotkey_written_and_confirmed() {
+  wait_for '.config' true 5 || return 1
+  [[ $(jget '.typeless.hotkeyStored') == false ]] || { echo "    a fresh config must not store a hotkey"; return 1; }
+  local r seq; r=$(ipc typelessHotkey rightalt+rightshift)
+  [[ $(jq -r '.ok' <<<"$r") == true && $(jq -r '.hotkey' <<<"$r") == RightAlt+RightShift ]] || { echo "    reply: $r"; return 1; }
+  seq=$(jq -r '.writeSeq' <<<"$r"); [[ $seq =~ ^[0-9]+$ ]] || { echo "    no writeSeq: $r"; return 1; }
+  wait_saved "$seq" || return 1
+  [[ $(jq -r '.voice.typeless.hotkey' "$(cfgfile)") == RightAlt+RightShift ]] || return 1
+  [[ $(jget '.typeless.hotkeyStored') == true ]] || return 1
+  r=$(ipc typelessHotkey RightAlt+RightShift)                       # equal value, already saved
+  [[ $(jq -r '.writeSeq' <<<"$r") == null ]] || { echo "    equal saved value must not write: $r"; return 1; }
+}
+scenario typeless_hotkey_written_and_confirmed s_typeless_hotkey_written_and_confirmed
+
+s_typeless_hotkey_invalid_rejected() {
+  wait_for '.config' true 5 || return 1
+  local before; before=$(cat "$(cfgfile)")
+  local r; r=$(ipc typelessHotkey Alt+Q)
+  [[ $(jq -r '.ok' <<<"$r") == false && $(jq -r '.reason' <<<"$r") == "invalid chord: unknown name: Alt" ]] || { echo "    reply: $r"; return 1; }
+  sleep 0.3
+  [[ $(cat "$(cfgfile)") == "$before" ]] || { echo "    config.json changed"; return 1; }
+  [[ $(jget '.typeless.hotkey') == RightAlt ]] || return 1
+}
+scenario typeless_hotkey_invalid_rejected s_typeless_hotkey_invalid_rejected
+
+s_config_external_edit_back_to_earlier_value() {   # spec §4.3: X, Y, then an external edit back to X must win
+  wait_for '.config' true 5 || return 1
+  local s1 s2
+  s1=$(ipc typelessHotkey RightCtrl+Space | jq -r '.writeSeq'); wait_saved "$s1" || return 1
+  s2=$(ipc typelessHotkey RightAlt+RightShift | jq -r '.writeSeq'); wait_saved "$s2" || return 1
+  local f; f=$(cfgfile)
+  jq '.voice.typeless.hotkey = "RightCtrl+Space"' "$f" > "$F/c.json" && cat "$F/c.json" > "$f"
+  wait_for '.typeless.hotkey' RightCtrl+Space 5
+}
+scenario config_external_edit_back_to_earlier_value s_config_external_edit_back_to_earlier_value
+
 # ---- summary ---------------------------------------------------------------------
 echo "integration: $pass passed, $fail failed"
 (( fail == 0 )) || { printf '  %s\n' "${failed[@]}"; exit 1; }
