@@ -1,7 +1,7 @@
 # omaremote — Typeless as an alternative transcription engine
 
 **Date:** 2026-10-13
-**Status:** Draft rev 4 — third review addressed; awaiting user review
+**Status:** Draft rev 5 — fourth review addressed; awaiting user review
 **Amends:** `2026-09-14-omaremote-design.md` §3 (adds a host component), §5 (voice session), §6.2 (Voice tab);
 `2026-10-12-remote-mic-design.md` §5 (Doctor)
 
@@ -195,10 +195,19 @@ classification only. The allowlist is what limits what is ever sent.
      - the write that last carried it is still pending → return that pending seq;
      - that write failed → issue a new write and return its seq;
      - otherwise (saved, or loaded from disk) → `writeSeq: null`.
-   - **Watcher echoes.** ConfigStore remembers the texts of the in-flight write, the queued writes and the
-     last 4 completed writes. A watcher read equal to any of them is our own echo and is ignored. Only a text
-     outside that set is an external change. A late echo of an earlier write of ours therefore never reverts
-     the config or fires `changed("external")`.
+   - **Watcher notifications are only a trigger to re-read.** Equal text cannot tell who wrote a file, so
+     ConfigStore never compares a watcher read against a history of its own texts.
+     - A watcher notification while writes are in flight or queued only marks the store *dirty*.
+     - When the queue is empty, after a notification or after the last pending write resolves while dirty,
+       ConfigStore reads the **current** disk text once and reconciles. If it equals the in-memory text,
+       nothing happens; a late echo of our own write lands here, because by then the disk holds our latest
+       text. If it differs, ConfigStore adopts the disk text and fires `changed("external")`.
+     - So after every quiet period memory equals disk. Example: we save X, then Y, then the user edits the
+       file back to X from outside. The re-read finds X, which differs from memory (Y), and memory becomes X.
+     - An external edit that lands while our write is in flight, and that our later write then overwrites, is
+       lost: last writer wins. The reconcile still leaves memory equal to disk.
+     - If our last write failed, memory holds text that never reached disk. Reconcile then adopts the disk text
+       and reports it as `external`, so a failed save never leaves memory ahead of disk.
 
 6. setup never switches `voice.engine`. The user does that in the panel.
 
@@ -250,6 +259,10 @@ and every tap result.
 - `streaming` is either *trusted* or *unknown*. It is trusted once a `State` value has been read from the
   current ATVVoice source (sender and generation). `sourceLost` makes it unknown until the next source's first
   `State` read. For `desired`, unknown counts as `false`.
+- These facts stay current under **either** engine. The Service delivers ATVVoice `State` changes and source
+  loss to TypelessSession from shell start, whichever engine is selected (§6.1). Under Voxtype the session is
+  *dormant*: it is held quiesced, so `desired` is always false and it never taps. A release or a daemon
+  restart that happens under Voxtype is therefore already reflected when the user switches to Typeless.
 - `needRelease` keeps one physical hold from restarting after it was ended. **Arming it** means: if `streaming`
   is trusted and already `false`, the release has already happened and the flag stays clear. Otherwise it is set.
   - **Armed by** `reset`, the `maxSessionSec` deadline, `quiesce`, a `notSent` start, and `sourceLost` (which
@@ -300,6 +313,14 @@ and every tap result.
 - *release first, then start `notSent`:* the trusted `false` means arming is a no-op, and the next hold starts.
 - *ATVVoice restarts mid-hold:* the new source reports `streaming`, `needRelease` stays set, and nothing starts
   until the hold ends.
+- *released under Voxtype, then switch to Typeless:* the dormant session saw the trusted `false`, so
+  `needRelease` is clear and the first hold after the switch starts.
+- *ATVVoice restarts under Voxtype, then switch to Typeless:* the dormant session saw `sourceLost` and then the
+  new source's first `State`. If that read says not streaming, the first hold starts. If it says streaming
+  (held across the switch), nothing starts until that hold ends.
+- *shell starts under Typeless with the button released:* the first `State` read is a trusted `false`, nothing
+  was armed, and the first hold starts. If ATVVoice is not running yet, streaming is unknown but `needRelease`
+  was never armed, so the new source's first `State` read of `streaming` starts normally.
 
 `hidPress` does nothing in `remote` mode (remote-mic design §4.2). A short press makes a ~1 s stream:
 Typeless records about 1 s of silence and stops. This is harmless and not filtered.
@@ -334,9 +355,14 @@ promises no automatic recovery. To recover, the user stops Typeless by hand, the
 
 ### 6.1 Routing
 
-- **`voice.engine = "voxtype"`:** unchanged. TypelessSession exists but receives no input.
+- **Source updates go to TypelessSession under both engines.** The Service tracks the ATVVoice sender,
+  generation and latest `State`, and forwards every `State` change and every source loss to TypelessSession
+  from shell start. This only updates its facts (§5.2). Taps are impossible while it is dormant.
+- **`voice.engine = "voxtype"`:** unchanged for VoiceSession. TypelessSession is dormant (held quiesced) and
+  receives only the source updates above: no mic key, reset or panic.
 - **`voice.engine = "typeless"`:**
-  - ATVVoice `State` changes, source loss, the mic key's press edge, reset and panic go to TypelessSession.
+  - ATVVoice `State` changes and source loss go to TypelessSession (as under Voxtype), and so do the mic
+    key's press edge, reset and panic.
   - VoiceSession receives none of them. It keeps following `voxtype status`, so F9 dictation and its HUD still work.
   - The mic key's release edge is dropped.
 - **Tap effects** run `python3 -I ~/.local/lib/omaremote/omaremote-keytap tap <chord>` through the existing
@@ -377,7 +403,8 @@ promises no automatic recovery. To recover, the user stops Typeless by hand, the
      HUD says "Typeless may still be recording".
 2. Commit `voice.engine` (an internal `commit`).
 3. `setConfig()` on both sessions.
-4. `resume()` and `undrain()`.
+4. `undrain()` on VoiceSession. `resume()` on TypelessSession only when the new engine is Typeless; under
+   Voxtype it stays quiesced (dormant, §6.1).
 
 Inputs that arrive during steps 1–3 reach neither engine as a start. Both refuse them, and the HUD shows
 "switching engine". A switch never restarts Voxtype.
@@ -394,7 +421,7 @@ Inputs that arrive during steps 1–3 reach neither engine as a start. Both refu
 - If `voice.engine`, `voice.mic` or `voice.typeless.hotkey` changed:
   1. Drain as in a switch, with the old config still in both sessions, so a stop uses the captured chord
      (§5.1).
-  2. Then `setConfig()`, `resume()` and `undrain()`.
+  2. Then `setConfig()`, `undrain()`, and `resume()` only if the engine is now Typeless.
 - Any other reload keeps today's behaviour.
 
 **Hotkey changed through IPC while a session runs:** `setConfig()` only. The running session keeps its
@@ -475,7 +502,12 @@ which `remote` mode still needs.
     - an ATVVoice restart mid-hold (sourceLost, then a new source reporting streaming): nothing starts until a
       trusted release;
     - switch timeout → reset (refused while outstanding) → the old start resolves `sent` → still `unsynced` →
-      reset accepted → `off`.
+      reset accepted → `off`;
+    - dormant under Voxtype: hold, then release, then switch to Typeless → the first hold starts;
+    - dormant under Voxtype: sourceLost, then a new source reporting not streaming, then switch → the first
+      hold starts; the same with the new source reporting streaming → nothing starts until a release;
+    - dormant under Voxtype: a long history of streaming changes and source losses never produces a tap
+      (discriminating: the same history while resumed does tap).
   - `VoiceSession.test.mjs` adds drain cases:
     - a plugin-owned recording gets `record stop` and is drained at `transcribing`;
     - a keyboard-owned session is untouched and does not block;
@@ -486,13 +518,20 @@ which `remote` mode still needs.
     - A → B(X) → C(Y), where B is `saved`, but setup's disk check reports "changed again";
     - a failure marks exactly its seq;
     - the 8-deep limit;
-    - a late watcher echo of a completed earlier write being ignored, with no `external`;
+    - a late watcher notification after our own writes: the re-read equals memory, so no `external`;
+    - save X, save Y, then an external edit back to X: memory ends as X and `external` fires (discriminating
+      against any text-history rule);
+    - a notification while a write is in flight only marks dirty; the reconcile runs once after the queue
+      drains;
+    - a failed last write: reconcile adopts the disk text;
     - the `typelessHotkey` equal-value cases (pending, failed, saved).
   - Config normalization of `engine` and `hotkey`, including a stored invalid hotkey.
   - The Doctor rows, with canonical comparison and `unknown` for an unparsable Typeless value.
   - The Presentation strings.
   - The routing and quiesce orchestration, extracted as pure functions:
     - an engine switch in both directions, with a plugin-owned session running on the outgoing engine;
+    - under Voxtype, ATVVoice `State` changes and source loss reach TypelessSession, while the mic key, reset
+      and panic do not; a shell started under Voxtype creates TypelessSession quiesced;
     - an engine switch timing out at 3 s;
     - CommandRunner escalating to SIGKILL and completing at deadline + 1 s with a child that ignores SIGTERM
       and keeps its stdout open (a fake process in the harness);
