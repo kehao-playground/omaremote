@@ -120,7 +120,12 @@ Item {
     catch (e) { return undefined }
   }
 
-  function setVoiceMic(mode) { if (root._write(ConfigFile.withPatch(root.raw, ["voice", "mic"], mode))) root.changed("commit") }
+  // Mic source picker spec §3: voice.mic and voice.systemDevice land in one write; remote passes no device.
+  function setVoiceMic(mode, device) {
+    var next = ConfigFile.withPatch(root.raw, ["voice", "mic"], mode)
+    if (device !== undefined) next = ConfigFile.withPatch(next, ["voice", "systemDevice"], device)
+    if (root._write(next)) root.changed("commit")
+  }
   function setKey(name, fields) { if (root._write(ConfigFile.withKey(root.raw, name, fields))) root.changed("keys") }
   function setTiming(timing) { if (root._write(ConfigFile.withMerged(root.raw, ["timing"], timing))) root.changed("timing") }
   function setVoiceField(field, value) { if (root._write(ConfigFile.withPatch(root.raw, ["voice", field], value))) root.changed("voice") }

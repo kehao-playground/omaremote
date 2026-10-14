@@ -241,3 +241,18 @@ test("voice.typeless.pressWaitMs defaults to 250 and accepts integers 0..2000 on
     assert.ok(r.problems.some(p => p.code === "typeless-press-wait-invalid"), JSON.stringify(bad));
   }
 });
+
+test("voice.systemDevice: missing, non-string or invalid loads as default; a node name is kept", () => {
+  const load = (v) => normalizeConfig({ ...DEFAULT_CONFIG, voice: { ...DEFAULT_CONFIG.voice, systemDevice: v } });
+  assert.equal(load(undefined).config.voice.systemDevice, "default");
+  assert.equal(load(42).config.voice.systemDevice, "default");
+  assert.equal(load(null).config.voice.systemDevice, "default");
+  assert.equal(load("alsa_input.usb-C922").config.voice.systemDevice, "alsa_input.usb-C922");
+  assert.equal(load("default").config.voice.systemDevice, "default");
+  const bad = load("-rf");
+  assert.equal(bad.config.voice.systemDevice, "default");
+  assert.ok(bad.problems.some(p => p.code === "system-device-invalid"));
+  assert.equal(load(42).problems.some(p => p.code === "system-device-invalid"), false, "a non-string is silently default");
+  const noVoice = normalizeConfig({ ...DEFAULT_CONFIG, voice: undefined }).config;
+  assert.equal(noVoice.voice.systemDevice, "default");
+});
