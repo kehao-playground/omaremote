@@ -1,8 +1,10 @@
 # omaremote — microphone source picker (Voxtype)
 
 **Date:** 2026-10-14
-**Status:** Draft rev 2 for review (rev 2 answers the 2026-10-14 review: snapshot before write, locked
-compare-and-set, rollback partial outcomes, cache-miss refresh, structured block state)
+**Status:** Draft rev 3 for review. Rev 2 answered the first 2026-10-14 review: snapshot before write, locked
+compare-and-set, partial rollback outcomes, cache-miss refresh, structured block state. Rev 3 answers the
+second: an in-flight `alsa-set` counts as mutated, single-snapshot parsing, rollback progress across a
+defer, and a restore promise limited to semantic state.
 **Amends:** `2026-09-14-omaremote-design.md` §3 (mic apply contract), §6.2 (Voice tab, Doctor);
 `2026-10-12-remote-mic-design.md` §3 (the atvvoice asoundrc write becomes locked and atomic), §5 (Doctor
 `voxtype-device`, `last-capture`)
@@ -82,7 +84,22 @@ pcm.omaremote-mic {
 
 It has its own markers and is edited independently of the atvvoice block. A forward apply only
 creates or rewrites it. Only a rollback removes it, and only to restore a file that had no block
-before (§5.2), so a rollback always returns the file to its exact earlier state.
+before (§5.2).
+
+**What a rollback restores.** A rollback restores the block's *semantic state* (`absent` or
+`present <node>`). It does not restore the file's earlier bytes. The writer always emits the canonical
+block above, so comments or formatting someone added inside the markers are not brought back. Lines
+outside the markers are kept as they are *now*, including edits made since the apply. A missing file
+and an empty file are both `absent`, and removing the last block leaves an empty file, never a
+deleted one.
+
+**Layout rules**, so that adding and then removing the block returns the outside lines unchanged:
+- Append: if the file is non-empty and does not end in a newline, write one newline first. Then
+  append the block, with no extra blank line.
+- Remove: delete exactly the lines from BEGIN through END, nothing around them.
+
+Adding then removing the block is therefore byte-identical when the file was empty, missing, or
+ended in a newline. Otherwise it differs only by the trailing newline that was added.
 
 The block's state is one of:
 - `absent`: neither marker is present.
@@ -94,7 +111,7 @@ The block's state is one of:
 ### 4.2 `omaremote-setup alsa-mic`
 
 A new subcommand, reusing the atvvoice block's marker logic (replace in place, append if absent,
-keep every line outside the markers byte-identical).
+keep every line outside the markers byte-identical, under §4.1's layout rules).
 
 Output is one line of JSON, so "no block" can never be confused with a node name:
 `{"state":"absent"}` or `{"state":"present","node":"<node>"}`.
@@ -114,7 +131,17 @@ Output is one line of JSON, so "no block" can never be confused with a node name
 The wait is bounded at 5 s; a timeout exits 1. The writers are `alsa-mic set` and the existing
 `omaremote-setup atvvoice` step. The atvvoice step also changes from `cp` to the same atomic write:
 a temporary file in the same directory, then a rename. Readers (`alsa-mic get`, `omaremote-facts`)
-take no lock, because the rename means they only ever see a whole file.
+take no lock. The rename means any single open sees one whole version of the file.
+
+**Single-snapshot parsing.** That guarantee holds per open, so every parse of the file opens it
+exactly once. It reads the whole content into memory, then parses the markers, the block state and
+the outside lines from that copy. This applies to `alsa-mic get` and `set`, to the atvvoice step's
+state check and generator, and to `omaremote-facts` (which calls `alsa-mic get`). Today's
+`alsa_rc_state` and `gen_alsa_rc` run several `grep`s against the pathname. A rename landing between
+them could mix two versions and be misread as `bad`, so both are rewritten to parse one in-memory
+copy. A writer, under the lock, also parses its one copy and never re-reads the file before its
+rename. This holds only against writers that replace the file atomically. A tool that rewrites the
+file in place can still be seen half-written, and is then reported as `bad`.
 
 **What the lock does not cover.** An editor or tool outside the repo does not take the lock. If one
 saves the file inside the window between `alsa-mic set`'s read and its rename, its edit is lost. An
@@ -207,13 +234,28 @@ queued → reserve (preconditions unchanged)
 (including 2, a `bad` block) also fails with `preflight-failed`. Neither has a rollback, because
 nothing was written.
 
-**`alsa-set`.** This is the first write.
-- Exit 0: set `mutated = true`, `serviceDirty = true` and `alsaExpected = present <node>`. The flags
-  are set the moment the write succeeds, before the restart. alsa-lib re-reads changed config files
-  when a PCM is opened, so the running daemon's next session would already use the new block.
-- Exit 3: fail with `alsa-conflict`. Nothing was written, so there is no rollback.
-- Exit 1, 2 or other: fail with `alsa-set-failed`. Nothing was written (§4.2), so there is no
-  rollback.
+**`alsa-set`.** This is the first write. Like today's `set`, the operation becomes `mutated` when
+the command is *issued*, not when it exits. The command is tagged with the state it writes
+(`alsaWrites = present <node>`), as `set` is tagged with `writes` today.
+
+While it runs, the write is in flight and its outcome is unknown. `alsaExpected` still equals
+`alsaPrev`, and `serviceDirty` is still false. A reset or external recording in this window takes
+today's mutated path, `deferOp`. The deferred snapshot holds `alsaPrev`, `alsaExpected` (still the
+old state) and the rest, and `tryDeferred` already waits for in-flight commands to drain before it
+rolls back. When the command drains:
+- Exit 0 sets `deferred.alsaExpected = present <node>` and `deferred.serviceDirty = true`. The
+  rollback then restores the block and restarts.
+- Any other exit leaves both as they were. Nothing was written, so `rollback-alsa` is skipped
+  (`alsaExpected === alsaPrev`).
+
+When the operation is still live, the exit is handled in place:
+- Exit 0 sets `serviceDirty = true` and `alsaExpected = present <node>`. alsa-lib re-reads changed
+  config files when a PCM is opened, so the running daemon's next session would already use the new
+  block. The service is therefore dirty from this write on, before the restart.
+- Exit 3 fails the operation with `alsa-conflict`. Exit 1, 2 or any other code fails it with
+  `alsa-set-failed`. In both cases nothing was written (§4.2), so the operation ends `failed` with
+  rollback `verified` and no restart: `alsaExpected === alsaPrev`, `audio.device` was never written,
+  and `serviceDirty` is false. This reuses today's "service never saw the new value" ending.
 - When `alsaPrev` already equals `present <node>`, `alsa-set` is skipped. `mutated` and
   `serviceDirty` then become true at `set`, exactly as today.
 
@@ -238,7 +280,7 @@ Rollback runs in this order:
    the user the microphone config needs attention.
 2. **`rollback-alsa`**, when `alsaExpected !== alsaPrev`: run
    `alsa-mic set <alsaPrev as node | --absent> --expect <alsaExpected>`. Removing the block restores
-   a file that had none, so the restore is exact in every case.
+   the `absent` state, so the block's semantic state is restored in every case (§4.1).
    - Exit 0: `alsaExpected = alsaPrev`. Continue to step 3.
    - Exit 3: emit today's `conflict` effect,
      `{ expected: alsaExpected, found: <the state printed by the exit-3 run> }`, with the HUD
@@ -249,15 +291,30 @@ Rollback runs in this order:
      or a lock timeout does not fix itself, and the effect plus Doctor (§6, condition 2) point the user
      at it.
 3. **Restart and verify**, as today, when `serviceDirty`. The final rollback is `verified` only when
-   both steps 1 and 2 restored exactly. If step 2 ended `conflict` or `failed`, that outcome stands
+   step 1 restored `audio.device` and step 2 ended `done`. If step 2 ended `conflict` or `failed`, that outcome stands
    even if the restart verifies.
 
 A `job-pending` reading before `rollback-alsa` or the restart defers the rest, as today.
 
+**Progress survives a defer.** A rollback can be deferred part-way, for example after `rollback-alsa`
+and before the restart. The deferred snapshot therefore also carries the rollback's progress:
+- `rbDevice`: `pending | done`. It becomes `done` once step 1 finishes, whether `rollback-set` ran
+  or was not needed.
+- `rbAlsa`: `pending | done | conflict | failed`. It records step 2's outcome, and is `done` when
+  the step was not needed.
+
+A resumed rollback continues from the first `pending` step. It never re-runs a finished step, and
+never retries a step that ended `conflict` or `failed`. Its final rollback value is the carried
+outcome when `rbAlsa` is `conflict` or `failed`, even if the restart verifies; otherwise today's
+rules apply. When the defer bound expires before the rollback resumes, the record is today's
+`unresolved`, with the carried outcome kept beside it as `partial: "conflict" | "failed"`, so it is
+not lost. The Voice tab shows both values.
+
 **Deferred rollback.** Reset priority and deferral follow today's rules. The deferred snapshot also
-carries `alsaPrev` and `alsaExpected`. A drained `alsa-set` that exited 0 after a defer sets
-`alsaExpected = present <node>`, the same way a drained `set` corrects `expected` today. A drained
-`rollback-alsa` that exited 0 sets `alsaExpected = alsaPrev`.
+carries `alsaPrev`, `alsaExpected`, `rbDevice` and `rbAlsa`. A drained `alsa-set` that exited 0 after
+a defer sets `alsaExpected = present <node>` and `serviceDirty = true` (see `alsa-set` above). A
+drained `rollback-alsa` sets `rbAlsa` from its exit (0 → `done` with `alsaExpected = alsaPrev`;
+3 → `conflict`; other → `failed`).
 
 ### 5.3 Detecting a silent fallback
 
@@ -307,6 +364,11 @@ The row keeps its `warn` level on a mismatch.
     - a `job-pending` is found before `set`, so the operation defers, and the deferred rollback later
       restores the block;
     - a reset arrives, so the operation defers with `alsaPrev` and `alsaExpected` in the snapshot;
+  - a reset while `alsa-set` is in flight, the most important case. The order is: issue `alsa-set`,
+    reset, then `alsa-set` exits 0. The operation defers rather than finishing, the drained exit sets
+    `alsaExpected` and `serviceDirty`, and the deferred rollback issues `rollback-alsa`, then the
+    restart, ending `verified`. The variant where the drained exit is 3 issues no `rollback-alsa`;
+  - `alsa-set` failing while the operation is live ends with rollback `verified` and no restart;
   - a restart or verify failure rolls back in order: `audio.device`, then `rollback-alsa`, then the
     restart;
   - `rollback-alsa` from `absent` issues `--absent` with `--expect` the new node;
@@ -315,7 +377,13 @@ The row keeps its `warn` level on a mismatch.
   - `rollback-alsa` exit 2 still restarts and ends with rollback `failed` and the "partly restored"
     `unconfigured` effect, with nothing deferred;
   - a conflict in step 1 (`audio.device`) issues no `rollback-alsa`;
-  - a drained `alsa-set`, and a drained `rollback-alsa`, after a defer correct `alsaExpected`;
+  - a drained `alsa-set`, and a drained `rollback-alsa`, after a defer correct `alsaExpected` and
+    `rbAlsa`;
+  - partial outcomes across a defer: `rollback-alsa` exits 2 (or 3), then `job-pending` defers it,
+    then the resumed rollback restarts and verifies. The result stays `failed` (or `conflict`), the
+    resumed rollback issues neither `rollback-get` nor `rollback-alsa` again, and the restart runs
+    once;
+  - a defer that expires with `rbAlsa = conflict` records `unresolved` with `partial: "conflict"`;
   - a source-to-source switch, where `audio.device` is already `omaremote-mic` and the restart still
     runs;
   - `alsaPrev` equal to the node skips `alsa-set`, and `mutated` first becomes true at `set`;
@@ -339,8 +407,11 @@ The row keeps its `warn` level on a mismatch.
 **Setup** (new `tests/setup-alsa-mic.sh`, run with `OMAREMOTE_ALSA_RC` in a temp dir)
 - `set <node> --expect-absent` on an empty or missing file creates the block.
 - `set` replaces the block in place, leaving the atvvoice block and all outside lines byte-identical.
-- `set --absent --expect <node>` removes the block, and the file is byte-identical to the one before
-  the block was added.
+- `set --absent --expect <node>` after a `set` that created the block returns the file byte-identical
+  when the original was empty, missing (it leaves an empty file) or ended in a newline. For a file
+  without a final newline, it differs only by that added newline.
+- A rollback to `present <old>` over a block whose inner lines were reformatted by hand writes the
+  canonical block: the semantic state is restored, the formatting is not.
 - An expectation mismatch exits 3, prints the current state as JSON, and leaves the file
   byte-identical.
 - `bad` blocks exit 2 for both `get` and `set` and leave the file byte-identical. The cases are
@@ -354,7 +425,11 @@ The row keeps its `warn` level on a mismatch.
     with both blocks present and every outside line intact.
   - Hold the lock from the test with `flock`. `set` waits, then succeeds once the lock is released
     within 5 s; held past 5 s, it exits 1 with the file unchanged.
-- The existing atvvoice setup tests still pass with the atomic, locked write.
+- **Unlocked readers during writes:** a loop of `alsa-mic get` runs while a writer alternates the
+  block between two nodes and the atvvoice block is rewritten, 500 reads. Every read prints
+  `present` with one of the two nodes, never `bad`. The same loop against the atvvoice state check
+  never reports `bad`.
+- The existing atvvoice setup tests still pass with the atomic, locked, single-read write.
 
 **Integration** (fake-remote scenarios)
 - `s_mic_system_device`: `ipc mic system <fake node>` issues `alsa-get`, `alsa-set`, `set` and
