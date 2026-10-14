@@ -520,6 +520,46 @@ s_mic_system_late_plug() {   # picker spec §4.4: a source plugged in after a fr
   r=$(mic_device alsa_input.usb-late) || { echo "    $r"; return 1; }
   [[ $(mic_wait "$(jq -r .operationId <<<"$r")") == succeeded ]]
 }
+pre_no_remote() { rm -f "$F/atv.present"; }   # no ATVVoice: NodeName never arrives, so only the startup refresh can fill the list
+s_mic_sources_cold_start() {   # final review #4: Service refreshes the source list at startup, before any micSources call
+  wait_for '.config' true 5 && wait_for '.backend' idle 5 || return 1
+  wait_for '.micSources.refreshing' false 3 || return 1
+  [[ $(jget '.remote.node') == "" ]] || { echo "    NodeName arrived, the scenario proves nothing: $(jget '.remote.node')"; return 1; }
+  [[ $(jget "any(.micSources.list[]; .name == \"$PICK\")") == true ]] || { echo "    no startup refresh: $(jget '.micSources')"; return 1; }
+  local r; r=$(ipc micSystem "$PICK")                      # a cache hit: accepted on the first call
+  [[ $(jq -r .ok <<<"$r") == true ]] || { echo "    first micSystem: $r"; return 1; }
+}
+pre_late_node() { echo 1.5 > "$F/atv.prop-delay"; }   # NodeName (and State) answers arrive after the startup refresh
+s_mic_sources_exclude_late_node() {   # final review #6: a refresh that ran before NodeName was known must not keep the remote node
+  wait_for '.config' true 5 || return 1
+  wait_for '.micSources.refreshing' false 3 || return 1
+  [[ $(jget '.remote.node') == "" ]] || { echo "    NodeName known too early, the scenario proves nothing: $(jget '.remote.node')"; return 1; }
+  [[ $(jget 'any(.micSources.list[]; .name == "atvvoice_mic")') == true ]] || { echo "    startup list: $(jget '.micSources')"; return 1; }
+  wait_for '.remote.node' atvvoice_mic 5 || return 1
+  wait_for '.micSources.refreshing' false 3 || return 1
+  [[ $(jget 'any(.micSources.list[]; .name == "atvvoice_mic")') == false ]] || { echo "    remote node kept: $(jget '.micSources')"; return 1; }
+  [[ $(jget "any(.micSources.list[]; .name == \"$PICK\")") == true ]]
+}
+s_mic_fallback_hud_clears() {   # final review #7: the fallback HUD shows while recording, and a capture probe that lands after
+                                # the session ended (the HUD's own clear already ran) must not leave it on the idle HUD
+  ready || return 1
+  use_ptt || return 1
+  wait_for '.micSources.refreshing' false 3 || return 1
+  set_cfg ".voice.systemDevice = \"$PICK\"" '.systemDevice' "$PICK" || return 1
+  ipc key mic down > /dev/null; wait_for '.voice.state' recording 3 || return 1
+  local i; for i in $(seq 1 40); do [[ $(jget '.hud') == *"recording from "* ]] && break; sleep 0.05; done
+  [[ $(jget '.hud') == *"recording from "*", not "* ]] || { echo "    no fallback HUD: $(jget '.hud')"; ipc key mic up > /dev/null; return 1; }
+  ipc key mic up > /dev/null; wait_for '.voice.state' idle 5 || return 1
+  [[ $(jget '.hud') == "" ]] || { echo "    idle hud after a normal stop: $(jget '.hud')"; return 1; }
+  echo 1 > "$F/pw-dump.delay"                                  # the next capture probe answers ~1 s late
+  local n; n=$(grep -c '^pw-dump' "$F/actions.log")
+  ipc key mic down > /dev/null; wait_for '.voice.state' recording 3 || return 1
+  for i in $(seq 1 40); do (( $(grep -c '^pw-dump' "$F/actions.log") > n )) && break; sleep 0.05; done
+  (( $(grep -c '^pw-dump' "$F/actions.log") > n )) || { echo "    no capture probe started"; ipc key mic up > /dev/null; return 1; }
+  ipc key mic up > /dev/null; wait_for '.voice.state' idle 5 || return 1
+  sleep 1.3                                                    # the late probe has answered
+  [[ $(jget '.hud') == "" ]] || { echo "    late fallback HUD stuck on idle: $(jget '.hud')"; return 1; }
+}
 s_mic_apply_system() {
   ready || return 1
   local r; r=$(ipc mic system)
@@ -684,6 +724,9 @@ scenario mic_apply_job_pending_blocks s_mic_apply_job_pending_blocks
 scenario mic_system_device s_mic_system_device
 scenario mic_system_unknown_source s_mic_system_unknown_source
 scenario mic_system_late_plug s_mic_system_late_plug
+scenario mic_sources_cold_start s_mic_sources_cold_start pre_no_remote
+scenario mic_sources_exclude_late_node s_mic_sources_exclude_late_node pre_late_node
+scenario mic_fallback_hud_clears s_mic_fallback_hud_clears
 scenario recovery_restart_bounded s_recovery_restart_bounded
 scenario stats_and_capture s_stats_and_capture
 

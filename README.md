@@ -23,7 +23,8 @@ The design targets the wider ATVV family (e.g. G20S Pro).
     Hold to talk, release to finish.
   - `system`: your desktop microphone. Each press of the mic button starts or stops dictation.
   - In `system` mode, pick the microphone in the Voice tab, or run `omarchy-shell omaremote micSystem <node>`;
-    `omarchy-shell omaremote micSources` lists the node names. Only Voxtype is affected; Typeless keeps its own
+    `omarchy-shell omaremote micSources` lists the node names. If the answer says `refreshing` or
+    `sourcesRefreshing`, run it again a moment later. Only Voxtype is affected; Typeless keeps its own
     microphone setting.
 - **13-key mapping engine.** Per key: tap, hold, double-tap and repeat. Actions can send keys, run Hyprland
   dispatchers, change the volume, control media (`playerctl`), or turn off or lock the screen.

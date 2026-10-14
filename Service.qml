@@ -512,7 +512,11 @@ Item {
       if (root.voice) root.dispatch(root.guarded("voice.atvRead", function() { return root.voice.atvRead({ state: state || "unknown", requestId: requestId, generation: generation }, Date.now()) }), "voice")
       root.rearm()
     }
-    onNodeName: function(name) { root.remoteNode = name; root.updateRemoteWarning() }
+    onNodeName: function(name) {
+      var changed = name !== root.remoteNode
+      root.remoteNode = name; root.updateRemoteWarning()
+      if (changed) root.refreshMicSources()          // a list built before the node was known may still hold it (§4.3 exclude)
+    }
   }
   SystemdVerifier {
     id: verifier
@@ -549,7 +553,8 @@ Item {
         if (r.streamFound && root.config.voice.mic === "system") {             // picker spec §5.3: the fallback HUD
           var want = root.config.voice.systemDevice !== "default" ? root.config.voice.systemDevice : Pipewire.defaultSource(dump)
           var mm = Pipewire.captureMismatch(dump, want)
-          if (mm) root.hudText = "recording from " + mm.nodeDescription + ", not " + mm.expectedDescription
+          // only while the session still records: a probe answering after the stop would outlive the stop's own HUD clear
+          if (mm && root.voiceState === "recording") root.hudText = "recording from " + mm.nodeDescription + ", not " + mm.expectedDescription
         }
       } catch (e) { console.log("omaremote: pw-dump parse failed: " + e) }
     } }
@@ -602,6 +607,7 @@ Item {
     if (again) root.startSourcesRefresh()
   }
   function refreshMicSources() { if (root.micSources.requestRefresh()) root.startSourcesRefresh() }
+  Component.onCompleted: root.refreshMicSources()   // cold start: the first micSources / micSystem finds a list (onNodeName refreshes again)
   // Picker spec §4.4: the request-time refusals; null means "go ahead". A `refresh: true` answer obliges us to start now.
   function checkSource(device) {
     if (!AlsaMic.isNodeName(device) || /\.monitor$/.test(device) || device === root.remoteNode) return { ok: false, reason: "invalid-source" }

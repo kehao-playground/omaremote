@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Spec §9: fake pw-dump — prints $OMAREMOTE_FAKE_DIR/pw-dump.json (default []).
+# Spec §9: fake pw-dump — prints $OMAREMOTE_FAKE_DIR/pw-dump.json (default []), after pw-dump.delay seconds if set.
 source "$(dirname "$0")/fake-log.sh"; fake_log "pw-dump $*"
+[[ -s $OMAREMOTE_FAKE_DIR/pw-dump.delay ]] && sleep "$(cat "$OMAREMOTE_FAKE_DIR/pw-dump.delay")"   # a slow answer, when a scenario asks
 cat "$OMAREMOTE_FAKE_DIR/pw-dump.json" 2>/dev/null || echo "[]"
 exit 0

@@ -22,7 +22,8 @@ OmaRemote 是一個 [Omarchy](https://omarchy.org) 外掛，讓 ATVV 類型的�
     按住說話，放開結束。
   - `system`：用電腦的麥克風。按一下麥克風鍵開始，再按一下停止。
   - `system` 模式下可在 Voice 分頁挑選麥克風，或執行 `omarchy-shell omaremote micSystem <節點>`；
-    `omarchy-shell omaremote micSources` 會列出節點名稱。只影響 Voxtype，Typeless 的麥克風仍在它自己的設定裡選。
+    `omarchy-shell omaremote micSources` 會列出節點名稱。若回應顯示 `refreshing` 或 `sourcesRefreshing`，稍等一下再執行一次。
+    只影響 Voxtype，Typeless 的麥克風仍在它自己的設定裡選。
 - **13 鍵對應引擎**：每個按鍵都可以分別設定短按、長按、連按兩下和按住重複。
   動作可以是送出按鍵、執行 Hyprland dispatcher、調整音量、控制媒體播放（`playerctl`），或關閉、鎖定螢幕。
   按住 panic 鍵（預設是 Menu）可以把所有狀態重設。
