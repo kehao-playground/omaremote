@@ -31,7 +31,7 @@
 
 1. **IPC verb.** Quickshell `IpcHandler` functions have a fixed arity, so `mic(mode)` cannot also take a node, and changing it would break `omarchy-shell omaremote mic system` and `host/omaremote-setup`'s `ipc mic "$mode"`. Spec §4.4's `mic system <node>` is therefore spelled **`micSystem <node>`** (`omarchy-shell omaremote micSystem alsa_input…`). A second new verb, **`micSources`**, refreshes and returns the source list so a CLI user can find node names. `mic system` and `mic remote` are unchanged.
 2. **Keyboard.** Spec §4.5 says the row behaves like the Keys tab. The Keys tab's real pattern is: with the cursor on a row, Left/Right moves the highlighted column and Enter activates it. The picker follows that: cursor on the Microphone row, Left/Right moves the highlight, Enter applies it, and Esc keeps its panel-wide meaning (close). There is no separate edit mode. Enter on the already-active choice does nothing.
-3. **Node-name pattern.** The pattern is `^[A-Za-z0-9_][A-Za-z0-9_.:-]*$`. It is the spec's `^[A-Za-z0-9_.:-]+$` with a first character that cannot be `-`, so a node name can never be parsed as an option to `alsa-mic`. It is defined once in JS (`lib/AlsaMic.mjs` `NODE_RE`) and once in bash (`NODE_RE` in `host/omaremote-setup`), and a test pins both to the same accept/reject table.
+3. **Node-name pattern.** The pattern is `^[A-Za-z0-9_.:][A-Za-z0-9_.:-]*$` (spec rev 4 §4.2): the spec's character set, with only a leading `-` forbidden, so a node name can never be parsed as an option to `alsa-mic`. A leading `.` or `:` is allowed. It is defined once in JS (`lib/AlsaMic.mjs` `NODE_RE`) and once in bash (`NODE_RE` in `host/omaremote-setup`), and a test pins both to the same accept/reject table.
 4. **An `alsa-set` whose exit is not one of 1, 2, 3, 64 (a timeout kill 124/137, 127) may have landed**, because the rename is its last step. MicApply treats it as written: `alsaExpected = present <node>`, `serviceDirty = true`, error `alsa-set-failed`, then a normal rollback. The rollback's compare-and-set then finds the truth. `alsa-restore` exiting 3 with a printed state equal to `alsaPrev` means "the file already holds the value to restore" and counts as `done`, mirroring today's `rollback-get` rule. Any other non-zero `alsa-restore` exit is `failed`.
 5. **The `alsa-*` commands get the 10 s restart deadline** (`restartCmdMs`), not the 2 s read deadline, because the lock may legitimately wait 5 s.
 6. **The integration scenario checks wiring and end state**, not the cross-process order of `get`/`alsa-get`/`alsa-set`/`set`/`restart`. The fake harness logs Voxtype calls and systemd calls in different files and never logs the host script. The exact order is pinned by the MicApply unit tests (Task 6), which see every command in one effect stream.
@@ -40,7 +40,7 @@
 ## Review Focus
 
 - A node name that looks like an option or contains ALSA syntax (`-x`, `a"b`, `a}b`, `a b`) must be refused before it reaches argv or the file. Owner: Task 1 (JS table), Task 4 (bash table, same rows).
-- A file whose last line has no newline, or that holds only the mic block: add then remove must leave exactly the original (plus at most that one newline). Owner: Task 4.
+- A file whose last line has no newline, or that holds only the mic block: add then remove must leave exactly the original (plus at most the one newline an append adds), and a replace or remove must never add a byte outside the block. Owner: Task 4.
 - A drained command answering after a defer must update the deferred snapshot, never a newer operation. Owner: Task 6 ("a stale alsa command from a reset operation" test).
 - The panel opened with an empty cache, then an immediate pick: the first answer is `sourcesRefreshing`, never `no-such-source`. Owner: Task 2 (pure rule) and Task 9 (`s_mic_system_unknown_source` first answer).
 - A system with the stored `systemDevice` unplugged at startup: the panel must still show it, as " (not connected)" and unpickable, and Doctor must fail condition 3, not crash on a missing list. Owner: Task 7 (Doctor) and Task 10 (`micChoices`).
@@ -79,8 +79,8 @@
 - Test: `tests/AlsaMic.test.mjs`, `tests/Pipewire.test.mjs`
 
 **Interfaces:**
-- Produces: `NODE_RE: RegExp`, `MIC_PCM = "omaremote-mic"`, `isNodeName(s) → boolean`, `absent() → {state:"absent"}`, `present(node) → {state:"present",node}`, `parseAlsaState(text) → state | null`, `sameAlsa(a, b) → boolean`, `alsaSetArgv(prefix: string[], target: state, expect: state) → string[]`.
-- Produces: `captureSources(dump, { exclude?: string[] }) → [{ name, description }]`, `defaultSource(dump) → string | null`, `captureMismatch(dump, expected: string | null) → null | { node, nodeDescription, expected, expectedDescription }`.
+- Produces: `NODE_RE: RegExp` (`^[A-Za-z0-9_.:][A-Za-z0-9_.:-]*$`), `MIC_PCM = "omaremote-mic"`, `isNodeName(s) → boolean`, `absent() → {state:"absent"}`, `present(node) → {state:"present",node}`, `parseAlsaState(text) → state | null`, `sameAlsa(a, b) → boolean`, `alsaSetArgv(prefix: string[], target: state, expect: state) → string[]`.
+- Produces: `captureSources(dump, { exclude?: string[] }) → [{ name, description }]`, `sourcesFromProbe(code: number, text: string, opts) → [{ name, description }] | null` (null unless the exit is 0 AND the output is a JSON array), `defaultSource(dump) → string | null`, `captureMismatch(dump, expected: string | null) → null | { node, nodeDescription, expected, expectedDescription }`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -94,7 +94,7 @@ import { NODE_RE, MIC_PCM, isNodeName, absent, present, parseAlsaState, sameAlsa
 // The same table is pinned against the bash NODE_RE in tests/setup-alsa-mic.sh (Task 4). Keep the two in step.
 export const NODE_TABLE = [
   ["alsa_input.usb-046d_C922_Pro_Stream_Webcam_557DD3BF-02.analog-stereo", true],
-  ["atvvoice-xiaomi", true], ["none", true], ["absent", true], ["a:b.c_d-e", true], ["_x", true],
+  ["atvvoice-xiaomi", true], ["none", true], ["absent", true], ["a:b.c_d-e", true], ["_x", true], [".x", true], [":x", true],
   ["-x", false], ["", false], ["a b", false], ['a"b', false], ["a}b", false], ["a{b", false], ["a\\b", false], ["a\nb", false],
 ];
 
@@ -102,7 +102,7 @@ test("NODE_RE accepts node names and refuses option-like or ALSA-syntax names", 
   for (const [name, ok] of NODE_TABLE) assert.equal(isNodeName(name), ok, JSON.stringify(name));
   assert.equal(isNodeName(undefined), false);
   assert.equal(isNodeName(42), false);
-  assert.equal(NODE_RE.source, "^[A-Za-z0-9_][A-Za-z0-9_.:-]*$");
+  assert.equal(NODE_RE.source, "^[A-Za-z0-9_.:][A-Za-z0-9_.:-]*$");
   assert.equal(MIC_PCM, "omaremote-mic");
 });
 
@@ -135,7 +135,7 @@ test("alsaSetArgv spells targets and expectations as alsa-mic flags", () => {
 });
 ```
 
-Append to `tests/Pipewire.test.mjs` (also extend its import line to `import { captureSourceOf, sourceNames, captureSources, defaultSource, captureMismatch } from "../lib/Pipewire.mjs";`):
+Append to `tests/Pipewire.test.mjs` (also extend its import line to `import { captureSourceOf, sourceNames, captureSources, sourcesFromProbe, defaultSource, captureMismatch } from "../lib/Pipewire.mjs";`):
 
 ```js
 const node = (id, props) => ({ id, type: "PipeWire:Interface:Node", info: { props } });
@@ -161,6 +161,16 @@ test("captureSources lists pickable sources with description fallbacks", () => {
   ]);
   assert.equal(captureSources(pickDump).some(s => s.name === "atvvoice-xiaomi"), true, "exclude is what drops the remote");
   assert.deepEqual(captureSources(null), []);
+});
+
+test("sourcesFromProbe needs both a zero exit and a JSON array", () => {
+  const text = JSON.stringify(pickDump);
+  assert.deepEqual(sourcesFromProbe(0, text, { exclude: ["atvvoice-xiaomi"] }).map(s => s.name), ["alsa_input.usb-C922", "alsa_input.pci-builtin", "bare_source"]);
+  assert.equal(sourcesFromProbe(1, text, {}), null, "valid JSON with a non-zero exit is a failed refresh");
+  assert.equal(sourcesFromProbe(124, text, {}), null);
+  assert.equal(sourcesFromProbe(0, "not json", {}), null);
+  assert.equal(sourcesFromProbe(0, "{}", {}), null, "not an array");
+  assert.deepEqual(sourcesFromProbe(0, "[]", {}), [], "an empty graph is a successful, empty list");
 });
 
 test("defaultSource reads the default metadata, null without it", () => {
@@ -196,9 +206,9 @@ Create `lib/AlsaMic.mjs`:
 
 ```js
 // Mic source picker spec §4.1/§4.2/§5.1: the managed `omaremote-mic` block's state, as `omaremote-setup alsa-mic` prints
-// it, and the one comparison every caller uses. Plan ruling 3: the first character can never be `-`, so a node name is
+// it, and the one comparison every caller uses. Spec §4.2 / plan ruling 3: the first character can never be `-`, so a node name is
 // never read as an option. host/omaremote-setup's NODE_RE is the same pattern; tests pin both to one table.
-export const NODE_RE = /^[A-Za-z0-9_][A-Za-z0-9_.:-]*$/;
+export const NODE_RE = /^[A-Za-z0-9_.:][A-Za-z0-9_.:-]*$/;
 export const MIC_PCM = "omaremote-mic";
 
 export const isNodeName = (s) => typeof s === "string" && NODE_RE.test(s);
@@ -237,6 +247,14 @@ export function captureSources(dump, { exclude = [] } = {}) {
     const p = props(n);
     return { name: p["node.name"], description: p["node.description"] || p["node.nick"] || p["node.name"] };
   }).filter(s => isNodeName(s.name) && !/\.monitor$/.test(s.name) && !exclude.includes(s.name));
+}
+
+// Spec §4.3: one probe's outcome. A refresh succeeds only when pw-dump exited 0 AND printed a JSON array.
+export function sourcesFromProbe(code, text, opts) {
+  if (code !== 0) return null;
+  let dump;
+  try { dump = JSON.parse(String(text || "")); } catch (e) { return null; }
+  return Array.isArray(dump) ? captureSources(dump, opts) : null;
 }
 
 // Spec §6 `last-capture`: the PipeWire default source, from the `default` metadata object.
@@ -285,11 +303,16 @@ git commit -m "feat(mic): ALSA block state helpers and PipeWire capture-source h
 **Interfaces:**
 - Produces: `createMicSources()` returning:
   - `list() → [{name, description}]` (a copy).
-  - `check(node) → { verdict: "ok" | "refreshing" | "no-such-source" | "sources-unavailable", refresh: boolean }`. When `refresh` is true, the caller must start a refresh and call `started()` at once.
-  - `requestRefresh() → boolean`. True means "start one now". False means one is running, and another is queued after it.
-  - `started()`, `finished(sources: array | null) → boolean`. The return is true when the caller must start another refresh now.
+  - `check(node) → { verdict: "ok" | "refreshing" | "no-such-source" | "sources-unavailable", refresh: boolean }`.
+  - `requestRefresh() → boolean`.
+  - `started() → id: number`.
+  - `finished(id: number, sources: array | null) → boolean`.
   - `refreshing() → boolean`.
-- The rule uses a refresh sequence number, not a clock: a refresh qualifies for a miss only if it *started* after that miss was recorded.
+- **Start contract.** Every call that answers "start one" (`check` with `refresh: true`, `requestRefresh` returning true, `finished` returning true) puts the cache in *start requested*. The caller must call `started()` next, in the same turn.
+  - While a start is requested, or a refresh runs, no further call answers "start one", and `refreshing()` is true.
+  - A miss recorded while a start is requested needs no extra refresh, because the refresh about to start postdates it.
+- **Identity.** `started()` returns the refresh's id, and `finished` takes it. A `finished` for an id that is not the running refresh is ignored and returns false. That covers a timed-out probe's late exit, or a probe abandoned and replaced.
+- The order between a refresh and a miss is decided by the id sequence, not a clock: a refresh qualifies for a miss only if its id is greater than the last id issued when the miss was recorded.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -302,7 +325,7 @@ import { createMicSources } from "../lib/MicSources.mjs";
 
 const C922 = { name: "alsa_input.usb-C922", description: "C922" };
 const LATE = { name: "alsa_input.usb-late", description: "Late" };
-function seeded(list = [C922]) { const s = createMicSources(); s.started(); s.finished(list); return s; }
+function seeded(list = [C922]) { const s = createMicSources(); s.requestRefresh(); s.finished(s.started(), list); return s; }
 
 test("a cache hit is accepted without a refresh", () => {
   assert.deepEqual(seeded().check(C922.name), { verdict: "ok", refresh: false });
@@ -311,6 +334,17 @@ test("a cache hit is accepted without a refresh", () => {
 test("a miss starts a refresh even when the cache was just refreshed", () => {
   const s = seeded();                                       // refreshed a moment ago; LATE was plugged in afterwards
   assert.deepEqual(s.check(LATE.name), { verdict: "refreshing", refresh: true });
+});
+
+test("start requested but not yet started: a second check never asks for another start", () => {
+  const s = seeded();
+  assert.equal(s.check(LATE.name).refresh, true);
+  assert.deepEqual(s.check(LATE.name), { verdict: "refreshing", refresh: false });
+  assert.deepEqual(s.check("other"), { verdict: "refreshing", refresh: false });
+  assert.equal(s.requestRefresh(), false);
+  assert.equal(s.refreshing(), true);
+  s.finished(s.started(), [C922]);
+  assert.deepEqual(s.check("other"), { verdict: "no-such-source", refresh: false }, "a miss during the requested start is decided by it");
 });
 
 test("a retry while that refresh runs answers refreshing and starts no second one", () => {
@@ -322,39 +356,57 @@ test("a retry while that refresh runs answers refreshing and starts no second on
 
 test("a refresh started after the miss decides: found accepts, missing refuses once", () => {
   const s = seeded();
-  s.check(LATE.name); s.started(); s.finished([C922, LATE]);
+  s.check(LATE.name); s.finished(s.started(), [C922, LATE]);
   assert.deepEqual(s.check(LATE.name), { verdict: "ok", refresh: false });
   const t = seeded();
-  t.check("gone"); t.started(); t.finished([C922]);
+  t.check("gone"); t.finished(t.started(), [C922]);
   assert.deepEqual(t.check("gone"), { verdict: "no-such-source", refresh: false });
   assert.deepEqual(t.check("gone"), { verdict: "refreshing", refresh: true }, "the answered miss was cleared: a new one starts over");
 });
 
 test("a refresh that started before the miss never answers no-such-source", () => {
   const s = seeded();
-  assert.equal(s.requestRefresh(), true); s.started();      // the panel's refresh, already running
+  assert.equal(s.requestRefresh(), true);
+  const old = s.started();                                  // the panel's refresh, already running
   assert.deepEqual(s.check(LATE.name), { verdict: "refreshing", refresh: false });
-  assert.equal(s.finished([C922]), true, "the older refresh ending must start one that postdates the miss");
-  assert.deepEqual(s.check(LATE.name), { verdict: "refreshing", refresh: false }, "not yet started: still waiting");
-  s.started(); s.finished([C922]);
+  assert.equal(s.finished(old, [C922]), true, "the older refresh ending must start one that postdates the miss");
+  assert.deepEqual(s.check(LATE.name), { verdict: "refreshing", refresh: false }, "start requested: waiting, no second start");
+  s.finished(s.started(), [C922]);
   assert.deepEqual(s.check(LATE.name), { verdict: "no-such-source", refresh: false });
 });
 
 test("a failed refresh answers sources-unavailable and keeps the old list", () => {
   const s = seeded();
-  s.check(LATE.name); s.started(); s.finished(null);
+  s.check(LATE.name); s.finished(s.started(), null);
   assert.deepEqual(s.check(LATE.name), { verdict: "sources-unavailable", refresh: false });
   assert.deepEqual(s.list(), [C922]);
 });
 
+test("a late report from an abandoned refresh cannot finish the newer one", () => {
+  const s = seeded();
+  s.requestRefresh();
+  const first = s.started();
+  assert.equal(s.finished(first, null), false);              // its deadline expired: reported failed, abandoned
+  s.requestRefresh();
+  const second = s.started();
+  assert.equal(s.finished(first, [C922, LATE]), false, "the old probe's late exit is ignored");
+  assert.equal(s.refreshing(), true, "the newer refresh is still running");
+  assert.deepEqual(s.list(), [C922], "and the stale result was not adopted");
+  s.finished(second, [C922, LATE]);
+  assert.deepEqual(s.list(), [C922, LATE]);
+});
+
 test("requestRefresh while one runs queues exactly one more", () => {
   const s = createMicSources();
-  assert.equal(s.requestRefresh(), true); s.started();
+  assert.equal(s.requestRefresh(), true);
+  const a = s.started();
   assert.equal(s.requestRefresh(), false);
-  assert.equal(s.finished([C922]), true);
-  s.started();
-  assert.equal(s.finished([C922]), false);
-  assert.equal(s.finished([C922]), false, "a finish with nothing running is ignored");
+  assert.equal(s.finished(a, [C922]), true);
+  assert.equal(s.requestRefresh(), false, "start already requested");
+  const b = s.started();
+  assert.equal(s.finished(b, [C922]), false);
+  assert.equal(s.finished(b, [C922]), false, "a second report for the same refresh is ignored");
+  assert.equal(s.refreshing(), false);
 });
 ```
 
@@ -370,47 +422,57 @@ Create `lib/MicSources.mjs`:
 ```js
 // Mic source picker spec §4.3/§4.4: the cached capture-source list and the cache-miss rule. A node missing from the
 // cache is refused only after a refresh that STARTED after its first miss has completed; ipcMic answers at once and
-// the caller retries. A sequence number orders refreshes against misses, so no clock tie can misorder them. Pure.
+// the caller retries. Ids order refreshes against misses (no clock ties) and identify each refresh, so a late report
+// from an abandoned probe can never finish a newer one. Pure; Service runs pw-dump.
 export function createMicSources() {
   let list = [];
-  let seq = 0;                       // refreshes started so far
-  let running = null;                // { seq } while one runs
-  let last = null;                   // { seq, ok } of the last completed refresh
+  let seq = 0;                       // the last refresh id issued
+  let running = null;                // { id } while a refresh runs
+  let requested = false;             // a start was asked for and started() has not been called yet
+  let last = null;                   // { id, ok } of the last completed refresh
   let again = false;                 // start another refresh as soon as the running one ends
   const misses = new Map();          // node → the value of `seq` when its first unanswered miss was recorded
+  const ask = () => { requested = true; return true; };
 
   return {
     list() { return list.slice(); },
-    refreshing() { return running !== null; },
+    refreshing() { return running !== null || requested; },
     check(node) {
       if (list.some(s => s.name === node)) { misses.delete(node); return { verdict: "ok", refresh: false }; }
       if (!misses.has(node)) misses.set(node, seq);
       const missSeq = misses.get(node);
-      if (last && last.seq > missSeq) {
+      if (last && last.id > missSeq) {
         misses.delete(node);
         return { verdict: last.ok ? "no-such-source" : "sources-unavailable", refresh: false };
       }
-      if (running) { if (running.seq <= missSeq) again = true; return { verdict: "refreshing", refresh: false }; }
-      return { verdict: "refreshing", refresh: true };
+      if (requested) return { verdict: "refreshing", refresh: false };   // the refresh about to start postdates the miss
+      if (running) { if (running.id <= missSeq) again = true; return { verdict: "refreshing", refresh: false }; }
+      return { verdict: "refreshing", refresh: ask() };
     },
     requestRefresh() {
+      if (requested) return false;
       if (running) { again = true; return false; }
-      return true;
+      return ask();
     },
-    started() { running = { seq: ++seq }; },
-    finished(sources) {
-      if (!running) return false;
-      last = { seq: running.seq, ok: Array.isArray(sources) };
+    started() { requested = false; running = { id: ++seq }; return running.id; },
+    finished(id, sources) {
+      if (!running || running.id !== id) return false;
+      last = { id, ok: Array.isArray(sources) };
       if (Array.isArray(sources)) list = sources.slice();
       running = null;
-      const go = again; again = false;
-      return go;
+      if (!again) return false;
+      again = false;
+      return ask();
     },
   };
 }
 ```
 
-Check against the "before the miss" test: the running refresh has `seq` 2 and the miss records `seq` 2. `running.seq <= missSeq` sets `again`. The finished refresh has `last.seq` 2, which is not greater than 2, so it does not decide. The next refresh gets `seq` 3, which is greater than 2, so it decides.
+Check against "before the miss":
+- The running refresh has id 2, and the miss records `seq` 2. `running.id <= missSeq` sets `again`.
+- `finished(2)` sets `last.id` 2, which does not decide, because 2 is not greater than 2. Because `again` is set, `finished` returns `ask()`.
+- While the start is requested, `check` answers `refresh: false`.
+- The next refresh is id 3, and 3 is greater than 2, so it decides.
 
 - [ ] **Step 4: Run them to verify they pass**
 
@@ -421,7 +483,7 @@ Expected: PASS.
 
 ```bash
 git add lib/MicSources.mjs tests/MicSources.test.mjs
-git commit -m "feat(mic): source cache with a refresh-before-refusing miss rule"
+git commit -m "feat(mic): source cache with refresh ids and a refresh-before-refusing miss rule"
 ```
 
 ---
@@ -552,6 +614,8 @@ none|true
 absent|true
 a:b.c_d-e|true
 _x|true
+.x|true
+:x|true
 -x|false
 |false
 a b|false
@@ -607,6 +671,27 @@ out=$(lib 'c=$(cat '"$T"'/in; printf x); c=${c%x}; alsa_rc_put "$c" "$MIC_BEGIN"
 check "put: replaces in place, outside kept, inner note dropped" "# top
 $(lib 'gen_mic_block n2')
 # bottom" "$out"
+# outside bytes are kept exactly, including a last line with no newline (replace and remove)
+putfiles() {   # putfiles <input printf %b text>: writes $T/rep (block -> n2) and $T/rem (block removed), byte-exact
+  printf '%b' "$1" > "$T/in"
+  lib 'c=$(cat '"$T"'/in; printf x); c=${c%x}
+       alsa_rc_put "$c" "$MIC_BEGIN" "$MIC_END" "$(gen_mic_block n2)" > '"$T"'/rep
+       alsa_rc_put "$c" "$MIC_BEGIN" "$MIC_END" "" > '"$T"'/rem'
+}
+same() { cmp -s "$1" "$2" && echo yes || echo no; }
+putfiles "# top\n$B\n  capture_node \"o\"\n$E\n# tail"
+{ printf '# top\n'; lib 'gen_mic_block n2'; printf '\n# tail'; } > "$T/want"
+check "put: replace keeps an unterminated tail line byte for byte" "yes" "$(same "$T/rep" "$T/want")"
+printf '# top\n# tail' > "$T/want"
+check "put: remove keeps an unterminated tail line byte for byte"  "yes" "$(same "$T/rem" "$T/want")"
+putfiles "# top\n$B\n  capture_node \"o\"\n$E"
+{ printf '# top\n'; lib 'gen_mic_block n2'; } > "$T/want"
+check "put: unterminated END stays unterminated on replace"        "yes" "$(same "$T/rep" "$T/want")"
+printf '# top\n' > "$T/want"
+check "put: remove of an unterminated last block keeps the rest"   "yes" "$(same "$T/rem" "$T/want")"
+putfiles "$B\n  capture_node \"o\"\n$E\n# tail\n"
+{ lib 'gen_mic_block n2'; printf '\n# tail\n'; } > "$T/want"
+check "put: block at the very start is replaced in place"          "yes" "$(same "$T/rep" "$T/want")"
 
 # ---- alsa_rc_write: atomic, mode kept ----
 rm -rf "$T/alsa"; mkdir -p "$T/alsa"; printf 'x\n' > "$RC"; chmod 640 "$RC"
@@ -659,7 +744,7 @@ MIC_BEGIN='# BEGIN omaremote mic (managed by omaremote-setup; do not edit)'
 MIC_END='# END omaremote mic'
 MIC_PCM=omaremote-mic
 # Plan ruling 3: lib/AlsaMic.mjs NODE_RE is the same pattern. The first character is never `-`.
-NODE_RE='^[A-Za-z0-9_][A-Za-z0-9_.:-]*$'
+NODE_RE='^[A-Za-z0-9_.:][A-Za-z0-9_.:-]*$'
 ALSA_LOCK_WAIT=${OMAREMOTE_ALSA_LOCK_WAIT:-5}
 ALSA_CONTENT=""
 ALSA_CHANGED=0
@@ -704,21 +789,29 @@ alsa_block_state() {
 }
 
 # alsa_rc_put <content> <begin> <end> <block>: the new content (spec §4.1 layout). The caller has ruled out `bad`.
-# Absent + block: append, after one newline only if the content does not already end in one. Present: replace the
-# BEGIN..END lines with the block, or delete exactly them when the block is empty.
+# Absent + block: append, after one newline only if the content does not already end in one (the ONLY byte this
+# function ever adds outside a block). Present: cut the content at the BEGIN and END lines and keep both outside parts
+# byte for byte (a last line without a newline included); put the block between them, or nothing when it is empty.
+# No awk here: awk's print would re-terminate every outside line it copies.
 alsa_rc_put() {
-  local c=$1 b=$2 e=$3 blk=$4
+  local c=$1 b=$2 e=$3 blk=$4 pre rest post endnl=1
   if [[ $(alsa_block_state "$c" "$b" "$e" 0) == absent ]]; then
     printf '%s' "$c"
-    [[ -z $blk ]] && return 0
-    [[ -n $c && ${c: -1} != $'\n' ]] && printf '\n'
+    if [[ -z $blk ]]; then return 0; fi
+    if [[ -n $c && ${c: -1} != $'\n' ]]; then printf '\n'; fi
     printf '%s\n' "$blk"
     return 0
   fi
-  printf '%s' "$c" | awk -v blk="$blk" -v beg="$b" -v end="$e" '
-    $0 == beg { if (blk != "") print blk; skip = 1; next }
-    skip && $0 == end { skip = 0; next }
-    !skip { print }'
+  # present: exactly one BEGIN line, before exactly one END line. BEGIN is never the last line, so a newline follows it.
+  if [[ $c == "$b"$'\n'* ]]; then pre=""; rest=${c#"$b"$'\n'}
+  else pre=${c%%$'\n'"$b"$'\n'*}$'\n'; rest=${c#*$'\n'"$b"$'\n'}; fi
+  if [[ $rest == "$e" ]]; then post=""; endnl=0                        # block is the whole rest, END unterminated
+  elif [[ $rest == "$e"$'\n'* ]]; then post=${rest#"$e"$'\n'}
+  elif [[ $rest == *$'\n'"$e"$'\n'* ]]; then post=${rest#*$'\n'"$e"$'\n'}
+  else post=""; endnl=0; fi                                             # END is the last line, unterminated
+  printf '%s' "$pre"
+  if [[ -n $blk ]]; then printf '%s' "$blk"; if (( endnl )); then printf '\n'; fi; fi
+  printf '%s' "$post"
 }
 
 # alsa_rc_write <content>: atomic replace, a temp file in the same directory then a rename. Readers never see a part.
@@ -1944,34 +2037,53 @@ In `Service.qml`:
 
 5) `case "commit"`: `configStore.setVoiceMic(e.mode, e.device); root.refreshAudioDevice(); break`
 
-6) The source probe, after the `captureProbe` Process:
+6) The source probe, after the `captureProbe` Process. Each refresh gets its own Process object, tagged with the id `micSources.started()` returned. The object reports exactly once, after it has *both* its stdout and its exit code, or when its own 3 s deadline fires, and then destroys itself. A late event from an abandoned probe carries the old id, and `MicSources.finished` ignores it, so it can neither fail the newer refresh nor stop its deadline. That deadline belongs to the newer object.
 
 ```qml
-  // Picker spec §4.3: the capture-source list. A refresh is failed when pw-dump exits non-zero, prints unparseable
-  // JSON, or runs past 3 s; MicSources ignores a second report for the same refresh.
-  Timer { id: sourcesDeadline; interval: 3000; repeat: false; onTriggered: { sourcesProbe.running = false; root.sourcesDone(null) } }
-  Process {
-    id: sourcesProbe
-    command: ["pw-dump"]
-    stdout: StdioCollector { waitForEnd: true; onStreamFinished: {
-      var list = null
-      try { list = Pipewire.captureSources(JSON.parse(text), { exclude: root.remoteNode ? [root.remoteNode] : [] }) } catch (e) { list = null }
-      root.sourcesDone(list)
-    } }
-    onExited: function(code, status) { if (code !== 0) root.sourcesDone(null) }
+  // Picker spec §4.3: one Process per refresh. A refresh succeeds only with exit 0 AND a JSON array
+  // (Pipewire.sourcesFromProbe). A binary that fails to start emits no `exited`, so the deadline covers it.
+  Component {
+    id: sourcesProbeComponent
+    Process {
+      id: probe
+      property int rid: 0
+      property string out: ""
+      property int exitCode: -1
+      property bool gotOut: false
+      property bool gotExit: false
+      property bool reported: false
+      command: ["pw-dump"]
+      stdout: StdioCollector { waitForEnd: true; onStreamFinished: { probe.out = text; probe.gotOut = true; probe.report() } }
+      onExited: function(code, status) { probe.exitCode = code; probe.gotExit = true; probe.report() }
+      property Timer deadline: Timer { interval: 3000; running: true; repeat: false; onTriggered: probe.abandon() }
+      function report() {
+        if (reported || !gotOut || !gotExit) return
+        reported = true; deadline.stop()
+        root.sourcesDone(rid, Pipewire.sourcesFromProbe(exitCode, out, { exclude: root.remoteNode ? [root.remoteNode] : [] }))
+        destroy()
+      }
+      function abandon() {
+        if (reported) return
+        reported = true; running = false
+        root.sourcesDone(rid, null)
+        destroy()
+      }
+    }
   }
   function startSourcesRefresh() {
-    root.micSources.started(); root.micSourcesRefreshing = true
-    sourcesDeadline.restart(); sourcesProbe.running = true
+    var rid = root.micSources.started()
+    root.micSourcesRefreshing = true
+    var p = sourcesProbeComponent.createObject(root, { rid: rid })
+    if (!p) { root.sourcesDone(rid, null); return }
+    p.running = true
   }
-  function sourcesDone(list) {
-    sourcesDeadline.stop()
-    var again = root.micSources.finished(list)
+  function sourcesDone(rid, list) {
+    var again = root.micSources.finished(rid, list)          // false and no change for a stale rid
     root.micSourceList = root.micSources.list(); root.micSourcesRefreshing = root.micSources.refreshing()
     if (again) root.startSourcesRefresh()
   }
   function refreshMicSources() { if (root.micSources.requestRefresh()) root.startSourcesRefresh() }
-  // Picker spec §4.4: the request-time refusals; null means "go ahead".
+  // Picker spec §4.4: the request-time refusals; null means "go ahead". A `refresh: true` answer obliges us to start now.
   function checkSource(device) {
     if (!AlsaMic.isNodeName(device) || /\.monitor$/.test(device) || device === root.remoteNode) return { ok: false, reason: "invalid-source" }
     var r = root.micSources.check(device)
@@ -2049,7 +2161,7 @@ git commit -m "feat(service): mic picker wiring — micSystem/micSources IPC, so
 
 **Interfaces:**
 - Consumes: `Presentation.micChoices`, `micRefusal`, `micConflictLine`; `service.ipcMic(mode, device)`, `service.refreshMicSources()`, `service.micSourceList`.
-- Produces: `voiceTab.moveChoice(dx)`.
+- Produces: `voiceTab.moveChoice(dx)`, `voiceTab.onHidden()` (called by `Panel.close()`), `voiceTab.cancelPending()`.
 
 - [ ] **Step 1: Implement the row**
 
@@ -2060,13 +2172,23 @@ In `components/VoiceTab.qml`:
 ```qml
   readonly property var choices: Presentation.micChoices(cfg, s ? s.micSourceList : [])
   property int pick: -1                                   // highlighted choice while the cursor is on the Microphone row
-  property var _retry: null                               // { mode, device, tries } while busy/sourcesRefreshing is being retried
+  // Picker spec §4.5 retry ownership: every user choice takes a new intent number. A retry carries the intent that
+  // started it and dies when that is no longer current, so a superseded choice can never apply or touch the status line.
+  property int _intent: 0
+  property var _retry: null                               // { mode, device, label, intent, tries } while sourcesRefreshing is retried
   function activeIndex() { for (var i = 0; i < choices.length; i++) if (choices[i].active) return i; return 0 }
   function moveChoice(dx) { var p = pick < 0 ? activeIndex() : pick; pick = Math.max(0, Math.min(choices.length - 1, p + dx)) }
 ```
 
 2) `onShown`:
-`function onShown() { cursor = -1; pick = -1; if (s) s.refreshMicSources() }`
+`function onShown() { cursor = -1; pick = -1; root.cancelPending(); if (s) s.refreshMicSources() }`
+
+and add beside it:
+
+```qml
+  function cancelPending() { root._intent++; root._retry = null; retryTimer.stop() }
+  function onHidden() { root.cancelPending() }             // Panel.close(): a closed panel retries nothing
+```
 
 3) In `activate`, replace the `cursor === 1` line with:
 `    else if (cursor === 1) { var c = choices[pick < 0 ? activeIndex() : pick]; if (c && c.connected && !c.active) root.requestChoice(c) }`
@@ -2074,19 +2196,27 @@ In `components/VoiceTab.qml`:
 4) Replace `requestMic` with:
 
 ```qml
-  function requestChoice(c) { root.requestMic(c.mode, c.mode === "system" ? c.device : undefined, c.label) }
-  function requestMic(mode, device, label) {               // §3: returns immediately; the Service polls micStatus internally
-    if (!s || s.micPending) return
-    var r = JSON.parse(device === undefined ? s.ipcMic(mode) : s.ipcMic(mode, device))
-    if (!r.ok && r.reason === "busy" && r.detail === "sourcesRefreshing") {   // picker spec §4.5: retried here, never shown
-      var tries = root._retry && root._retry.device === device ? root._retry.tries + 1 : 1
-      if (tries <= 20) { root._retry = { mode: mode, device: device, label: label, tries: tries }; retryTimer.restart(); return }
-    }
+  function requestChoice(c) {                              // a new user intent supersedes any pending retry
+    root.cancelPending()
+    root.requestMic(c.mode, c.mode === "system" ? c.device : undefined, c.label, root._intent, 1)
+  }
+  function requestMic(mode, device, label, intent, tries) { // §3: returns immediately; the Service polls micStatus internally
+    if (intent !== root._intent) return                    // superseded by a newer choice, or the panel closed
     root._retry = null
+    if (!s || s.micPending) return                         // another apply holds the mic; this intent ends here
+    var r = JSON.parse(device === undefined ? s.ipcMic(mode) : s.ipcMic(mode, device))
+    if (!r.ok && r.reason === "busy" && r.detail === "sourcesRefreshing" && tries < 20) {   // picker spec §4.5: retried, never shown
+      root._retry = { mode: mode, device: device, label: label, intent: intent, tries: tries + 1 }
+      retryTimer.restart()
+      return
+    }
     root.requestedMode = r.ok ? (label || mode) : ""
     root.lastError = r.ok ? "" : Presentation.micRefusal(r.reason)
   }
-  Timer { id: retryTimer; interval: 300; repeat: false; onTriggered: if (root._retry) root.requestMic(root._retry.mode, root._retry.device, root._retry.label) }
+  Timer {
+    id: retryTimer; interval: 300; repeat: false
+    onTriggered: { var t = root._retry; if (t) root.requestMic(t.mode, t.device, t.label, t.intent, t.tries) }
+  }
 ```
 
 5) Replace the Microphone `Row` (the `Text "Voxtype mic: …"` and the two `Button`s) with:
@@ -2118,6 +2248,12 @@ In `components/VoiceTab.qml`:
 
 7) Update the header comment on line 2: `Voxtype mic Remote/System switch` → `Voxtype mic picker (Remote, System default, each capture source; picker spec §4.5)`.
 
+In `Panel.qml` line 28, make `close()` also cancel the Voice tab's pending retry. Append `voiceTab.onHidden()` after `statusTab.onHidden()`:
+
+```qml
+  function close() { setCenterHoverRevealSuppressed(false); root.controller.hide(); statusTab.onHidden(); voiceTab.onHidden() }   // finding #4; picker spec §4.5
+```
+
 In `Panel.qml` line 53, extend the `onMoveRequested` chain with the Voice-tab case before the tab switch:
 
 ```qml
@@ -2142,6 +2278,10 @@ Run `make dev-restart` and open the panel's Voice tab (this touches the live she
 - The row shows Remote, System default, C922 and the built-in input.
 - With the cursor on the row, Left/Right moves the highlight and does not switch tabs.
 - Nothing is applied until Enter or a click.
+- The panel has no QML test harness, so the retry-ownership rule (spec §4.5) is a review item. The task reviewer checks three things:
+  - `requestMic` returns at once when `intent !== root._intent`;
+  - `requestChoice` and `onHidden` both call `cancelPending()`;
+  - `Panel.close()` calls `voiceTab.onHidden()`.
 
 Take a screenshot for the user. Do not pick anything here, because that is Task 11's hardware acceptance.
 
@@ -2204,6 +2344,12 @@ Append a `## Outcome (date)` section to this plan with the per-item results and 
   - Block states are `{state, node?}` everywhere in JS and `absent` / `present <node>` strings in bash. They are converted only at the `alsa-mic` JSON boundary.
   - `alsaArgv` is a prefix array in both Task 6 and Task 9.
   - The `commit` effect's `device` is read by `ConfigStore.setVoiceMic(mode, device)` (Task 3).
+- **Plan review round 1 (2026-10-14) fixes.**
+  - Per-refresh Process objects with ids (Task 9) and `sourcesFromProbe` (Task 1).
+  - The start-requested contract in `MicSources` (Task 2).
+  - A byte-exact `alsa_rc_put` replace and remove (Task 4; checked against a scratch copy before writing it here).
+  - Intent-numbered panel retries (Task 10).
+  - The node pattern that forbids only a leading `-`.
 - **Known judgment calls for reviewers.**
   - Rulings 1–7 above.
   - `restoreExit` folds plan ruling 4's "exit 3 at alsaPrev is done" into the drained path too.

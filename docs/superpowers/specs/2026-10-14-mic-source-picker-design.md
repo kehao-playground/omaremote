@@ -1,7 +1,9 @@
 # omaremote — microphone source picker (Voxtype)
 
 **Date:** 2026-10-14
-**Status:** Draft rev 3 for review. Rev 2 answered the first 2026-10-14 review: snapshot before write, locked
+**Status:** Rev 4 (2026-10-14): CLI verb `micSystem`/`micSources`, Keys-tab keyboard pattern, retry
+ownership, and a node pattern that only forbids a leading `-`; decided while reviewing the implementation plan.
+Rev 3 for review. Rev 2 answered the first 2026-10-14 review: snapshot before write, locked
 compare-and-set, partial rollback outcomes, cache-miss refresh, structured block state. Rev 3 answers the
 second: an in-flight `alsa-set` counts as mutated, single-snapshot parsing, rollback progress across a
 defer, and a restore promise limited to semantic state.
@@ -122,8 +124,9 @@ Output is one line of JSON, so "no block" can never be confused with a node name
   it writes and exits 0. On a mismatch it leaves the file unchanged, prints the current state, and
   exits 3. A `bad` block exits 2, and the file is unchanged. Any other failure (I/O, lock timeout)
   exits 1, and the file is unchanged.
-- `<node>` must match `^[A-Za-z0-9_.:-]+$`; anything else is a usage error (exit 64), so a node name
-  can never inject ALSA config syntax. No sentinel value is reserved, so every name that passes the
+- `<node>` must match `^[A-Za-z0-9_.:][A-Za-z0-9_.:-]*$`; anything else is a usage error (exit 64), so a
+  node name can never inject ALSA config syntax, and can never be read as an option (it cannot start
+  with `-`). No sentinel value is reserved, so every name that passes the
   pattern is a valid node.
 
 **Locking.** Every writer of this file in the repo takes an exclusive `flock` on a separate lock file,
@@ -168,7 +171,11 @@ It needs no root, prompts nothing, and is safe to call from the plugin.
 ### 4.4 IPC and CLI
 
 - `mic system` keeps today's meaning: `system` with `default`.
-- New: `mic system <node.name>`.
+- New: `micSystem <node.name>` (for example `omarchy-shell omaremote micSystem alsa_input…`). Quickshell
+  IPC functions have a fixed arity, so `mic` cannot take an optional second argument without breaking
+  `mic system` and `omaremote-setup`'s `ipc mic "$mode"`.
+- New: `micSources` refreshes the source list and returns `{ sources, refreshing }`, so a CLI user can
+  find node names.
 - `mic remote` is unchanged.
 - Request-time refusals, before anything is queued:
   - `invalid-source`: the node is a monitor, is the ATVVoice node, or fails the §4.2 name pattern.
@@ -191,9 +198,13 @@ It needs no root, prompts nothing, and is safe to call from the plugin.
 - The Microphone row shows one button per choice: `Remote`, `System default`, then each source by
   its description, truncated. The active choice is selected. A disconnected stored source shows
   "(not connected)" and cannot be picked.
-- A click applies at once. With the keyboard, Enter on the row enters editing; Left and Right move
-  between choices; Enter applies; Esc leaves without applying. This is the same `editing` pattern the
-  Keys tab uses.
+- A click applies at once. With the keyboard, the row works like the Keys tab: with the cursor on the
+  Microphone row, Left and Right move the highlight between choices, and Enter applies the highlighted
+  one. There is no separate edit mode, and Esc keeps its panel-wide meaning (close). Enter on the
+  choice that is already active does nothing.
+- Each user choice supersedes the previous one. A pending `sourcesRefreshing` retry belongs to the
+  choice that started it, and is dropped when a newer choice is made, when that choice's request is
+  answered with anything else, or when the panel closes.
 - While `micPending`, every choice is disabled (today's behaviour).
 - Refusals display through the existing error line:
   - `no-such-source`: "microphone not found (unplugged?)"
@@ -334,7 +345,7 @@ check runs once per session.
 
 - `systemDevice = default`: today's check, unchanged.
 - `systemDevice = <node>`: passes only if all three hold. Each failure names its own fix.
-  1. `audio.device` is `omaremote-mic`. Fix: `omarchy-shell omaremote mic system <node>`.
+  1. `audio.device` is `omaremote-mic`. Fix: `omarchy-shell omaremote micSystem <node>`.
   2. The asoundrc mic block is `present <node>`. This needs a new fact, `alsa.mic`, from
      `host/omaremote-facts`: the `alsa-mic get` JSON, `{"state":"bad"}` on exit 2, or `null` when it
      cannot run (`null` makes the row `unknown`). Fix for `absent` or another node: the same command.
@@ -436,8 +447,10 @@ The row keeps its `warn` level on a mismatch.
 - The existing atvvoice setup tests still pass with the atomic, locked, single-read write.
 
 **Integration** (fake-remote scenarios)
-- `s_mic_system_device`: `ipc mic system <fake node>` issues `get`, `alsa-get`, `alsa-set`, `set`
-  and `restart` in order, and the config ends with `systemDevice` set.
+- `s_mic_system_device`: `ipc micSystem <fake node>` reaches Voxtype, the ALSA block and systemd, and
+  the config ends with `systemDevice` set. The order `get`, `alsa-get`, `alsa-set`, `set`, `restart`
+  is pinned by the MicApply unit tests, which see every command in one effect stream; the fake harness
+  logs the processes in separate files.
 - `s_mic_system_unknown_source`: an unknown node first answers `busy`/`sourcesRefreshing`; after
   the retry it answers `no-such-source`, and nothing is queued.
 - `s_mic_system_late_plug`: the fake `pw-dump` gains the node right after a refresh; the request
