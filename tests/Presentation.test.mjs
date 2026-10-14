@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { elapsedText, keyLabel, flashText, glyphLook, hudLine, micStatusLine, keysFromQtEvent, hidMicLine, keyboardSourceLine, typelessView, engineStatusLine, TYPELESS_FLASH } from "../lib/Presentation.mjs";
+import { elapsedText, keyLabel, flashText, glyphLook, hudLine, micStatusLine, micChoices, micRefusal, micConflictLine, keysFromQtEvent, hidMicLine, keyboardSourceLine, typelessView, engineStatusLine, TYPELESS_FLASH } from "../lib/Presentation.mjs";
 import { normalizeConfig } from "../lib/Config.mjs";
 import { DEFAULT_CONFIG } from "../lib/Defaults.mjs";
 
@@ -118,4 +118,40 @@ test("review: under Typeless a Voxtype that is not responding does not make the 
   assert.equal(glyphLook({ voiceState: "unconfigured", engine: "voxtype" }), "unconfigured");
   assert.equal(glyphLook({ voiceState: "unconfigured", engine: "typeless", unconfigured: true }), "unconfigured", "a real Typeless problem still shows");
   assert.equal(glyphLook({ voiceState: "recording", engine: "typeless" }), "recording", "an F9 dictation still shows");
+});
+
+const cfgFor = (mic, systemDevice) => ({ voice: { mic, systemDevice } });
+const SRC = [{ name: "alsa_input.usb-C922", description: "C922 Pro Stream Webcam Analog Stereo" }, { name: "builtin", description: "Built-in" }];
+
+test("micChoices: Remote, System default, then each source; the active one is marked", () => {
+  const c = micChoices(cfgFor("system", "builtin"), SRC);
+  assert.deepEqual(c.map(x => [x.key, x.mode, x.device, x.connected, x.active]), [
+    ["remote", "remote", undefined, true, false], ["default", "system", "default", true, false],
+    ["alsa_input.usb-C922", "system", "alsa_input.usb-C922", true, false], ["builtin", "system", "builtin", true, true]]);
+  assert.equal(c[2].label, "C922 Pro Stream Webcam Anal…", "truncated to 28 characters");
+  assert.equal(micChoices(cfgFor("remote", "builtin"), SRC)[0].active, true);
+  assert.equal(micChoices(cfgFor("system", "default"), SRC)[1].active, true);
+});
+
+test("micChoices: a stored source missing from the list stays visible, disconnected", () => {
+  const c = micChoices(cfgFor("system", "gone_node"), SRC);
+  const last = c[c.length - 1];
+  assert.deepEqual([last.key, last.connected, last.active, last.label], ["gone_node", false, true, "gone_node (not connected)"]);
+  assert.equal(micChoices(cfgFor("remote", "gone_node"), []).some(x => x.key === "gone_node"), true, "shown under remote too");
+  assert.equal(micChoices(null, SRC).length, 4, "no config yet: no stored entry, nothing active");
+});
+
+test("micRefusal and micConflictLine wording", () => {
+  assert.equal(micRefusal("no-such-source"), "microphone not found (unplugged?)");
+  assert.equal(micRefusal("invalid-source"), "not a usable microphone");
+  assert.equal(micRefusal("sources-unavailable"), "cannot list microphones (pw-dump failed)");
+  assert.equal(micRefusal("busy"), "busy");
+  assert.equal(micConflictLine({ target: "device", expected: "omaremote-mic", found: "other" }),
+    "conflict: Voxtype audio.device is other (expected omaremote-mic) — reconcile in Setup");
+  assert.equal(micConflictLine({ target: "alsa", expected: { state: "present", node: "a" }, found: { state: "absent" } }),
+    "conflict: the omaremote mic ALSA block is absent (expected a) — reconcile in Setup");
+  assert.equal(micConflictLine({ target: "alsa", expected: { state: "present", node: "a" }, found: null }),
+    "conflict: the omaremote mic ALSA block is unreadable (expected a) — reconcile in Setup");
+  assert.equal(micStatusLine({ state: "failed", error: "verify-failed", rollback: "unresolved", partial: "conflict" }),
+    "failed: verify-failed (rollback: unresolved) (partial: conflict)");
 });
