@@ -315,3 +315,52 @@ test("review: Typeless prerequisites all pass while Voxtype is unusable → Voxt
   const voxCfg = normalizeConfig({ ...DEFAULT_CONFIG, keys: { ...DEFAULT_CONFIG.keys, mic: { supported: false } } }).config;
   assert.equal(summarize(evaluate(broken(), voxCfg), voxCfg), "unconfigured", "discriminating: the same host under Voxtype is unconfigured");
 });
+
+const picked = (device) => normalizeConfig({ ...DEFAULT_CONFIG, voice: { ...DEFAULT_CONFIG.voice, mic: "system", systemDevice: device } }).config;
+const pickFacts = () => Object.assign(good(), {
+  voxtype: Object.assign(good().voxtype, { audioDevice: "omaremote-mic" }),
+  pipewire: { sources: ["alsa_input.usb-C922", "G20S PRO"], defaultSource: "G20S PRO" },
+  alsa: { pcms: ["default", "omaremote-mic"], mic: { state: "present", node: "alsa_input.usb-C922" } },
+  lastCapture: { node: "alsa_input.usb-C922", at: 1000 },
+});
+
+test("picked source: all three conditions hold -> voxtype-device and last-capture pass", () => {
+  const rows = evaluate(pickFacts(), picked("alsa_input.usb-C922"));
+  assert.equal(row(rows, "voxtype-device").status, "pass");
+  assert.equal(row(rows, "last-capture").status, "pass");
+});
+
+test("picked source: each condition failing alone names its own fix", () => {
+  const cfg = picked("alsa_input.usb-C922");
+  const dev = pickFacts(); dev.voxtype.audioDevice = "default";
+  const r1 = row(evaluate(dev, cfg), "voxtype-device");
+  assert.equal(r1.status, "fail"); assert.equal(r1.fix, "omarchy-shell omaremote micSystem alsa_input.usb-C922");
+  const other = pickFacts(); other.alsa.mic = { state: "present", node: "elsewhere" };
+  const r2 = row(evaluate(other, cfg), "voxtype-device");
+  assert.equal(r2.status, "fail"); assert.equal(r2.fix, "omarchy-shell omaremote micSystem alsa_input.usb-C922"); assert.match(r2.detail, /elsewhere/);
+  const none = pickFacts(); none.alsa.mic = { state: "absent" };
+  assert.equal(row(evaluate(none, cfg), "voxtype-device").status, "fail");
+  const bad = pickFacts(); bad.alsa.mic = { state: "bad" };
+  const r3 = row(evaluate(bad, cfg), "voxtype-device");
+  assert.equal(r3.status, "fail"); assert.match(r3.fix, /repair the omaremote mic block/);
+  const gone = pickFacts(); gone.pipewire.sources = ["G20S PRO"];
+  const r4 = row(evaluate(gone, cfg), "voxtype-device");
+  assert.equal(r4.status, "fail"); assert.equal(r4.fix, "connect the microphone, or pick another one in the Voice tab");
+});
+
+test("picked source: unreadable facts are unknown, never a pass or a crash", () => {
+  const cfg = picked("alsa_input.usb-C922");
+  const noMic = pickFacts(); noMic.alsa.mic = null;
+  assert.equal(row(evaluate(noMic, cfg), "voxtype-device").status, "unknown");
+  const noSources = pickFacts(); noSources.pipewire = { sources: null, defaultSource: null };
+  assert.equal(row(evaluate(noSources, cfg), "voxtype-device").status, "unknown");
+});
+
+test("last-capture expects the picked node, or the PipeWire default for system default", () => {
+  const f = pickFacts(); f.lastCapture = { node: "G20S PRO", at: 1 };
+  assert.equal(row(evaluate(f, picked("alsa_input.usb-C922")), "last-capture").status, "warn");
+  f.voxtype.audioDevice = "default";
+  assert.equal(row(evaluate(f, picked("default")), "last-capture").status, "pass", "the old literal-\"default\" compare always warned");
+  f.pipewire.defaultSource = null;
+  assert.equal(row(evaluate(f, picked("default")), "last-capture").status, "unknown");
+});
