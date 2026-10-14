@@ -150,7 +150,7 @@ test("rollback refuses to overwrite an external edit: conflict, no mutation, Doc
   const chk = mic.verifyResult(false, 100);
   const fx = mic.cmdExit(cmdId(chk, "get"), 0, JSON.stringify({ value: "other", file_value: "other" }), 101);
   assert.deepEqual(kinds(fx), []);
-  assert.deepEqual(byType(fx, "conflict"), [{ type: "conflict", expected: "N", found: "other" }]);
+  assert.deepEqual(byType(fx, "conflict"), [{ type: "conflict", target: "device", expected: "N", found: "other" }]);
   const d = byType(fx, "done")[0];
   assert.equal(d.state, "failed"); assert.equal(d.rollback, "conflict");
   assert.equal(mic.statusOf(result.operationId).rollback, "conflict");
@@ -515,5 +515,334 @@ test("a systemd job reading taken only before the request does not satisfy the f
   mic.backend("idle", t0 + 1, { fresh: true });                   // keep the backend reading fresh too: only the job gate is under test
   const go = mic.systemdJob(false, t0 + 1);                       // a reading taken after the request
   assert.deepEqual(kinds(go), ["get"]);
+  assert.equal(mic.statusOf(result.operationId).state, "applying");
+});
+
+// ---- mic source picker (spec §5) ----
+const N = "alsa_input.usb-C922";
+const ABSENT = JSON.stringify({ state: "absent" });
+const PRESENT = (n) => JSON.stringify({ state: "present", node: n });
+const GET_MIC = JSON.stringify({ key: "audio.device", value: "omaremote-mic", file_value: "omaremote-mic" });
+const AM = ["omaremote-setup", "alsa-mic"];
+const argvOf = (fx, kind) => byType(fx, "cmd").find(c => c.kind === kind).argv;
+// toAlsaSet: a system + N request driven up to its in-flight alsa-set
+function toAlsaSet(mic, prev = ABSENT, getOut = GET_OUT) {
+  const { effects, result } = mic.request("system", 0, { device: N });
+  const ag = mic.cmdExit(cmdId(effects, "get"), 0, getOut, 1);
+  const as = mic.cmdExit(cmdId(ag, "alsa-get"), 0, prev, 2);
+  return { id: result.operationId, as };
+}
+// drive: answer every command with success (get → GET_OUT, alsa-get → ABSENT) and every verify with ok; the kinds seen
+function drive(mic, mode, opts) {
+  const seen = [];
+  let fx = mic.request(mode, 0, opts).effects, t = 1;
+  for (let guard = 0; guard < 20; guard++) {
+    const c = byType(fx, "cmd")[0];
+    if (c) { seen.push(c.kind); fx = mic.cmdExit(c.id, 0, c.kind === "get" ? GET_OUT : c.kind === "alsa-get" ? ABSENT : "", t++); continue; }
+    if (byType(fx, "verify").length) { fx = mic.verifyResult(true, t++); continue; }
+    break;
+  }
+  return seen;
+}
+
+test("picker: system + node snapshots both, then writes: get, alsa-get, alsa-set, set, restart, commit with device", () => {
+  const { mic, voice } = ready();
+  const { effects, result } = mic.request("system", 0, { device: N });
+  assert.deepEqual(kinds(effects), ["get"]);
+  const ag = mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 1);
+  assert.deepEqual(argvOf(ag, "alsa-get"), [...AM, "get"]);
+  const as = mic.cmdExit(cmdId(ag, "alsa-get"), 0, ABSENT, 2);
+  assert.deepEqual(argvOf(as, "alsa-set"), [...AM, "set", N, "--expect-absent"]);
+  const set = mic.cmdExit(cmdId(as, "alsa-set"), 0, "", 3);
+  assert.deepEqual(argvOf(set, "set"), ["voxtype", "config", "set", "audio.device", "omaremote-mic"]);
+  const restart = mic.cmdExit(cmdId(set, "set"), 0, "", 4);
+  assert.deepEqual(kinds(restart), ["restart"]);
+  mic.cmdExit(cmdId(restart, "restart"), 0, "", 5);
+  const done = mic.verifyResult(true, 6);
+  assert.deepEqual(byType(done, "commit"), [{ type: "commit", mode: "system", device: N }]);
+  assert.equal(byType(done, "done")[0].state, "succeeded");
+  assert.equal(mic.statusOf(result.operationId).device, N);
+  assert.equal(voice.gate.busy(), false);
+});
+
+test("picker: only system + node issues alsa commands (the driver sees them when they exist)", () => {
+  assert.deepEqual(drive(ready().mic, "system", { device: N }), ["get", "alsa-get", "alsa-set", "set", "restart"]);
+  assert.deepEqual(drive(ready().mic, "system", {}), ["get", "set", "restart"]);
+  assert.deepEqual(drive(ready().mic, "system", { device: "default" }), ["get", "set", "restart"]);
+  assert.deepEqual(drive(ready().mic, "remote", { nodeName: "N" }), ["get", "set", "restart"]);
+});
+
+test("picker: commit carries device default for system default, no device key for remote", () => {
+  const sys = ready().mic; const { effects } = sys.request("system", 0, {});
+  const s1 = sys.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 1); const r1 = sys.cmdExit(cmdId(s1, "set"), 0, "", 2);
+  sys.cmdExit(cmdId(r1, "restart"), 0, "", 3);
+  assert.deepEqual(byType(sys.verifyResult(true, 4), "commit"), [{ type: "commit", mode: "system", device: "default" }]);
+});
+
+test("picker: an invalid device is refused before anything is queued", () => {
+  const { mic } = ready();
+  for (const d of ["-rf", "a b", 'a"b', ""]) assert.deepEqual(mic.request("system", 0, { device: d }).result, { ok: false, reason: "invalid-source" }, d);
+  assert.equal(mic.pending(), false);
+});
+
+test("picker: alsa-set expects the snapshot state; a matching block skips alsa-set", () => {
+  const a = ready().mic; const { as } = toAlsaSet(a, PRESENT("old"));
+  assert.deepEqual(argvOf(as, "alsa-set"), [...AM, "set", N, "--expect", "old"]);
+  const b = ready().mic; const { as: skipped } = toAlsaSet(b, PRESENT(N));
+  assert.deepEqual(kinds(skipped), ["set"], "already the picked node: straight to audio.device");
+});
+
+test("picker: snapshot failures end preflight-failed with no write and no rollback", () => {
+  const cases = [["get fails", (m, fx) => m.cmdExit(cmdId(fx, "get"), 1, "", 1)],
+    ["alsa-get exits 1", (m, fx) => m.cmdExit(cmdId(m.cmdExit(cmdId(fx, "get"), 0, GET_OUT, 1), "alsa-get"), 1, "", 2)],
+    ["alsa-get exits 2 (bad block)", (m, fx) => m.cmdExit(cmdId(m.cmdExit(cmdId(fx, "get"), 0, GET_OUT, 1), "alsa-get"), 2, "", 2)],
+    ["alsa-get prints garbage", (m, fx) => m.cmdExit(cmdId(m.cmdExit(cmdId(fx, "get"), 0, GET_OUT, 1), "alsa-get"), 0, "none", 2)]];
+  for (const [name, step] of cases) {
+    const { mic, voice } = ready();
+    const fx = step(mic, mic.request("system", 0, { device: N }).effects);
+    const d = byType(fx, "done")[0];
+    assert.equal(d.error, "preflight-failed", name);
+    assert.equal(d.rollback, undefined, name);
+    assert.deepEqual(kinds(fx), [], name);
+    assert.equal(voice.gate.busy(), false, name);
+  }
+});
+
+test("picker: a job found at the job check ends job-pending before any alsa-set", () => {
+  const { mic } = ready();
+  const { effects } = mic.request("system", 0, { device: N });
+  const ag = mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 1);
+  mic.systemdJob(true, 2);
+  const fx = mic.cmdExit(cmdId(ag, "alsa-get"), 0, ABSENT, 3);
+  assert.deepEqual(kinds(fx), []);
+  assert.equal(byType(fx, "done")[0].error, "job-pending");
+  assert.equal(byType(fx, "done")[0].rollback, undefined);
+});
+
+test("picker: a live alsa-set exiting 3 or 1/2 fails with rollback verified and no restart", () => {
+  for (const [code, err] of [[3, "alsa-conflict"], [2, "alsa-set-failed"], [1, "alsa-set-failed"]]) {
+    const { mic, voice } = ready();
+    const { as } = toAlsaSet(mic);
+    const fx = mic.cmdExit(cmdId(as, "alsa-set"), code, code === 3 ? PRESENT("x") : "", 3);
+    const d = byType(fx, "done")[0];
+    assert.deepEqual([d.state, d.error, d.rollback], ["failed", err, "verified"], `exit ${code}`);
+    assert.deepEqual(kinds(fx), [], `exit ${code}: nothing to restart`);
+    assert.equal(voice.gate.busy(), false);
+  }
+});
+
+test("picker: a live alsa-set killed by its deadline is assumed written and rolled back by compare-and-set", () => {
+  const { mic } = ready();
+  const { as } = toAlsaSet(mic);
+  const chk = mic.cmdExit(cmdId(as, "alsa-set"), 124, "", 3);
+  assert.deepEqual(kinds(chk), ["get"]);
+  const ra = mic.cmdExit(cmdId(chk, "get"), 0, GET_OUT, 4);
+  assert.deepEqual(argvOf(ra, "alsa-restore"), [...AM, "set", "--absent", "--expect", N]);
+  const rs = mic.cmdExit(cmdId(ra, "alsa-restore"), 3, ABSENT, 5);     // it had not landed: the file already holds alsaPrev
+  assert.deepEqual(kinds(rs), ["restart"]);
+  mic.cmdExit(cmdId(rs, "restart"), 0, "", 6);
+  const v = mic.verifyResult(true, 7);
+  assert.deepEqual([byType(v, "done")[0].error, byType(v, "done")[0].rollback], ["alsa-set-failed", "verified"]);
+  assert.equal(byType(v, "conflict").length, 0);
+});
+
+test("picker: set failing after alsa-set restores the block, then restarts", () => {
+  const { mic } = ready();
+  const { as } = toAlsaSet(mic);
+  const set = mic.cmdExit(cmdId(as, "alsa-set"), 0, "", 3);
+  const chk = mic.cmdExit(cmdId(set, "set"), 1, "", 4);
+  assert.deepEqual(kinds(chk), ["get"]);
+  const ra = mic.cmdExit(cmdId(chk, "get"), 0, GET_OUT, 5);           // audio.device untouched: nothing to write back
+  assert.deepEqual(argvOf(ra, "alsa-restore"), [...AM, "set", "--absent", "--expect", N]);
+  const rs = mic.cmdExit(cmdId(ra, "alsa-restore"), 0, "", 6);
+  assert.deepEqual(kinds(rs), ["restart"], "the block was live for the daemon: restart");
+  mic.cmdExit(cmdId(rs, "restart"), 0, "", 7);
+  assert.equal(byType(mic.verifyResult(true, 8), "done")[0].rollback, "verified");
+});
+
+test("picker: restart failure rolls back in order — audio.device, then the block, then restart", () => {
+  const { mic } = ready();
+  const { as } = toAlsaSet(mic, PRESENT("old"));
+  const set = mic.cmdExit(cmdId(as, "alsa-set"), 0, "", 3);
+  const restart = mic.cmdExit(cmdId(set, "set"), 0, "", 4);
+  mic.cmdExit(cmdId(restart, "restart"), 0, "", 5);
+  const chk = mic.verifyResult(false, 6);
+  assert.deepEqual(kinds(chk), ["get"]);
+  const unset = mic.cmdExit(cmdId(chk, "get"), 0, GET_MIC, 7);
+  assert.deepEqual(kinds(unset), ["unset"]);
+  const ra = mic.cmdExit(cmdId(unset, "unset"), 0, "", 8);
+  assert.deepEqual(argvOf(ra, "alsa-restore"), [...AM, "set", "old", "--expect", N]);
+  const rs = mic.cmdExit(cmdId(ra, "alsa-restore"), 0, "", 9);
+  assert.deepEqual(kinds(rs), ["restart"]);
+  mic.cmdExit(cmdId(rs, "restart"), 0, "", 10);
+  const v = mic.verifyResult(true, 11);
+  assert.deepEqual([byType(v, "done")[0].error, byType(v, "done")[0].rollback], ["verify-failed", "verified"]);
+});
+
+// rollbackToAlsa: drive to the in-flight alsa-restore of a verify-failure rollback (prev block absent)
+function rollbackToAlsa(mic) {
+  const { as, id } = toAlsaSet(mic);
+  const set = mic.cmdExit(cmdId(as, "alsa-set"), 0, "", 3);
+  const restart = mic.cmdExit(cmdId(set, "set"), 0, "", 4);
+  mic.cmdExit(cmdId(restart, "restart"), 0, "", 5);
+  const chk = mic.verifyResult(false, 6);
+  const unset = mic.cmdExit(cmdId(chk, "get"), 0, GET_MIC, 7);
+  const ra = mic.cmdExit(cmdId(unset, "unset"), 0, "", 8);
+  return { id, ra };
+}
+
+test("picker: alsa-restore exit 3 emits an alsa conflict, still restarts, and stays conflict after a good verify", () => {
+  const { mic } = ready();
+  const { ra } = rollbackToAlsa(mic);
+  const rs = mic.cmdExit(cmdId(ra, "alsa-restore"), 3, PRESENT("someone-else"), 9);
+  assert.deepEqual(byType(rs, "conflict"), [{ type: "conflict", target: "alsa", expected: { state: "present", node: N }, found: { state: "present", node: "someone-else" } }]);
+  assert.ok(byType(rs, "hud").some(h => h.text === "microphone config changed externally"));
+  assert.deepEqual(kinds(rs), ["restart"]);
+  mic.cmdExit(cmdId(rs, "restart"), 0, "", 10);
+  assert.equal(byType(mic.verifyResult(true, 11), "done")[0].rollback, "conflict");
+});
+
+test("picker: alsa-restore exit 2 is partly restored: restart, rollback failed, nothing deferred", () => {
+  const { mic, voice } = ready();
+  const { ra } = rollbackToAlsa(mic);
+  const rs = mic.cmdExit(cmdId(ra, "alsa-restore"), 2, "", 9);
+  assert.deepEqual(byType(rs, "unconfigured"), [{ type: "unconfigured", reason: "microphone partly restored" }]);
+  assert.deepEqual(kinds(rs), ["restart"]);
+  mic.cmdExit(cmdId(rs, "restart"), 0, "", 10);
+  assert.equal(byType(mic.verifyResult(true, 11), "done")[0].rollback, "failed");
+  assert.equal(mic.pending(), false);
+  assert.equal(voice.gate.busy(), false);
+});
+
+test("picker: a conflict on audio.device ends the rollback with no alsa-restore", () => {
+  const { mic } = ready();
+  const { as } = toAlsaSet(mic);
+  const set = mic.cmdExit(cmdId(as, "alsa-set"), 0, "", 3);
+  const restart = mic.cmdExit(cmdId(set, "set"), 0, "", 4);
+  mic.cmdExit(cmdId(restart, "restart"), 0, "", 5);
+  const chk = mic.verifyResult(false, 6);
+  const fx = mic.cmdExit(cmdId(chk, "get"), 0, JSON.stringify({ value: "other", file_value: "other" }), 7);
+  assert.deepEqual(kinds(fx), []);
+  assert.deepEqual(byType(fx, "conflict"), [{ type: "conflict", target: "device", expected: "omaremote-mic", found: "other" }]);
+});
+
+test("picker: reset while alsa-set is in flight defers; the drained exit 0 is restored by the deferred rollback", () => {
+  const { mic } = ready();
+  const { id, as } = toAlsaSet(mic);
+  const r = mic.reset(10);
+  assert.equal(byType(r, "done")[0].rollback, "deferred");
+  assert.deepEqual(kinds(r), []);
+  mic.cmdExit(cmdId(as, "alsa-set"), 0, "", 1000);                  // drains into the deferred snapshot; backend view is stale
+  const go = mic.backend("idle", 1001, { fresh: true });
+  assert.deepEqual(kinds(go), ["get"]);
+  const ra = mic.cmdExit(cmdId(go, "get"), 0, GET_OUT, 1002);
+  assert.deepEqual(argvOf(ra, "alsa-restore"), [...AM, "set", "--absent", "--expect", N]);
+  const rs = mic.cmdExit(cmdId(ra, "alsa-restore"), 0, "", 1003);
+  assert.deepEqual(kinds(rs), ["restart"], "the drained write made the service dirty");
+  mic.cmdExit(cmdId(rs, "restart"), 0, "", 1004);
+  mic.verifyResult(true, 1005);
+  assert.equal(mic.statusOf(id).rollback, "verified");
+  assert.equal(mic.pending(), false);
+});
+
+test("picker: reset while alsa-set is in flight; a drained exit 3 needs neither alsa-restore nor restart", () => {
+  const { mic } = ready();
+  const { id, as } = toAlsaSet(mic);
+  mic.reset(10);
+  mic.cmdExit(cmdId(as, "alsa-set"), 3, PRESENT("x"), 1000);
+  const go = mic.backend("idle", 1001, { fresh: true });
+  const fx = mic.cmdExit(cmdId(go, "get"), 0, GET_OUT, 1002);
+  assert.deepEqual(kinds(fx), []);
+  assert.equal(mic.statusOf(id).rollback, "verified");
+});
+
+test("picker: reset while alsa-get is in flight fails with nothing to roll back", () => {
+  const { mic } = ready();
+  const { effects } = mic.request("system", 0, { device: N });
+  mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 1);
+  const r = mic.reset(2);
+  assert.equal(byType(r, "done")[0].rollback, undefined);
+  assert.equal(mic.pending(), false);
+});
+
+test("picker: alsa-set done, a job before set defers; the deferred rollback restores the block", () => {
+  const { mic } = ready();
+  const { id, as } = toAlsaSet(mic);
+  mic.systemdJob(true, 3);
+  const fx = mic.cmdExit(cmdId(as, "alsa-set"), 0, "", 4);
+  assert.deepEqual([byType(fx, "done")[0].error, byType(fx, "done")[0].rollback], ["job-pending", "deferred"]);
+  mic.systemdJob(false, 1000);                                      // job gone, but the backend view (t=0) is stale
+  const go = mic.backend("idle", 1001, { fresh: true });
+  const ra = mic.cmdExit(cmdId(go, "get"), 0, GET_OUT, 1002);
+  assert.deepEqual(kinds(ra), ["alsa-restore"]);
+  const rs = mic.cmdExit(cmdId(ra, "alsa-restore"), 0, "", 1003);
+  mic.cmdExit(cmdId(rs, "restart"), 0, "", 1004);
+  mic.verifyResult(true, 1005);
+  assert.equal(mic.statusOf(id).rollback, "verified");
+});
+
+test("picker: a partial outcome survives a defer and the resume re-runs nothing", () => {
+  for (const [code, out, want] of [[2, "", "failed"], [3, PRESENT("x"), "conflict"]]) {
+    const { mic } = ready();
+    const { id, ra } = rollbackToAlsa(mic);
+    mic.systemdJob(true, 9);
+    const fx = mic.cmdExit(cmdId(ra, "alsa-restore"), code, out, 10);
+    assert.equal(byType(fx, "done")[0].rollback, "deferred", `exit ${code}`);
+    mic.systemdJob(false, 1000);
+    const go = mic.backend("idle", 1001, { fresh: true });
+    assert.deepEqual(kinds(go), ["restart"], `exit ${code}: resume goes straight to the restart`);
+    mic.cmdExit(cmdId(go, "restart"), 0, "", 1002);
+    mic.verifyResult(true, 1003);
+    assert.equal(mic.statusOf(id).rollback, want, `exit ${code}`);
+  }
+});
+
+test("picker: a defer that expires keeps the partial outcome beside unresolved", () => {
+  const { mic } = ready();
+  const { id, ra } = rollbackToAlsa(mic);
+  mic.systemdJob(true, 9);
+  mic.cmdExit(cmdId(ra, "alsa-restore"), 3, PRESENT("x"), 10);
+  const fx = mic.advance(10 + 60000);
+  assert.equal(byType(fx, "unconfigured")[0].reason, "mic change unresolved");
+  assert.deepEqual([mic.statusOf(id).rollback, mic.statusOf(id).partial], ["unresolved", "conflict"]);
+});
+
+test("picker: reset while alsa-restore is in flight; its drained exit sets the progress", () => {
+  const { mic } = ready();
+  const { id, ra } = rollbackToAlsa(mic);
+  mic.reset(9);
+  mic.cmdExit(cmdId(ra, "alsa-restore"), 0, "", 1000);
+  const go = mic.backend("idle", 1001, { fresh: true });
+  assert.deepEqual(kinds(go), ["restart"], "device done before the defer, block done by the drain");
+  mic.cmdExit(cmdId(go, "restart"), 0, "", 1002);
+  mic.verifyResult(true, 1003);
+  assert.equal(mic.statusOf(id).rollback, "verified");
+});
+
+test("picker: switching between two sources still writes audio.device and restarts", () => {
+  const { mic } = ready();
+  const { as } = toAlsaSet(mic, PRESENT("old"), GET_MIC);
+  const set = mic.cmdExit(cmdId(as, "alsa-set"), 0, "", 3);
+  assert.deepEqual(argvOf(set, "set"), ["voxtype", "config", "set", "audio.device", "omaremote-mic"]);
+  assert.deepEqual(kinds(mic.cmdExit(cmdId(set, "set"), 0, "", 4)), ["restart"]);
+});
+
+test("picker: with alsa-set skipped, mutated begins at set (a reset then defers)", () => {
+  const { mic } = ready();
+  const { as } = toAlsaSet(mic, PRESENT(N));                          // set in flight
+  assert.equal(byType(mic.reset(5), "done")[0].rollback, "deferred");
+});
+
+test("picker: a stale alsa command from a reset operation cannot touch the next operation", () => {
+  const { mic } = ready();
+  const { as } = toAlsaSet(mic);
+  mic.reset(10);
+  mic.cmdExit(cmdId(as, "alsa-set"), 3, PRESENT("x"), 1000);           // drained: nothing written, deferred skips the block
+  const go = mic.backend("idle", 1001, { fresh: true });
+  mic.cmdExit(cmdId(go, "get"), 0, GET_OUT, 1002);                    // deferred rollback finishes (verified, no restart)
+  assert.equal(mic.pending(), false);
+  const { result } = mic.request("system", 1010, { device: "other_node" });
+  const fx = mic.systemdJob(false, 1011);                             // a job reading newer than the request; backend still fresh
+  assert.deepEqual(kinds(fx), ["get"]);
   assert.equal(mic.statusOf(result.operationId).state, "applying");
 });
