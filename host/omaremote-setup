@@ -630,7 +630,9 @@ alsa_block_state() {
 # No awk here: awk's print would re-terminate every outside line it copies.
 alsa_rc_put() {
   local c=$1 b=$2 e=$3 blk=$4 pre rest post endnl=1
-  if [[ $(alsa_block_state "$c" "$b" "$e" 0) == absent ]]; then
+  local st; st=$(alsa_block_state "$c" "$b" "$e" 0)
+  case $st in absent|present|"present "*) ;; *) return 1 ;; esac      # bad, or no answer at all: refuse
+  if [[ $st == absent ]]; then
     printf '%s' "$c"
     if [[ -z $blk ]]; then return 0; fi
     if [[ -n $c && ${c: -1} != $'\n' ]]; then printf '\n'; fi
@@ -651,12 +653,14 @@ alsa_rc_put() {
 
 # alsa_rc_write <content>: atomic replace, a temp file in the same directory then a rename. Readers never see a part.
 alsa_rc_write() {
-  local dir tmp; dir=$(dirname -- "$ALSA_RC")
+  # Write through a symlinked asoundrc (dotfile managers): resolve once, temp file beside the target, rename onto it.
+  local target dir tmp; target=$(readlink -m -- "$ALSA_RC") || return 1
+  dir=$(dirname -- "$target")
   mkdir -p -- "$dir" || return 1
   tmp=$(mktemp "$dir/.asoundrc.omaremote.XXXXXX") || return 1
   if ! printf '%s' "$1" > "$tmp"; then rm -f -- "$tmp"; return 1; fi
-  if [[ -e $ALSA_RC ]]; then chmod --reference="$ALSA_RC" "$tmp" 2>/dev/null || true; else chmod 644 "$tmp"; fi
-  mv -f -- "$tmp" "$ALSA_RC" || { rm -f -- "$tmp"; return 1; }
+  if [[ -e $target ]]; then chmod --reference="$target" "$tmp" 2>/dev/null || true; else chmod 644 "$tmp"; fi
+  mv -f -- "$tmp" "$target" || { rm -f -- "$tmp"; return 1; }
 }
 
 # alsa_rc_locked <fn> [args]: run fn holding the exclusive lock every repo writer of $ALSA_RC takes (spec §4.2), for
@@ -676,8 +680,10 @@ alsa_rc_locked() {
 atv_alsa_write() {
   ALSA_CHANGED=0
   alsa_rc_read || return 1
-  [[ $(alsa_block_state "$ALSA_CONTENT" "$ALSA_BEGIN" "$ALSA_END" 0) == bad ]] && return 2
-  local new; new=$(alsa_rc_put "$ALSA_CONTENT" "$ALSA_BEGIN" "$ALSA_END" "$(gen_alsa_block)"; printf x) || return 1
+  local st; st=$(alsa_block_state "$ALSA_CONTENT" "$ALSA_BEGIN" "$ALSA_END" 0)
+  [[ $st == bad ]] && return 2
+  case $st in absent|present) ;; *) return 1 ;; esac
+  local new; new=$(alsa_rc_put "$ALSA_CONTENT" "$ALSA_BEGIN" "$ALSA_END" "$(gen_alsa_block)" && printf x) || return 1
   new=${new%x}
   [[ $new == "$ALSA_CONTENT" ]] && return 0
   alsa_rc_write "$new" || return 1
@@ -706,8 +712,12 @@ cmd_atvvoice() {
 
   # And a user ALSA file we cannot edit safely (read-only check, one read), so it fails before anything is built or written.
   alsa_rc_read || die "cannot read $ALSA_RC"
-  [[ $(alsa_block_state "$ALSA_CONTENT" "$ALSA_BEGIN" "$ALSA_END" 0) != bad ]] \
-    || die "$ALSA_RC has unbalanced or misordered '$ALSA_BEGIN' / '$ALSA_END' markers; fix it by hand. Nothing was changed."
+  local pre_st; pre_st=$(alsa_block_state "$ALSA_CONTENT" "$ALSA_BEGIN" "$ALSA_END" 0)
+  case $pre_st in
+    absent|present) ;;
+    bad) die "$ALSA_RC has unbalanced or misordered '$ALSA_BEGIN' / '$ALSA_END' markers; fix it by hand. Nothing was changed." ;;
+    *) die "cannot read $ALSA_RC" ;;
+  esac
 
   local built=0 want; want=$(atv_stamp_line)
   if [[ ! -x $ATV_BIN || $(cat "$ATV_STAMP" 2>/dev/null) != "$want" ]]; then

@@ -113,6 +113,27 @@ check "write: mode kept"            "640" "$(stat -c %a "$RC")"
 check "write: no temp left behind"  "0" "$(find "$T/alsa" -name '.asoundrc.omaremote.*' | wc -l)"
 rm -f "$RC"; lib 'alsa_rc_write "z
 "'; check "write: new file is 644" "644" "$(stat -c %a "$RC")"
+# atomic = a new inode via rename, never an in-place rewrite; so a read-only file in a writable dir is still replaced
+printf 'x\n' > "$RC"; chmod 440 "$RC"; ino=$(stat -c %i "$RC")
+lib 'alsa_rc_write "ro
+"'; check "write: read-only file replaced (rename, not in-place)" "ro" "$(cat "$RC")"
+check "write: new inode (atomic replace)" "yes" "$([[ $(stat -c %i "$RC") != "$ino" ]] && echo yes || echo no)"
+check "write: read-only mode kept" "440" "$(stat -c %a "$RC")"
+chmod 644 "$RC"
+# a symlinked asoundrc stays a link; the target gets the content
+mkdir -p "$T/dots"; printf 'old\n' > "$T/dots/real"; chmod 600 "$T/dots/real"; rm -f "$RC"; ln -s "$T/dots/real" "$RC"
+lib 'alsa_rc_write "via link
+"'
+check "write: symlink stays a link"      "yes" "$([[ -L $RC ]] && echo yes || echo no)"
+check "write: link target has new content" "via link" "$(cat "$T/dots/real")"
+check "write: link target mode kept"     "600" "$(stat -c %a "$T/dots/real")"
+check "write: no temp beside the target" "0" "$(find "$T/dots" "$T/alsa" -name '.asoundrc.omaremote.*' | wc -l)"
+rm -f "$RC"; ln -s "$T/dots/new" "$RC"
+lib 'alsa_rc_write "dangling
+"'
+check "write: dangling link -> target created" "dangling" "$(cat "$T/dots/new" 2>/dev/null)"
+check "write: dangling link stays a link" "yes" "$([[ -L $RC ]] && echo yes || echo no)"
+rm -f "$RC"
 
 # ---- alsa_rc_locked: waits, then times out ----
 rm -rf "$T/alsa"; mkdir -p "$T/alsa"
@@ -122,7 +143,9 @@ check "lock: waits for a short holder, then succeeds" "0" "$rc"
 check "lock: really waited (>= 0.5 s)" "yes" "$( (( t1 - t0 >= 500000000 )) && echo yes || echo no )"
 wait
 ( flock "$RC.omaremote.lock" sleep 3 ) & sleep 0.2
-OMAREMOTE_ALSA_LOCK_WAIT=1 lib 'alsa_rc_locked true'; check "lock: held past the wait -> 1" "1" "$?"
+rm -f "$T/ran"
+OMAREMOTE_ALSA_LOCK_WAIT=1 lib 'alsa_rc_locked touch '"$T"'/ran'; check "lock: held past the wait -> 1" "1" "$?"
+check "lock: timed-out fn never ran" "no" "$([[ -e $T/ran ]] && echo yes || echo no)"
 wait
 : > "$T/notadir"; OMAREMOTE_ALSA_RC=$T/notadir/asoundrc lib 'alsa_rc_locked true'; check "lock: unmakeable dir -> 1" "1" "$?"
 
