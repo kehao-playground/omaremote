@@ -51,6 +51,15 @@ ATV_NODE=atvvoice-$ATV_NAME
 ALSA_RC=${OMAREMOTE_ALSA_RC:-${XDG_CONFIG_HOME:-$HOME/.config}/alsa/asoundrc}
 ALSA_BEGIN='# BEGIN omaremote atvvoice (managed by omaremote-setup; do not edit)'
 ALSA_END='# END omaremote atvvoice'
+# Mic source picker spec §4.1: the second managed block, the PCM Voxtype opens for a picked source.
+MIC_BEGIN='# BEGIN omaremote mic (managed by omaremote-setup; do not edit)'
+MIC_END='# END omaremote mic'
+MIC_PCM=omaremote-mic
+# Plan ruling 3: lib/AlsaMic.mjs NODE_RE is the same pattern. The first character is never `-`.
+NODE_RE='^[A-Za-z0-9_.:][A-Za-z0-9_.:-]*$'
+ALSA_LOCK_WAIT=${OMAREMOTE_ALSA_LOCK_WAIT:-5}
+ALSA_CONTENT=""
+ALSA_CHANGED=0
 
 # Learned on 2026-10-02 from the real remote; see docs/hw-keymap-xiaomi-voice-remote.md.
 # TODO(plan4): replace this table with the interactive learning step of main spec §7 step 2.
@@ -579,37 +588,100 @@ $ALSA_END
 EOF
 }
 
-# alsa_rc_state <file>: read-only. Prints none (no managed block), block (one BEGIN before one END) or bad.
-alsa_rc_state() {
-  local f=$1 b e bl el
-  [[ -s $f ]] || { echo none; return; }
-  b=$(grep -cxF -- "$ALSA_BEGIN" "$f" || true); e=$(grep -cxF -- "$ALSA_END" "$f" || true)
-  if (( b == 0 && e == 0 )); then echo none; return; fi
-  if (( b == 1 && e == 1 )); then
-    bl=$(grep -nxF -- "$ALSA_BEGIN" "$f" | cut -d: -f1); el=$(grep -nxF -- "$ALSA_END" "$f" | cut -d: -f1)
-    if (( bl < el )); then echo block; return; fi
-  fi
-  echo bad
+gen_mic_block() {   # gen_mic_block <node>: the canonical mic block, markers included, no final newline
+  printf '%s\npcm.%s {\n  type pipewire\n  capture_node "%s"\n  hint { show on description "omaremote picked microphone" }\n}\n%s' \
+    "$MIC_BEGIN" "$MIC_PCM" "$1" "$MIC_END"
 }
 
-# gen_alsa_rc <existing file> > new content: the managed block replaced in place, or appended; every line
-# outside the markers is kept as is. Unbalanced markers are refused rather than guessed at.
-gen_alsa_rc() {
-  local f=$1
-  if [[ ! -s $f ]]; then gen_alsa_block; return; fi
-  case $(alsa_rc_state "$f") in
-    none)
-    cat "$f"
-    [[ $(tail -c1 "$f" | wc -l) -eq 1 ]] || echo
-    echo
-    gen_alsa_block ;;
-    block)
-    awk -v blk="$(gen_alsa_block)" -v beg="$ALSA_BEGIN" -v end="$ALSA_END" '
-      $0 == beg { print blk; skip = 1; next }
-      skip && $0 == end { skip = 0; next }
-      !skip { print }' "$f" ;;
-    *) return 1 ;;
-  esac
+# Spec §4.2 single-snapshot parsing: one open of $ALSA_RC, its whole content into ALSA_CONTENT. Every parse below works
+# on this copy, never on the pathname again, so a writer's rename can never mix two versions into one reading.
+# A missing file reads as empty. The trailing `x` keeps the file's final newlines, which $(...) would strip.
+alsa_rc_read() {
+  ALSA_CONTENT=""
+  [[ -e $ALSA_RC ]] || return 0
+  local c; c=$(cat -- "$ALSA_RC" && printf x) || return 1
+  ALSA_CONTENT=${c%x}
+}
+
+# alsa_block_state <content> <begin> <end> <strict>: absent | present | present <node> | bad.
+# bad = unbalanced, misordered or repeated markers; with strict=1 (the mic block) also anything but exactly one
+# `capture_node "<node>"` line between them whose value matches NODE_RE.
+alsa_block_state() {
+  printf '%s' "$1" | awk -v beg="$2" -v end="$3" -v strict="$4" -v re="$NODE_RE" '
+    $0 == beg { nb++; if (ne > 0 || inb) bad = 1; inb = 1; next }
+    $0 == end { ne++; if (!inb) bad = 1; inb = 0; next }
+    inb && $0 ~ /^[ \t]*capture_node[ \t]/ {
+      nc++; v = $0
+      ok = sub(/^[ \t]*capture_node[ \t]+"/, "", v) && sub(/"[ \t]*$/, "", v)
+      if (!ok || v !~ re) badv = 1
+    }
+    END {
+      if (nb == 0 && ne == 0) { print "absent"; exit }
+      if (bad || nb != 1 || ne != 1 || inb) { print "bad"; exit }
+      if (strict == "1") { if (nc != 1 || badv) print "bad"; else print "present " v; exit }
+      print "present"
+    }'
+}
+
+# alsa_rc_put <content> <begin> <end> <block>: the new content (spec §4.1 layout). The caller has ruled out `bad`.
+# Absent + block: append, after one newline only if the content does not already end in one (the ONLY byte this
+# function ever adds outside a block). Present: cut the content at the BEGIN and END lines and keep both outside parts
+# byte for byte (a last line without a newline included); put the block between them, or nothing when it is empty.
+# No awk here: awk's print would re-terminate every outside line it copies.
+alsa_rc_put() {
+  local c=$1 b=$2 e=$3 blk=$4 pre rest post endnl=1
+  if [[ $(alsa_block_state "$c" "$b" "$e" 0) == absent ]]; then
+    printf '%s' "$c"
+    if [[ -z $blk ]]; then return 0; fi
+    if [[ -n $c && ${c: -1} != $'\n' ]]; then printf '\n'; fi
+    printf '%s\n' "$blk"
+    return 0
+  fi
+  # present: exactly one BEGIN line, before exactly one END line. BEGIN is never the last line, so a newline follows it.
+  if [[ $c == "$b"$'\n'* ]]; then pre=""; rest=${c#"$b"$'\n'}
+  else pre=${c%%$'\n'"$b"$'\n'*}$'\n'; rest=${c#*$'\n'"$b"$'\n'}; fi
+  if [[ $rest == "$e" ]]; then post=""; endnl=0                        # block is the whole rest, END unterminated
+  elif [[ $rest == "$e"$'\n'* ]]; then post=${rest#"$e"$'\n'}
+  elif [[ $rest == *$'\n'"$e"$'\n'* ]]; then post=${rest#*$'\n'"$e"$'\n'}
+  else post=""; endnl=0; fi                                             # END is the last line, unterminated
+  printf '%s' "$pre"
+  if [[ -n $blk ]]; then printf '%s' "$blk"; if (( endnl )); then printf '\n'; fi; fi
+  printf '%s' "$post"
+}
+
+# alsa_rc_write <content>: atomic replace, a temp file in the same directory then a rename. Readers never see a part.
+alsa_rc_write() {
+  local dir tmp; dir=$(dirname -- "$ALSA_RC")
+  mkdir -p -- "$dir" || return 1
+  tmp=$(mktemp "$dir/.asoundrc.omaremote.XXXXXX") || return 1
+  if ! printf '%s' "$1" > "$tmp"; then rm -f -- "$tmp"; return 1; fi
+  if [[ -e $ALSA_RC ]]; then chmod --reference="$ALSA_RC" "$tmp" 2>/dev/null || true; else chmod 644 "$tmp"; fi
+  mv -f -- "$tmp" "$ALSA_RC" || { rm -f -- "$tmp"; return 1; }
+}
+
+# alsa_rc_locked <fn> [args]: run fn holding the exclusive lock every repo writer of $ALSA_RC takes (spec §4.2), for
+# the whole read-compare-generate-rename. Returns fn's status, or 1 when the directory cannot be made or the lock is
+# not had within ALSA_LOCK_WAIT seconds. Editors outside the repo do not take it; spec §4.2 states what that leaves.
+alsa_rc_locked() {
+  local fd rc=0
+  mkdir -p -- "$(dirname -- "$ALSA_RC")" 2>/dev/null || return 1
+  exec {fd}>>"$ALSA_RC.omaremote.lock" || return 1
+  if ! flock -w "$ALSA_LOCK_WAIT" "$fd"; then exec {fd}>&-; return 1; fi
+  "$@" || rc=$?
+  exec {fd}>&-
+  return "$rc"
+}
+
+# atv_alsa_write: under the lock. Writes the atvvoice block if it changed; 2 = bad markers; sets ALSA_CHANGED.
+atv_alsa_write() {
+  ALSA_CHANGED=0
+  alsa_rc_read || return 1
+  [[ $(alsa_block_state "$ALSA_CONTENT" "$ALSA_BEGIN" "$ALSA_END" 0) == bad ]] && return 2
+  local new; new=$(alsa_rc_put "$ALSA_CONTENT" "$ALSA_BEGIN" "$ALSA_END" "$(gen_alsa_block)"; printf x) || return 1
+  new=${new%x}
+  [[ $new == "$ALSA_CONTENT" ]] && return 0
+  alsa_rc_write "$new" || return 1
+  ALSA_CHANGED=1
 }
 
 cmd_atvvoice() {
@@ -632,8 +704,9 @@ cmd_atvvoice() {
   else [[ -e /usr/share/alsa/alsa.conf.d/50-pipewire.conf || -e /usr/lib/alsa-lib/libasound_module_pcm_pipewire.so ]]
   fi || die "the PipeWire ALSA plugin is missing (Voxtype can only open ALSA devices). Run:  sudo pacman -S --needed pipewire-alsa  -- then re-run this step."
 
-  # And a user ALSA file we cannot edit safely (read-only check), so it fails before anything is built or written.
-  [[ $(alsa_rc_state "$ALSA_RC") != bad ]] \
+  # And a user ALSA file we cannot edit safely (read-only check, one read), so it fails before anything is built or written.
+  alsa_rc_read || die "cannot read $ALSA_RC"
+  [[ $(alsa_block_state "$ALSA_CONTENT" "$ALSA_BEGIN" "$ALSA_END" 0) != bad ]] \
     || die "$ALSA_RC has unbalanced or misordered '$ALSA_BEGIN' / '$ALSA_END' markers; fix it by hand. Nothing was changed."
 
   local built=0 want; want=$(atv_stamp_line)
@@ -656,17 +729,17 @@ cmd_atvvoice() {
     say "wrote $ATV_UNIT (device ${cands[0]})"
   fi
 
-  # The ALSA PCM: written after the build and the unit, so a failed build leaves this file alone too.
-  gen_alsa_rc "$ALSA_RC" > "$WORKDIR/asoundrc" || die "cannot generate $ALSA_RC (markers changed during the run?)"
-  local alsa_changed=0
-  if ! cmp -s "$WORKDIR/asoundrc" "$ALSA_RC"; then
-    mkdir -p "$(dirname "$ALSA_RC")"
-    cp "$WORKDIR/asoundrc" "$ALSA_RC"
-    alsa_changed=1
-    say "wrote $ALSA_RC (ALSA PCM $ATV_NODE)"
-  else
-    say "ALSA PCM $ATV_NODE: unchanged"
-  fi
+  # The ALSA PCM: written after the build and the unit, so a failed build leaves this file alone too. Locked and
+  # atomic, like every repo writer of this file (mic source picker spec §4.2).
+  local alsa_rc=0
+  alsa_rc_locked atv_alsa_write || alsa_rc=$?
+  case $alsa_rc in
+    0) ;;
+    2) die "cannot generate $ALSA_RC (markers changed during the run?)" ;;
+    *) die "cannot write $ALSA_RC" ;;
+  esac
+  local alsa_changed=$ALSA_CHANGED
+  if (( alsa_changed )); then say "wrote $ALSA_RC (ALSA PCM $ATV_NODE)"; else say "ALSA PCM $ATV_NODE: unchanged"; fi
   # A running Voxtype read ALSA's config at start; make it re-read. Not fatal: a failure here must not stop
   # the atvvoice restart below, which is what repairs a running old build.
   if (( alsa_changed )) && systemctl --user is-active --quiet voxtype; then

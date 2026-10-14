@@ -23,6 +23,7 @@ lint:
 check: test lint
 	bash tests/setup-helpers.sh
 	bash tests/setup-atvvoice.sh
+	bash tests/setup-alsa-mic.sh
 	bash tests/setup-typeless.sh
 	bash tests/matrix-helpers.sh
 	python3 -I tests/test_keytap.py
