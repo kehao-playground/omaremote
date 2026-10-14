@@ -1,5 +1,5 @@
 {
-  "featureShortcutBindings": { "dictationMode": ["RightAlt"] },
+  "featureShortcutBindings": { "dictationMode": ["RightAlt", "RightAlt+RightShift"] },
   "selectedMicrophoneDevice": { "deviceId": "f00d", "kind": "audioinput", "label": "ATVVoice Remote Mic" },
   "microphoneDevices": [
     { "deviceId": "default", "kind": "audioinput", "label": "Auto-detect (Built-in Audio Analog Stereo)" },

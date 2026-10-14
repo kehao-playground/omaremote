@@ -44,7 +44,9 @@ The probe was a throwaway stdlib-Python uinput script, since deleted.
 5. Typeless lists the ATVVoice node as a microphone (label `小米蓝牙语音遥控器`). Audio from it exists only
    while the remote's button is physically held (remote-mic design §2.3).
 6. Typeless keeps its settings in `~/.config/Typeless/app-settings.json`:
-   - `featureShortcutBindings.dictationMode` holds `["RightAlt"]`, written as `+`-joined evdev-style names;
+   - `featureShortcutBindings.dictationMode` holds `["RightAlt"]`, written as `+`-joined evdev-style names. It may
+     hold several shortcuts, e.g. `["RightAlt", "RightAlt+RightShift"]` (measured 2026-10-14); setup's
+     `--hotkey-from-typeless` adopts the first;
    - `selectedMicrophoneDevice` is an object `{deviceId, label, …}`; Auto-detect is `deviceId: "default"` (measured
      2026-10-13 while writing Plan 5);
    - `microphoneDevices[]` maps ids to labels.
@@ -492,7 +494,7 @@ These rows appear only when `voice.engine = "typeless"`. `host/omaremote-facts` 
 | keytap service | unit `active` and the `omaremote keytap` input device present | fail · fix `omaremote-setup typeless` |
 | uinput access | user in `input` and `/dev/uinput` writable | fail · print the `usermod` command |
 | Typeless running | a `/opt/Typeless/typeless` main process | warn · "start Typeless" |
-| hotkey matches | canonical `voice.typeless.hotkey` equals canonical `dictationMode[0]` (§3.1) | warn · fix `omaremote-setup typeless --hotkey-from-typeless`; `unknown` when the file is unreadable |
+| hotkey matches | canonical `voice.typeless.hotkey` equals the canonical form of any entry of `dictationMode` (§3.1; Typeless may hold several shortcuts, measured 2026-10-14; unparsable entries are skipped) | warn · fix `omaremote-setup typeless --hotkey-from-typeless`; `unknown` when the file is unreadable |
 | microphone matches mode | `remote`: Typeless's selected device label equals the remote's name. `system`: it does not | warn with both values; `unknown` when unreadable |
 
 Under Typeless every Voxtype row is informational: voxtype-version, -status, -output, -device and last-capture,

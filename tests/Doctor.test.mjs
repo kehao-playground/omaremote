@@ -261,6 +261,18 @@ test("the hotkey row compares canonical forms and is unknown for an unreadable o
   assert.equal(st({ settingsReadable: false }), "unknown");
 });
 
+test("hardware acceptance 2026-10-14: Typeless may hold several dictation shortcuts; matching any one passes", () => {
+  const st = (t, v) => row(evaluate(tlFacts(t), tlConfig(v)), "typeless-hotkey").status;
+  const both = { hotkey: "RightAlt", hotkeys: ["RightAlt", "RightAlt+RightShift"] };
+  assert.equal(st(both, { typeless: { hotkey: "RightAlt+RightShift" } }), "pass", "the second binding matches");
+  assert.equal(st(both), "pass", "the first binding matches");
+  assert.equal(st(both, { typeless: { hotkey: "RightCtrl+Space" } }), "warn", "neither matches");
+  assert.equal(st({ hotkey: "Fn+Q", hotkeys: ["Fn+Q", "rightalt"] }), "pass", "an unparsable entry is skipped, not a mismatch");
+  assert.equal(st({ hotkey: "Fn+Q", hotkeys: ["Fn+Q"] }), "unknown", "nothing parsable is still unknown");
+  assert.match(row(evaluate(tlFacts(both), tlConfig({ typeless: { hotkey: "RightCtrl+Space" } })), "typeless-hotkey").detail,
+               /Typeless: RightAlt, RightAlt\+RightShift/);
+});
+
 test("the microphone row: remote mode wants the remote's label; system mode wants anything else", () => {
   const st = (t, v) => row(evaluate(tlFacts(t), tlConfig(v)), "typeless-mic");
   assert.equal(st({}).status, "pass");

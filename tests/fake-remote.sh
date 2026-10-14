@@ -1090,7 +1090,9 @@ s_doctor_typeless_rows() {
   wait_doctor_row typeless-hotkey pass || return 1                 # fixture: dictationMode[0] = RightAlt
   wait_doctor_row typeless-mic pass || return 1                    # fixture label = the fake node's description
   local seq; seq=$(ipc typelessHotkey RightCtrl+Space | jq -r '.writeSeq'); wait_saved "$seq" || return 1
-  wait_doctor_row typeless-hotkey warn
+  wait_doctor_row typeless-hotkey warn || return 1
+  seq=$(ipc typelessHotkey RightAlt+RightShift | jq -r '.writeSeq'); wait_saved "$seq" || return 1
+  wait_doctor_row typeless-hotkey pass                              # fixture: dictationMode[1] = RightAlt+RightShift
 }
 scenario doctor_typeless_rows s_doctor_typeless_rows
 

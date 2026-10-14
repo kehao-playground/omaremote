@@ -86,10 +86,11 @@ kt_device=$(jbool_bounded grep -qxs 'omaremote keytap' /sys/class/input/event*/d
 tl_input=$(jbool bash -c 'id -nG | tr " " "\n" | grep -qx input')
 tl_uinput=$(jbool test -w "${OMAREMOTE_UINPUT:-/dev/uinput}")
 tl_running=$(jbool_bounded pgrep -x -u "$(id -u)" typeless)
-tl='{"settingsReadable":false,"hotkey":null,"micId":null,"micLabel":null}'
+tl='{"settingsReadable":false,"hotkey":null,"hotkeys":[],"micId":null,"micLabel":null}'
 if [[ -r $TL_SETTINGS ]]; then
   t=$(jq -c '{settingsReadable: true,
               hotkey: ((.featureShortcutBindings.dictationMode // null) | if type == "array" then (.[0] // null) else null end | if type == "string" then . else null end),
+              hotkeys: ((.featureShortcutBindings.dictationMode // null) | if type == "array" then map(select(type == "string")) else [] end),
               micId: (.selectedMicrophoneDevice | if type == "object" then (.deviceId // null) else null end),
               micLabel: (.selectedMicrophoneDevice | if type == "object" then (.label // null) else null end)}' "$TL_SETTINGS" 2>/dev/null) && [[ -n $t ]] && tl=$t
 fi
@@ -103,5 +104,5 @@ cat <<JSON
  "pipewire":{"sources":$pw_sources},
  "alsa":{"pcms":$alsa_pcms},
  "typeless":{"keytapActive":$kt_active,"keytapDevice":$kt_device,"inInput":$tl_input,"uinputWritable":$tl_uinput,"running":$tl_running,
-             "settingsReadable":$(jq -r '.settingsReadable' <<<"$tl"),"hotkey":$(jq -c '.hotkey' <<<"$tl"),"micId":$(jq -c '.micId' <<<"$tl"),"micLabel":$(jq -c '.micLabel' <<<"$tl")}}
+             "settingsReadable":$(jq -r '.settingsReadable' <<<"$tl"),"hotkey":$(jq -c '.hotkey' <<<"$tl"),"hotkeys":$(jq -c '.hotkeys' <<<"$tl"),"micId":$(jq -c '.micId' <<<"$tl"),"micLabel":$(jq -c '.micLabel' <<<"$tl")}}
 JSON
