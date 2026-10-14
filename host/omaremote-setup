@@ -690,6 +690,57 @@ atv_alsa_write() {
   ALSA_CHANGED=1
 }
 
+alsa_mic_json() {   # alsa_mic_json absent | "present <node>": the one-line JSON alsa-mic prints
+  if [[ $1 == absent ]]; then printf '{"state":"absent"}\n'; else printf '{"state":"present","node":"%s"}\n' "${1#present }"; fi
+}
+alsa_mic_usage() {
+  printf 'usage: omaremote-setup alsa-mic get\n       omaremote-setup alsa-mic set (<node> | --absent) (--expect <node> | --expect-absent)\n' >&2
+  exit 64
+}
+alsa_mic_node() { [[ $1 =~ $NODE_RE ]] || { printf 'omaremote-setup: not a PipeWire node name: %s\n' "$1" >&2; exit 64; }; }
+
+# alsa_mic_set <target> <expected>: under the lock. States are "absent" or "present <node>".
+# 2 = bad block, 3 = mismatch (current state printed), 1 = I/O; the file is unchanged on every non-zero return.
+alsa_mic_set() {
+  local st new blk=""
+  alsa_rc_read || return 1
+  st=$(alsa_block_state "$ALSA_CONTENT" "$MIC_BEGIN" "$MIC_END" 1)
+  [[ $st == bad ]] && return 2
+  if [[ $st != "$2" ]]; then alsa_mic_json "$st"; return 3; fi
+  [[ $1 == absent ]] || blk=$(gen_mic_block "${1#present }")
+  new=$(alsa_rc_put "$ALSA_CONTENT" "$MIC_BEGIN" "$MIC_END" "$blk"; printf x) || return 1
+  new=${new%x}
+  [[ $new == "$ALSA_CONTENT" ]] && return 0
+  alsa_rc_write "$new"
+}
+
+cmd_alsa_mic() {   # mic source picker spec §4.2. No root, no prompt: the plugin calls this.
+  case ${1:-} in
+    get)
+      (( $# == 1 )) || alsa_mic_usage
+      alsa_rc_read || exit 1
+      local st; st=$(alsa_block_state "$ALSA_CONTENT" "$MIC_BEGIN" "$MIC_END" 1)
+      if [[ $st == bad ]]; then printf 'omaremote-setup: the omaremote mic block in %s is malformed\n' "$ALSA_RC" >&2; exit 2; fi
+      alsa_mic_json "$st"; exit 0 ;;
+    set)
+      shift
+      local target="" expect="" rc=0
+      while (( $# )); do
+        case $1 in
+          --absent) [[ -z $target ]] || alsa_mic_usage; target=absent; shift ;;
+          --expect-absent) [[ -z $expect ]] || alsa_mic_usage; expect=absent; shift ;;
+          --expect) [[ -z $expect && $# -ge 2 ]] || alsa_mic_usage; alsa_mic_node "$2"; expect="present $2"; shift 2 ;;
+          -*) alsa_mic_usage ;;
+          *) [[ -z $target ]] || alsa_mic_usage; alsa_mic_node "$1"; target="present $1"; shift ;;
+        esac
+      done
+      [[ -n $target && -n $expect ]] || alsa_mic_usage
+      alsa_rc_locked alsa_mic_set "$target" "$expect" || rc=$?
+      exit "$rc" ;;
+    *) alsa_mic_usage ;;
+  esac
+}
+
 cmd_atvvoice() {
   step "ATVVoice (remote microphone)"
   command -v cargo >/dev/null 2>&1 \
@@ -944,6 +995,8 @@ usage: omaremote-setup [--yes] [--mic remote|system] <subcommand>
   atvvoice build ATVVoice (pinned rev + host/patches/atvvoice-reset-decoder.patch; needs git and cargo),
            write its user unit for the paired remote, enable it, and
            define the ALSA PCM atvvoice-xiaomi that Voxtype opens (managed block in the ALSA file below)
+  alsa-mic get | set (<node> | --absent) (--expect <node> | --expect-absent)
+           read or compare-and-set the omaremote-mic PCM block (used by the plugin's mic picker; JSON out)
   mic      apply a mic mode (remote|system) through the mic-apply contract
   typeless install and start the omaremote-keytap user service (uinput; needs the input group) and store the
            Typeless dictation hotkey: typeless [--hotkey <chord> | --hotkey-from-typeless]. Never switches the
@@ -984,6 +1037,7 @@ main() {
     binds) cmd_binds ;;
     plugin) cmd_plugin ;;
     atvvoice) cmd_atvvoice ;;
+    alsa-mic) shift; cmd_alsa_mic "$@" ;;
     mic) if (( MIC_EXPLICIT )); then cmd_mic "${2:-$MIC_MODE}"; else cmd_mic "${2:-system}"; fi ;;
     typeless) shift; cmd_typeless "$@" ;;
     verify) cmd_verify ;;

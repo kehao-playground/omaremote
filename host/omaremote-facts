@@ -63,6 +63,9 @@ fi
 
 if has pw-dump && raw=$(bounded pw-dump); then
   pw_sources=$(jq -c '[.[] | select(.type == "PipeWire:Interface:Node") | select((.info.props["media.class"] // "") == "Audio/Source") | .info.props["node.name"]]' <<<"$raw" 2>/dev/null)
+  # Mic source picker spec §6 last-capture: the PipeWire default source, from the `default` metadata object.
+  pw_default=$(jq -c '[.[] | select(.type == "PipeWire:Interface:Metadata") | select((.props["metadata.name"] // "") == "default")
+                       | .metadata[]? | select(.subject == 0 and .key == "default.audio.source") | .value.name? | strings] | .[0] // null' <<<"$raw" 2>/dev/null)
   # Typeless spec §8: Typeless labels a microphone by its PipeWire node.description, so the Doctor compares that.
   atv_node_raw=$(jq -r '. // empty' <<<"$atv_node" 2>/dev/null)
   if [[ -n $atv_node_raw ]]; then
@@ -71,6 +74,7 @@ if has pw-dump && raw=$(bounded pw-dump); then
   fi
 fi
 pw_sources=${pw_sources:-null}
+pw_default=${pw_default:-null}
 
 # ALSA PCM names (`arecord -L`: names start in column 0, descriptions are indented). Voxtype 1.1.0 can open only
 # these, never a bare PipeWire node name, so the doctor compares audio.device against this list.
@@ -78,6 +82,13 @@ if has arecord && raw=$(timeout "$TO" arecord -L 2>/dev/null); then   # not boun
   alsa_pcms=$(awk '/^[^[:space:]]/ { print $1 }' <<<"$raw" | jq -R . | jq -sc .)
 fi
 alsa_pcms=${alsa_pcms:-null}
+
+# Mic source picker spec §6 condition 2: the omaremote mic block, read by the same parser that writes it.
+SELF_DIR=$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")
+alsa_mic=null
+out=$(timeout "$TO" bash "$SELF_DIR/omaremote-setup" alsa-mic get 2>/dev/null); rc=$?
+if (( rc == 0 )); then alsa_mic=$(jq -c 'select(.state == "absent" or .state == "present")' <<<"$out" 2>/dev/null); alsa_mic=${alsa_mic:-null}
+elif (( rc == 2 )); then alsa_mic='{"state":"bad"}'; fi
 
 # Typeless engine (Typeless spec §8). Read-only, like everything here.
 TL_SETTINGS=${OMAREMOTE_TYPELESS_SETTINGS:-${XDG_CONFIG_HOME:-$HOME/.config}/Typeless/app-settings.json}
@@ -101,8 +112,8 @@ cat <<JSON
  "hypr":{"required":$hypr_required,"descriptions":$hypr_desc},
  "voxtype":{"version":$vox_version,"statusClass":$vox_class,"outputMode":$vox_out,"audioDevice":$vox_dev},
  "atvvoice":{"active":$atv_active,"micOnDemand":$atv_ondemand,"busNames":$atv_names,"nodeName":$atv_node,"nodeDescription":$atv_desc},
- "pipewire":{"sources":$pw_sources},
- "alsa":{"pcms":$alsa_pcms},
+ "pipewire":{"sources":$pw_sources,"defaultSource":$pw_default},
+ "alsa":{"pcms":$alsa_pcms,"mic":$alsa_mic},
  "typeless":{"keytapActive":$kt_active,"keytapDevice":$kt_device,"inInput":$tl_input,"uinputWritable":$tl_uinput,"running":$tl_running,
              "settingsReadable":$(jq -r '.settingsReadable' <<<"$tl"),"hotkey":$(jq -c '.hotkey' <<<"$tl"),"hotkeys":$(jq -c '.hotkeys' <<<"$tl"),"micId":$(jq -c '.micId' <<<"$tl"),"micLabel":$(jq -c '.micLabel' <<<"$tl")}}
 JSON

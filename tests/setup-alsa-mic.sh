@@ -158,5 +158,88 @@ printf '%s\npcm.x {}\n' "$(lib 'echo "$ALSA_BEGIN"')" > "$RC"; before=$(cat "$RC
 lib 'atv_alsa_write; echo "rc=$?"' > "$T/o"; check "atv: unbalanced -> 2" "rc=2" "$(cat "$T/o")"
 check "atv: unbalanced file unchanged" "$before" "$(cat "$RC")"
 
+# ---- alsa-mic CLI ----
+am() { bash "$SRC" alsa-mic "$@"; }
+rm -rf "$T/alsa"
+check "get: missing file -> absent"            '{"state":"absent"}' "$(am get)"
+am set n1 --expect-absent; check "set: create -> 0" "0" "$?"
+check "get: present n1"                        '{"state":"present","node":"n1"}' "$(am get)"
+check "set: file is exactly the block"         "$(lib 'gen_mic_block n1')" "$(cat "$RC")"
+cp "$RC" "$T/snap"
+out=$(am set n2 --expect-absent); rc=$?
+check "set: wrong expectation -> 3"            "3" "$rc"
+check "set: exit 3 prints the current state"   '{"state":"present","node":"n1"}' "$out"
+check "set: exit 3 leaves the file"            "yes" "$(cmp -s "$RC" "$T/snap" && echo yes || echo no)"
+am set n2 --expect n1; check "set: replace -> 0" "0" "$?"
+am set --absent --expect n2; check "set: remove -> 0" "0" "$?"
+check "set: removing the only block leaves an empty file" "0" "$(wc -c < "$RC")"
+check "get: absent again"                      '{"state":"absent"}' "$(am get)"
+am set none --expect-absent; check "set: node named none -> 0" "0" "$?"
+check "get: none round-trips as present"       '{"state":"present","node":"none"}' "$(am get)"
+am set absent --expect none; check "set: node named absent -> 0" "0" "$?"
+check "get: absent round-trips as present"     '{"state":"present","node":"absent"}' "$(am get)"
+for bad in 'a b' 'a"b' 'a}b' '-x'; do am set "$bad" --expect absent 2>/dev/null; check "set: node [$bad] -> 64" "64" "$?"; done
+am set n1 2>/dev/null; check "set: no expectation -> 64" "64" "$?"
+am set n1 --absent --expect-absent 2>/dev/null; check "set: two targets -> 64" "64" "$?"
+am bogus 2>/dev/null; check "unknown verb -> 64" "64" "$?"
+for f in "$B\n$E\n" "$B\n  capture_node \"a\"\n  capture_node \"b\"\n$E\n" "$B\n  capture_node \"n1\"\n" "$E\n$B\n  capture_node \"n1\"\n"; do
+  printf "%b" "$f" > "$RC"; cp "$RC" "$T/snap"
+  am get > /dev/null 2>&1; g=$?; am set n9 --expect n1 > /dev/null 2>&1; s=$?
+  check "bad block -> get 2, set 2, file byte-identical" "2 2 yes" "$g $s $(cmp -s "$RC" "$T/snap" && echo yes || echo no)"
+done
+printf '# top\n' > "$RC"; am set n1 --expect-absent
+printf '# top\n%s\n  capture_node "n1"\n  # hand note\n%s\n' "$B" "$E" > "$RC"
+am set n1 --expect n1; check "set: same node over a hand-edited block is a no-op (0)" "0" "$?"
+am set n2 --expect n1; am set n1 --expect n2
+check "rollback to present writes the canonical block (semantic restore)" "# top
+$(lib 'gen_mic_block n1')" "$(cat "$RC")"
+
+# ---- concurrency: two locked writers, 50 rounds each; unlocked readers, 500 reads ----
+rm -rf "$T/alsa"; mkdir -p "$T/alsa"; printf '# keep me\npcm.mine { type null }\n' > "$RC"; am set na --expect-absent
+lib 'alsa_rc_locked atv_alsa_write'                     # both blocks exist before the writers start: every read must see both
+mic_flip() { local i cur nxt; for i in $(seq 1 50); do cur=$(am get | jq -r .node); [[ $cur == na ]] && nxt=nb || nxt=na; am set "$nxt" --expect "$cur" || echo "flip-fail $?" >> "$T/errs"; done; }
+atv_flip() { ( source "$LIB"; set +e; for i in $(seq 1 50); do ATV_NODE=atvvoice-$(( i % 2 )); alsa_rc_locked atv_alsa_write || echo "atv-fail $?" >> "$T/errs"; done ); }
+: > "$T/errs"
+mic_flip & p1=$!; atv_flip & p2=$!
+reads=0; badreads=0
+while kill -0 $p1 2>/dev/null || kill -0 $p2 2>/dev/null || (( reads < 500 )); do
+  r=$(am get 2>/dev/null) || { badreads=$((badreads + 1)); r=""; }
+  [[ $r == '{"state":"present","node":"na"}' || $r == '{"state":"present","node":"nb"}' ]] || badreads=$((badreads + 1))
+  a=$(lib 'alsa_rc_read && alsa_block_state "$ALSA_CONTENT" "$ALSA_BEGIN" "$ALSA_END" 0')
+  [[ $a == present ]] || badreads=$((badreads + 1))
+  reads=$((reads + 1)); (( reads >= 500 )) && ! kill -0 $p1 2>/dev/null && ! kill -0 $p2 2>/dev/null && break
+done
+wait $p1 $p2
+check "concurrency: no writer failed"                  "" "$(cat "$T/errs")"
+check "concurrency: >= 500 unlocked reads, none bad"   "0" "$badreads"
+check "concurrency: both blocks present at the end"    "2 2" "$(grep -c '^# BEGIN omaremote' "$RC") $(grep -c '^# END omaremote' "$RC")"
+check "concurrency: outside lines intact"              "# keep me
+pcm.mine { type null }" "$(head -n 2 "$RC")"
+
+# ---- facts: alsa.mic and pipewire.defaultSource ----
+FACTS=$(dirname "$SRC")/omaremote-facts
+FB=$T/fbin; mkdir -p "$FB" "$T/home"
+for t in bash env jq awk grep sed timeout cat mktemp rm dirname readlink basename flock mv chmod mkdir id tr; do ln -sf "$(type -P "$t")" "$FB/$t"; done
+printf '#!/bin/bash\nexit 0\n' > "$FB/systemctl"; printf '#!/bin/bash\nexit 0\n' > "$FB/busctl"
+cat > "$FB/pw-dump" <<'STUB'
+#!/bin/bash
+cat <<'J'
+[{"id":1,"type":"PipeWire:Interface:Node","info":{"props":{"media.class":"Audio/Source","node.name":"n1"}}},
+ {"id":10,"type":"PipeWire:Interface:Metadata","props":{"metadata.name":"default"},
+  "metadata":[{"subject":0,"key":"default.audio.source","type":"Spa:String:JSON","value":{"name":"n1"}}]}]
+J
+STUB
+chmod +x "$FB/systemctl" "$FB/busctl" "$FB/pw-dump"
+facts() { env -i PATH="$FB" HOME="$T/home" OMAREMOTE_ALSA_RC="$RC" "$FB/bash" "$FACTS" | "$FB/jq" -c "$1"; }
+rm -rf "$T/alsa"
+check "facts: no file -> alsa.mic absent"      '{"state":"absent"}' "$(facts .alsa.mic)"
+am set n1 --expect-absent
+check "facts: alsa.mic present"                '{"state":"present","node":"n1"}' "$(facts .alsa.mic)"
+printf '%b' "$B\n$E\n" > "$RC"
+check "facts: malformed block -> bad"          '{"state":"bad"}' "$(facts .alsa.mic)"
+check "facts: pipewire.defaultSource"          '"n1"' "$(facts .pipewire.defaultSource)"
+printf '#!/bin/bash\necho "[]"\n' > "$FB/pw-dump"
+check "facts: no default metadata -> null"     'null' "$(facts .pipewire.defaultSource)"
+
 printf '\n%s\n' "$([[ $fail == 0 ]] && echo 'RESULT: PASS' || echo 'RESULT: FAIL')"
 exit $fail
