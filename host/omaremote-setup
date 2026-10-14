@@ -709,7 +709,7 @@ alsa_mic_set() {
   [[ $st == absent || $st == "present "?* ]] || return 1
   if [[ $st != "$2" ]]; then alsa_mic_json "$st"; return 3; fi
   [[ $1 == absent ]] || blk=$(gen_mic_block "${1#present }")
-  new=$(alsa_rc_put "$ALSA_CONTENT" "$MIC_BEGIN" "$MIC_END" "$blk"; printf x) || return 1
+  new=$(alsa_rc_put "$ALSA_CONTENT" "$MIC_BEGIN" "$MIC_END" "$blk" && printf x) || return 1
   new=${new%x}
   [[ $new == "$ALSA_CONTENT" ]] && return 0
   alsa_rc_write "$new"

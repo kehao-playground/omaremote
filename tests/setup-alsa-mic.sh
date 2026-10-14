@@ -187,6 +187,21 @@ for f in "$B\n$E\n" "$B\n  capture_node \"a\"\n  capture_node \"b\"\n$E\n" "$B\n
   am get > /dev/null 2>&1; g=$?; am set n9 --expect n1 > /dev/null 2>&1; s=$?
   check "bad block -> get 2, set 2, file byte-identical" "2 2 yes" "$g $s $(cmp -s "$RC" "$T/snap" && echo yes || echo no)"
 done
+# refuse paths (exit 1, file byte-identical): a failing engine step or a state answer that is none of the known words
+rfile() { printf '# mine\n%s\n  capture_node "n1"\n%s\n# tail\n' "$B" "$E" > "$RC"; lib 'alsa_rc_locked atv_alsa_write'; cp "$RC" "$T/snap"; }
+rfile; lib 'alsa_rc_put() { return 1; }; cmd_alsa_mic set n2 --expect n1' > /dev/null 2>&1; rc=$?
+check "refuse: alsa_rc_put fails -> set 1, file byte-identical" "1 yes" "$rc $(same "$RC" "$T/snap")"
+for ans in '' 'weird'; do
+  # only the caller's own read is stubbed (alsa_rc_put's inner check stays real), so each caller's guard is what refuses
+  stub='eval "real_$(declare -f alsa_block_state)"
+        alsa_block_state() { if [[ ${FUNCNAME[1]} == alsa_rc_put ]]; then real_alsa_block_state "$@"; return; fi
+                             [[ -n "'"$ans"'" ]] && echo "'"$ans"'"; return 0; }; '
+  rfile; lib "$stub"'cmd_alsa_mic get' > /dev/null 2>&1; g=$?
+  lib "$stub"'cmd_alsa_mic set n2 --expect n1' > /dev/null 2>&1; s=$?
+  check "refuse: state [${ans:-<nothing>}] -> get 1, set 1, file byte-identical" "1 1 yes" "$g $s $(same "$RC" "$T/snap")"
+  lib "$stub"'atv_alsa_write' > /dev/null 2>&1; a=$?
+  check "refuse: state [${ans:-<nothing>}] -> atv_alsa_write 1, file byte-identical" "1 yes" "$a $(same "$RC" "$T/snap")"
+done
 printf '# top\n' > "$RC"; am set n1 --expect-absent
 printf '# top\n%s\n  capture_node "n1"\n  # hand note\n%s\n' "$B" "$E" > "$RC"
 am set n1 --expect n1; check "set: same node over a hand-edited block is a no-op (0)" "0" "$?"
