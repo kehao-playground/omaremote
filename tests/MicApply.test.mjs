@@ -570,6 +570,8 @@ test("picker: only system + node issues alsa commands (the driver sees them when
   assert.deepEqual(drive(ready().mic, "system", {}), ["get", "set", "restart"]);
   assert.deepEqual(drive(ready().mic, "system", { device: "default" }), ["get", "set", "restart"]);
   assert.deepEqual(drive(ready().mic, "remote", { nodeName: "N" }), ["get", "set", "restart"]);
+  // a stray device on a remote request is ignored: only mode "system" turns a device into ALSA work
+  assert.deepEqual(drive(ready().mic, "remote", { nodeName: "N", device: N }), ["get", "set", "restart"]);
 });
 
 test("picker: commit carries device default for system default, no device key for remote", () => {
