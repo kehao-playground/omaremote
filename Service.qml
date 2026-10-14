@@ -85,7 +85,7 @@ Item {
   property bool micPending: false
   property string micCurrentId: ""
   property var micLast: null                      // last terminal `done` effect
-  property var micConflict: null                  // { expected, found } from a `conflict` effect
+  property var micConflict: null                  // { target, expected, found } from a `conflict` effect (picker spec §5.2)
   property string unconfiguredReason: ""
   property var lastCapture: null                  // null = not yet verified (§3); { node, at, mode }
   readonly property var micSources: MicSources.createMicSources()     // picker spec §4.3/§4.4
@@ -163,7 +163,7 @@ Item {
         root.micLast = e; root.micPending = mic.pending(); if (e.state !== "queued") root.refreshDoctor()
         if (!mic.pending()) root.typelessCall("resume", function(n) { return root.typeless.resume(n, "mic") })   // §6.2: after the terminal outcome
         break
-      case "conflict": root.micConflict = { expected: e.expected, found: e.found }; break
+      case "conflict": root.micConflict = { target: e.target, expected: e.expected, found: e.found }; break
       case "unconfigured": root.unconfiguredReason = e.reason; break
       case "stat": stats.add(e.session); statsStore.save(stats.entries()); root.statsSummary = stats.summary(Date.now()); break
       case "selftestExpired": case "selftestFailed": root.onSelftestEnded(); break

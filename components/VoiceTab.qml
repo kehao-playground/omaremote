@@ -1,5 +1,5 @@
 // Spec §6.2 tab 3 — Voice: active sources, current owner (inferred label), maxSessionSec, HUD/action-flash toggles,
-// Voxtype mic Remote/System switch (§3 transaction: active and requested modes shown separately, second request disabled,
+// Voxtype mic picker (Remote, System default, each capture source; picker spec §4.5) (§3 transaction: active and requested modes shown separately, second request disabled,
 // terminal error/rollback shown), detailed stats.
 import QtQuick
 import qs.Commons
@@ -21,13 +21,23 @@ Item {
   readonly property var s: service
   readonly property var cfg: s && s.config ? s.config : null
   readonly property var current: s && s.micCurrentId ? s.micStatusOf(s.micCurrentId) : null
+  readonly property var choices: Presentation.micChoices(cfg, s ? s.micSourceList : [])
+  property int pick: -1                                   // highlighted choice while the cursor is on the Microphone row
+  // Picker spec §4.5 retry ownership: every user choice takes a new intent number. A retry carries the intent that
+  // started it and dies when that is no longer current, so a superseded choice can never apply or touch the status line.
+  property int _intent: 0
+  property var _retry: null                               // { mode, device, label, intent, tries } while sourcesRefreshing is retried
+  function activeIndex() { for (var i = 0; i < choices.length; i++) if (choices[i].active) return i; return 0 }
+  function moveChoice(dx) { var p = pick < 0 ? activeIndex() : pick; pick = Math.max(0, Math.min(choices.length - 1, p + dx)) }
 
-  function onShown() { cursor = -1 }
+  function onShown() { cursor = -1; pick = -1; root.cancelPending(); if (s) s.refreshMicSources() }
+  function cancelPending() { root._intent++; root._retry = null; retryTimer.stop() }
+  function onHidden() { root.cancelPending() }             // Panel.close(): a closed panel retries nothing
   function moveCursor(dy) { cursor = cursor < 0 ? 0 : Math.max(0, Math.min(rowCount - 1, cursor + dy)) }
   function activate() {
     if (!cfg) return
     if (cursor === 0) root.requestEngine(cfg.voice.engine === "typeless" ? "voxtype" : "typeless")
-    else if (cursor === 1) root.requestMic(cfg.voice.mic === "remote" ? "system" : "remote")
+    else if (cursor === 1) { var c = choices[pick < 0 ? activeIndex() : pick]; if (c && c.connected && !c.active) root.requestChoice(c) }
     else if (cursor === 2) s.setVoiceField("hud", !cfg.voice.hud)
     else if (cursor === 3) s.setVoiceField("actionFlash", !cfg.voice.actionFlash)
     else if (cursor === 4) s.setVoiceField("maxSessionSec", cfg.voice.maxSessionSec >= 120 ? 30 : cfg.voice.maxSessionSec >= 60 ? 120 : 60)
@@ -37,11 +47,26 @@ Item {
     var r = s.setEngine(name)
     root.engineError = r === "ok" ? "" : r
   }
-  function requestMic(mode) {                           // §3: returns immediately; the Service polls micStatus internally
-    if (!s || s.micPending) return
-    var r = JSON.parse(s.ipcMic(mode))
-    root.requestedMode = r.ok ? mode : ""
-    root.lastError = r.ok ? "" : r.reason
+  function requestChoice(c) {                              // a new user intent supersedes any pending retry
+    root.cancelPending()
+    root.requestMic(c.mode, c.mode === "system" ? c.device : undefined, c.label, root._intent, 1)
+  }
+  function requestMic(mode, device, label, intent, tries) { // §3: returns immediately; the Service polls micStatus internally
+    if (intent !== root._intent) return                    // superseded by a newer choice, or the panel closed
+    root._retry = null
+    if (!s || s.micPending) return                         // another apply holds the mic; this intent ends here
+    var r = JSON.parse(device === undefined ? s.ipcMic(mode) : s.ipcMic(mode, device))
+    if (!r.ok && r.reason === "busy" && r.detail === "sourcesRefreshing" && tries < 20) {   // picker spec §4.5: retried, never shown
+      root._retry = { mode: mode, device: device, label: label, intent: intent, tries: tries + 1 }
+      retryTimer.restart()
+      return
+    }
+    root.requestedMode = r.ok ? (label || mode) : ""
+    root.lastError = r.ok ? "" : Presentation.micRefusal(r.reason)
+  }
+  Timer {
+    id: retryTimer; interval: 300; repeat: false
+    onTriggered: { var t = root._retry; if (t) root.requestMic(t.mode, t.device, t.label, t.intent, t.tries) }
   }
 
   implicitHeight: column.implicitHeight
@@ -71,11 +96,23 @@ Item {
     }
 
     PanelSectionHeader { text: "Microphone"; foreground: root.fg; fontFamily: root.fontFamily }
-    Row {
+    Flow {
+      width: parent.width
       spacing: Style.space(8)
-      Text { textFormat: Text.PlainText; text: "Voxtype mic: " + (root.cfg ? root.cfg.voice.mic : "?"); color: root.fg; font.family: root.fontFamily; font.pixelSize: Style.font.body; anchors.verticalCenter: parent.verticalCenter }
-      Button { text: "Remote"; selected: root.cfg && root.cfg.voice.mic === "remote"; hasCursor: root.cursor === 1; foreground: root.fg; enabled: root.s && !root.s.micPending; onClicked: root.requestMic("remote") }
-      Button { text: "System default"; selected: root.cfg && root.cfg.voice.mic === "system"; hasCursor: root.cursor === 1; foreground: root.fg; enabled: root.s && !root.s.micPending; onClicked: root.requestMic("system") }
+      Text { textFormat: Text.PlainText; text: "Voxtype mic:"; color: root.fg; font.family: root.fontFamily; font.pixelSize: Style.font.body }
+      Repeater {
+        model: root.choices
+        delegate: Button {
+          required property var modelData
+          required property int index
+          text: modelData.label
+          selected: modelData.active
+          hasCursor: root.cursor === 1 && (root.pick < 0 ? modelData.active : root.pick === index)
+          foreground: root.fg
+          enabled: root.s && !root.s.micPending && modelData.connected
+          onClicked: if (!modelData.active) root.requestChoice(modelData)
+        }
+      }
     }
     Text {
       textFormat: Text.PlainText
@@ -86,7 +123,7 @@ Item {
         if (root.s.micPending && root.current) return "requested: " + root.requestedMode + " · " + Presentation.micStatusLine(root.current) + " — changing microphones restarts Voxtype; leave F9 alone until it finishes"
         if (root.lastError) return "request refused: " + root.lastError
         if (root.s.micLast && root.s.micLast.state === "failed") return "last change failed: " + Presentation.micStatusLine(root.s.micLast)
-        if (root.s.micConflict) return "conflict: Voxtype audio.device is " + root.s.micConflict.found + " (expected " + root.s.micConflict.expected + ") — reconcile in Setup"
+        if (root.s.micConflict) return Presentation.micConflictLine(root.s.micConflict)
         if (root.cfg && root.cfg.voice.engine === "typeless") return Presentation.TYPELESS_MIC_HINT
         return ""
       }

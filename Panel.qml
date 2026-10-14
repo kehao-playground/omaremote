@@ -25,7 +25,7 @@ Panel {
 
   function open() { setCenterHoverRevealSuppressed(false); root.controller.show(); currentTab.onShown(); if (service) service.refreshDoctor() }
   function openFromHotkey() { open(); Qt.callLater(function() { if (root.opened) setCenterHoverRevealSuppressed(true) }) }
-  function close() { setCenterHoverRevealSuppressed(false); root.controller.hide(); statusTab.onHidden() }   // finding #4: the mic-test timer must not survive the panel closing
+  function close() { setCenterHoverRevealSuppressed(false); root.controller.hide(); statusTab.onHidden(); voiceTab.onHidden() }   // finding #4; picker spec §4.5: no retry survives the panel closing
   function toggle() { if (root.opened) root.close(); else root.openFromHotkey() }
   function switchPanel(direction) { return root.bar && typeof root.bar.switchPanelFrom === "function" ? root.bar.switchPanelFrom(root.barIdentity, direction) : false }
   function setCenterHoverRevealSuppressed(value) {
@@ -51,6 +51,7 @@ Panel {
       blocked: root.editing
       onMoveRequested: function(dx, dy) {
         if (dx !== 0 && root.tabIndex === 1 && keysTab.cursor >= 0 && keysTab.cursor < 13) keysTab.moveColumn(dx)
+        else if (dx !== 0 && root.tabIndex === 2 && voiceTab.cursor === 1) voiceTab.moveChoice(dx)   // plan ruling 2
         else if (dx !== 0) root.switchTab(dx)
         else root.currentTab.moveCursor(dy)
       }
