@@ -706,6 +706,7 @@ alsa_mic_set() {
   alsa_rc_read || return 1
   st=$(alsa_block_state "$ALSA_CONTENT" "$MIC_BEGIN" "$MIC_END" 1)
   [[ $st == bad ]] && return 2
+  [[ $st == absent || $st == "present "?* ]] || return 1
   if [[ $st != "$2" ]]; then alsa_mic_json "$st"; return 3; fi
   [[ $1 == absent ]] || blk=$(gen_mic_block "${1#present }")
   new=$(alsa_rc_put "$ALSA_CONTENT" "$MIC_BEGIN" "$MIC_END" "$blk"; printf x) || return 1
@@ -721,6 +722,7 @@ cmd_alsa_mic() {   # mic source picker spec §4.2. No root, no prompt: the plugi
       alsa_rc_read || exit 1
       local st; st=$(alsa_block_state "$ALSA_CONTENT" "$MIC_BEGIN" "$MIC_END" 1)
       if [[ $st == bad ]]; then printf 'omaremote-setup: the omaremote mic block in %s is malformed\n' "$ALSA_RC" >&2; exit 2; fi
+      [[ $st == absent || $st == "present "?* ]] || exit 1
       alsa_mic_json "$st"; exit 0 ;;
     set)
       shift
