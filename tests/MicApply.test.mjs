@@ -835,14 +835,70 @@ test("picker: with alsa-set skipped, mutated begins at set (a reset then defers)
 
 test("picker: a stale alsa command from a reset operation cannot touch the next operation", () => {
   const { mic } = ready();
-  const { as } = toAlsaSet(mic);
-  mic.reset(10);
-  mic.cmdExit(cmdId(as, "alsa-set"), 3, PRESENT("x"), 1000);           // drained: nothing written, deferred skips the block
+  const { id: oldId, as } = toAlsaSet(mic);                             // alsa-set in flight
+  mic.reset(10);                                                         // deferred, bound 10 + 60000
+  assert.equal(byType(mic.advance(60010), "unconfigured")[0].reason, "mic change unresolved");
+  assert.equal(mic.statusOf(oldId).rollback, "unresolved");
+  assert.equal(mic.pending(), false);                                    // the old alsa-set is still in flight
+  const { result } = mic.request("system", 60020, { device: "other_node" });
+  assert.equal(result.ok, true);
+  assert.deepEqual(kinds(mic.systemdJob(false, 60021)), []);
+  assert.deepEqual(kinds(mic.backend("idle", 60022, { fresh: true })), [], "nothing is issued while the stale command is in flight");
+  assert.equal(mic.statusOf(result.operationId).state, "queued");
+  // The stale alsa-set drains with exit 0. It must not be dispatched as a phase of the new operation.
+  const fx = mic.cmdExit(cmdId(as, "alsa-set"), 0, "", 60023);
+  assert.deepEqual(kinds(fx), ["get"], "the drain only unblocks the new op's own first snapshot");
+  assert.deepEqual([mic.statusOf(result.operationId).state, mic.statusOf(result.operationId).phase], ["applying", "get"]);
+  assert.equal(mic.statusOf(oldId).rollback, "unresolved", "the old record is untouched by its late drain");
+  // The new operation then proceeds normally, from its own snapshot.
+  const ag = mic.cmdExit(cmdId(fx, "get"), 0, GET_OUT, 60024);
+  assert.deepEqual(kinds(ag), ["alsa-get"]);
+  const as2 = mic.cmdExit(cmdId(ag, "alsa-get"), 0, PRESENT(N), 60025);
+  assert.deepEqual(argvOf(as2, "alsa-set"), [...AM, "set", "other_node", "--expect", N]);
+});
+
+test("picker: a system + default rollback deferred mid-restart resumes with today's re-check", () => {
+  const { mic } = ready();
+  const { effects, result } = mic.request("system", 0, { device: "default" });
+  const set = mic.cmdExit(cmdId(effects, "get"), 0, GET_OUT, 1);
+  const restart = mic.cmdExit(cmdId(set, "set"), 0, "", 2);
+  mic.cmdExit(cmdId(restart, "restart"), 0, "", 3);
+  const chk = mic.verifyResult(false, 4);
+  const unset = mic.cmdExit(cmdId(chk, "get"), 0, JSON.stringify({ value: "default", file_value: "default" }), 5);
+  assert.deepEqual(kinds(unset), ["unset"]);
+  const rs = mic.cmdExit(cmdId(unset, "unset"), 0, "", 6);
+  assert.deepEqual(kinds(rs), ["restart"]);
+  mic.reset(7);                                                          // rbDevice is done, but this is not a picker op
+  mic.cmdExit(cmdId(rs, "restart"), 0, "", 1000);
   const go = mic.backend("idle", 1001, { fresh: true });
-  mic.cmdExit(cmdId(go, "get"), 0, GET_OUT, 1002);                    // deferred rollback finishes (verified, no restart)
+  assert.deepEqual(kinds(go), ["get"], "non-picker resume re-runs the external-edit check (spec §5.1)");
+  const again = mic.cmdExit(cmdId(go, "get"), 0, GET_OUT, 1002);
+  assert.deepEqual(kinds(again), ["restart"]);
+  mic.cmdExit(cmdId(again, "restart"), 0, "", 1003);
+  mic.verifyResult(true, 1004);
+  assert.equal(mic.statusOf(result.operationId).rollback, "verified");
+});
+
+test("picker: a live alsa-set exit 64 ends alsa-set-failed, rollback verified, nothing further", () => {
+  const { mic, voice } = ready();
+  const { as } = toAlsaSet(mic);
+  const fx = mic.cmdExit(cmdId(as, "alsa-set"), 64, "", 3);
+  const d = byType(fx, "done")[0];
+  assert.deepEqual([d.state, d.error, d.rollback], ["failed", "alsa-set-failed", "verified"]);
+  assert.deepEqual(kinds(fx), []);
   assert.equal(mic.pending(), false);
-  const { result } = mic.request("system", 1010, { device: "other_node" });
-  const fx = mic.systemdJob(false, 1011);                             // a job reading newer than the request; backend still fresh
-  assert.deepEqual(kinds(fx), ["get"]);
-  assert.equal(mic.statusOf(result.operationId).state, "applying");
+  assert.equal(voice.gate.busy(), false);
+});
+
+test("picker: a drained alsa-set exit 64 after a defer counts as not written", () => {
+  const { mic } = ready();
+  const { id, as } = toAlsaSet(mic);
+  mic.reset(10);
+  mic.cmdExit(cmdId(as, "alsa-set"), 64, "", 1000);                    // alsaExpected stays absent, service stays clean
+  const go = mic.backend("idle", 1001, { fresh: true });
+  assert.deepEqual(kinds(go), ["get"]);
+  const fx = mic.cmdExit(cmdId(go, "get"), 0, GET_OUT, 1002);
+  assert.deepEqual(kinds(fx), [], "no alsa-restore and no restart: the exit-64 write never landed");
+  assert.equal(mic.statusOf(id).rollback, "verified");
+  assert.equal(mic.pending(), false);
 });
