@@ -569,14 +569,19 @@ Item {
       function report() {
         if (probe.reported || !probe.gotOut || !probe.gotExit) return
         probe.reported = true; probe.deadline.stop()
-        root.sourcesDone(probe.rid, Pipewire.sourcesFromProbe(probe.exitCode, probe.out, { exclude: root.remoteNode ? [root.remoteNode] : [] }))
-        probe.destroy()
+        var list = null
+        try { list = Pipewire.sourcesFromProbe(probe.exitCode, probe.out, { exclude: root.remoteNode ? [root.remoteNode] : [] }) }
+        catch (e) { console.log("omaremote: source probe parse failed: " + e) }
+        // A throw must still finish this rid (else MicSources stays `running` and every miss answers sourcesRefreshing).
+        try { root.sourcesDone(probe.rid, list) }
+        catch (e2) { console.log("omaremote: sourcesDone failed: " + e2); if (list !== null) try { root.sourcesDone(probe.rid, null) } catch (e3) {} }
+        finally { probe.destroy() }
       }
       function abandon() {
         if (probe.reported) return
         probe.reported = true; probe.running = false
-        root.sourcesDone(probe.rid, null)
-        probe.destroy()
+        try { root.sourcesDone(probe.rid, null) } catch (e) { console.log("omaremote: sourcesDone failed: " + e) }
+        finally { probe.destroy() }
       }
     }
   }

@@ -509,6 +509,10 @@ s_mic_system_unknown_source() {   # picker spec §4.4: a miss refreshes first, t
 s_mic_system_late_plug() {   # picker spec §4.4: a source plugged in after a fresh refresh is still found
   ready || return 1
   ipc micSources > /dev/null; wait_for '.micSources.refreshing' false 3 || return 1
+  # The cache starts empty: a non-empty list proves the fresh refresh ran, and it must not have seen the late device,
+  # so the success below can only come from the refresh the miss started.
+  (( $(jget '.micSources.list | length') > 0 )) || { echo "    no refresh ran: $(jget '.micSources')"; return 1; }
+  [[ $(jget 'any(.micSources.list[]; .name == "alsa_input.usb-late")') == false ]] || return 1
   jq '. + [{"id":45,"type":"PipeWire:Interface:Node","info":{"props":{"media.class":"Audio/Source","node.name":"alsa_input.usb-late","node.description":"Late Mic"}}}]' \
     "$F/pw-dump.json" > "$F/pw.tmp" && mv "$F/pw.tmp" "$F/pw-dump.json"
   local r; r=$(ipc micSystem alsa_input.usb-late)
