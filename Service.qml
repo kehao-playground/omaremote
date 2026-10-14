@@ -10,6 +10,8 @@ import "lib/Actions.mjs" as Actions
 import "lib/Presentation.mjs" as Presentation
 import "lib/VoiceSession.mjs" as VoiceSession
 import "lib/MicApply.mjs" as MicApply
+import "lib/AlsaMic.mjs" as AlsaMic
+import "lib/MicSources.mjs" as MicSources
 import "lib/Stats.mjs" as Stats
 import "lib/Pipewire.mjs" as Pipewire
 import "lib/SelfTest.mjs" as SelfTest
@@ -86,6 +88,9 @@ Item {
   property var micConflict: null                  // { expected, found } from a `conflict` effect
   property string unconfiguredReason: ""
   property var lastCapture: null                  // null = not yet verified (§3); { node, at, mode }
+  readonly property var micSources: MicSources.createMicSources()     // picker spec §4.3/§4.4
+  property var micSourceList: []
+  property bool micSourcesRefreshing: false
   property var statsSummary: ({ today: { count: 0, seconds: 0 }, week: { count: 0, seconds: 0 }, all: { count: 0, seconds: 0 }, longest: null })
   property var selftest: null
   property bool selftestActive: false
@@ -138,7 +143,7 @@ Item {
       // ---- voice effects (Task 6) ----
       case "cmd":
         if (src === "mic" && e.kind === "restart") { verifier.markRestart(); vox.restart() }
-        runner.run(src, e.id, e.argv, e.kind === "restart" ? root.restartCmdMs : root.shortCmdMs)
+        runner.run(src, e.id, e.argv, e.kind === "restart" || String(e.kind).indexOf("alsa-") === 0 ? root.restartCmdMs : root.shortCmdMs)   // plan ruling 5
         break
       case "state": if (src === "typeless") root.onTypelessState(e); else root.onVoiceState(e); break
       // ---- Typeless engine effects (Typeless spec §5, §6) ----
@@ -153,7 +158,7 @@ Item {
       case "restart": runner.cancelAll("voice"); vox.restart(); verifier.beginRecovery(Date.now()); break   // §5.3: reap, then bounded restart
       case "show": verifier.pollJob(); break                                                            // Fix round 1 (Ruling 14): mic needs a fresh systemd job reading
       case "verify": verifier.beginVerify("mic", e.id, Date.now()); break
-      case "commit": configStore.setVoiceMic(e.mode); root.refreshAudioDevice(); break                 // §3 step 4
+      case "commit": configStore.setVoiceMic(e.mode, e.device); root.refreshAudioDevice(); break                // §3 step 4
       case "done":
         root.micLast = e; root.micPending = mic.pending(); if (e.state !== "queued") root.refreshDoctor()
         if (!mic.pending()) root.typelessCall("resume", function(n) { return root.typeless.resume(n, "mic") })   // §6.2: after the terminal outcome
@@ -268,7 +273,8 @@ Item {
       return EngineSwitch.startTypeless(typeless, configStore.config.voice.engine, atv.sender ? root.remoteState : null, now)
     }), "typeless")
     root.typelessSnap = typeless.snapshot()
-    mic = MicApply.createMicApply({ voice: EngineSwitch.micVoiceView(voice, typeless, function() { return root.engineName }) })
+    mic = MicApply.createMicApply({ voice: EngineSwitch.micVoiceView(voice, typeless, function() { return root.engineName }),
+                                    alsaArgv: ["bash", root.pluginDir + "/host/omaremote-setup", "alsa-mic"] })
     stats = Stats.createStats(statsStore.loaded ? statsStore.entries : [])
     root.statsSummary = stats.summary(now)
     root.rebuildSelftest()
@@ -533,15 +539,78 @@ Item {
     command: ["pw-dump"]
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: {
       try {
-        var r = Pipewire.captureSourceOf(JSON.parse(text))
+        var dump = JSON.parse(text)
+        var r = Pipewire.captureSourceOf(dump)
         if (r.streamFound) root.lastCapture = { node: r.node, at: Date.now(), mode: root.config.voice.mic }
+        if (r.streamFound && root.config.voice.mic === "system") {             // picker spec §5.3: the fallback HUD
+          var want = root.config.voice.systemDevice !== "default" ? root.config.voice.systemDevice : Pipewire.defaultSource(dump)
+          var mm = Pipewire.captureMismatch(dump, want)
+          if (mm) root.hudText = "recording from " + mm.nodeDescription + ", not " + mm.expectedDescription
+        }
       } catch (e) { console.log("omaremote: pw-dump parse failed: " + e) }
     } }
   }
-  function ipcMic(mode) {
+  // Picker spec §4.3: one Process per refresh. A refresh succeeds only with exit 0 AND a JSON array
+  // (Pipewire.sourcesFromProbe). A binary that fails to start emits no `exited`, so the deadline covers it.
+  Component {
+    id: sourcesProbeComponent
+    Process {
+      id: probe
+      property int rid: 0
+      property string out: ""
+      property int exitCode: -1
+      property bool gotOut: false
+      property bool gotExit: false
+      property bool reported: false
+      command: ["pw-dump"]
+      stdout: StdioCollector { waitForEnd: true; onStreamFinished: { probe.out = text; probe.gotOut = true; probe.report() } }
+      onExited: function(code, status) { probe.exitCode = code; probe.gotExit = true; probe.report() }
+      property Timer deadline: Timer { interval: 3000; running: true; repeat: false; onTriggered: probe.abandon() }
+      function report() {
+        if (probe.reported || !probe.gotOut || !probe.gotExit) return
+        probe.reported = true; probe.deadline.stop()
+        root.sourcesDone(probe.rid, Pipewire.sourcesFromProbe(probe.exitCode, probe.out, { exclude: root.remoteNode ? [root.remoteNode] : [] }))
+        probe.destroy()
+      }
+      function abandon() {
+        if (probe.reported) return
+        probe.reported = true; probe.running = false
+        root.sourcesDone(probe.rid, null)
+        probe.destroy()
+      }
+    }
+  }
+  function startSourcesRefresh() {
+    var rid = root.micSources.started()
+    root.micSourcesRefreshing = true
+    var p = sourcesProbeComponent.createObject(root, { rid: rid })
+    if (!p) { root.sourcesDone(rid, null); return }
+    p.running = true
+  }
+  function sourcesDone(rid, list) {
+    var again = root.micSources.finished(rid, list)          // false and no change for a stale rid
+    root.micSourceList = root.micSources.list(); root.micSourcesRefreshing = root.micSources.refreshing()
+    if (again) root.startSourcesRefresh()
+  }
+  function refreshMicSources() { if (root.micSources.requestRefresh()) root.startSourcesRefresh() }
+  // Picker spec §4.4: the request-time refusals; null means "go ahead". A `refresh: true` answer obliges us to start now.
+  function checkSource(device) {
+    if (!AlsaMic.isNodeName(device) || /\.monitor$/.test(device) || device === root.remoteNode) return { ok: false, reason: "invalid-source" }
+    var r = root.micSources.check(device)
+    if (r.refresh) root.startSourcesRefresh()
+    if (r.verdict === "ok") return null
+    if (r.verdict === "refreshing") return { ok: false, reason: "busy", detail: "sourcesRefreshing", retryAfterMs: 300 }
+    return { ok: false, reason: r.verdict }
+  }
+  function ipcMic(mode, device) {
     if (!mic) return JSON.stringify({ ok: false, reason: "not-ready" })
     // Refused before any quiesce: a second request must never touch the "mic" holder the pending apply owns.
     if (root.switcher.busy() || mic.pending()) return JSON.stringify({ ok: false, reason: "busy" })
+    if (device === "") device = undefined                                    // an empty device from a caller means "default"
+    if (mode === "system" && device !== undefined && device !== "default") {   // picker spec §4.4
+      var refused = root.checkSource(device)
+      if (refused) return JSON.stringify(refused)
+    }
     var now = Date.now()
     // Typeless §6.2: under Typeless the apply first quiesces TypelessSession; MicApply (through micVoiceView) waits
     // until it is settled. The "done" effect resumes it after the terminal outcome.
@@ -550,7 +619,7 @@ Item {
     var r
     try {
       if (underTypeless) root.typelessCall("quiesce", function(n) { return typeless.quiesce(n, "mic", "changing microphone") })
-      r = root.guarded("mic.request", function() { return mic.request(mode, now, { nodeName: root.remoteNode }) },
+      r = root.guarded("mic.request", function() { return mic.request(mode, now, { nodeName: root.remoteNode, device: device }) },
                        { effects: [], result: { ok: false, reason: "error" } })
     } finally { root._micRequesting = false }
     if (underTypeless && !r.result.ok) root.typelessCall("resume", function(n) { return typeless.resume(n, "mic") })
@@ -816,6 +885,8 @@ Item {
       // Published for the same reason as micTrigger: `config` is a boolean, so tests and the panel
       // cannot otherwise wait for a voice.mic / remoteOnDemand reload to take effect.
       voiceMode: root.config ? root.config.voice.mic : null,
+      systemDevice: root.config ? root.config.voice.systemDevice : null,
+      micSources: { list: root.micSourceList, refreshing: root.micSourcesRefreshing },
       remoteOnDemand: root.config ? root.config.voice.remoteOnDemand : null,
       heldKeys: root.heldKeys, lastStuckKey: root.lastStuckKey, stuckKeyCount: root.stuckKeyCount, lastAction: root.lastAction, hud: root.hudLine, flash: root.flash,
       errorCount: root.errorCount, lastError: root.lastError
@@ -846,6 +917,8 @@ Item {
     function status(): string { return root.statusJson() }
     function voice(verb: string, arg: string): string { return root.ipcVoice(verb, arg) }
     function mic(mode: string): string { return root.ipcMic(mode) }
+    function micSystem(node: string): string { return root.ipcMic("system", node) }            // plan ruling 1
+    function micSources(): string { root.refreshMicSources(); return JSON.stringify({ sources: root.micSourceList, refreshing: root.micSourcesRefreshing }) }
     function micStatus(id: string): string { return root.ipcMicStatus(id) }
     function selftestPing(): string { return "ok" }
     function selftestArm(): string { return JSON.stringify(root.selftestArm(undefined)) }

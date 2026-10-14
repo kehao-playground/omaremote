@@ -17,6 +17,7 @@ export OMAREMOTE_IPC_TARGET=omaremote-test OMAREMOTE_APPID=omaremote-test
 export OMAREMOTE_DISPATCH=hyprctl            # dispatch actions go to the fake hyprctl, never to the live compositor
 export OMAREMOTE_KEYTAP=$ROOT/tests/fakes/bin/omaremote-keytap   # Typeless taps go to the fake client, never to uinput
 export OMAREMOTE_TYPELESS_SETTINGS=$OMAREMOTE_FAKE_DIR/typeless-settings.json   # never ~/.config/Typeless
+export OMAREMOTE_ALSA_RC=$OMAREMOTE_FAKE_DIR/asoundrc   # the mic picker's ALSA block: never ~/.config/alsa
 SYS_PATH=$PATH                                # captured before the fakes are prefixed: HARNESS_PATH scenarios build from this
 export PATH=$ROOT/tests/fakes/bin:$PATH
 ONLY=${1:-}
@@ -472,6 +473,49 @@ mic_wait() {   # mic_wait <id> [timeout-s] → prints terminal state
   while (( i < t * 10 )); do st=$(ipc micStatus "$id" | jq -r .state); [[ $st == succeeded || $st == failed ]] && { echo "$st"; return 0; }; sleep 0.1; i=$((i + 1)); done
   echo "$st"; return 1
 }
+mic_device() {   # mic_device <node> → the final answer to micSystem, retrying sourcesRefreshing as the panel does
+  local r i
+  for i in $(seq 1 20); do
+    r=$(ipc micSystem "$1")
+    [[ $(jq -r '.detail // empty' <<<"$r") == sourcesRefreshing ]] || { echo "$r"; [[ $(jq -r .ok <<<"$r") == true ]]; return; }
+    sleep 0.3
+  done
+  echo "$r"; return 1
+}
+PICK=alsa_input.pci-0000_00_1f.3.analog-stereo   # an Audio/Source in tests/fixtures/pw-dump.json
+s_mic_system_device() {   # picker spec §5.1: wiring and end state (the phase order is pinned by the MicApply unit tests)
+  ready || return 1
+  local r id; r=$(mic_device "$PICK") || { echo "    $r"; return 1; }
+  id=$(jq -r .operationId <<<"$r")
+  [[ $(mic_wait "$id") == succeeded ]] || { ipc micStatus "$id"; return 1; }
+  has_line "$F/vox.log" "voxtype config get audio.device --json" || return 1
+  has_line "$F/vox.log" "voxtype config set audio.device omaremote-mic" || return 1
+  has_line "$F/sysd.log" "systemctl --user restart voxtype" || return 1
+  grep -qxF "  capture_node \"$PICK\"" "$F/asoundrc" || { echo "    asoundrc:"; sed 's/^/      /' "$F/asoundrc" 2>/dev/null; return 1; }
+  [[ $(jq -r .voice.mic "$XDG_CONFIG_HOME/omaremote/config.json") == system ]] || return 1
+  [[ $(jq -r .voice.systemDevice "$XDG_CONFIG_HOME/omaremote/config.json") == "$PICK" ]] || return 1
+  [[ $(jget '.systemDevice') == "$PICK" ]]
+}
+s_mic_system_unknown_source() {   # picker spec §4.4: a miss refreshes first, then refuses; nothing is queued
+  ready || return 1
+  local r; r=$(ipc micSystem alsa_input.nonexistent)
+  [[ $(jq -r .reason <<<"$r") == busy && $(jq -r .detail <<<"$r") == sourcesRefreshing ]] || { echo "    first: $r"; return 1; }
+  r=$(mic_device alsa_input.nonexistent) && { echo "    accepted: $r"; return 1; }
+  [[ $(jq -r .reason <<<"$r") == no-such-source ]] || { echo "    final: $r"; return 1; }
+  [[ $(jget '.mic.pending') == false ]] || return 1
+  no_line "$F/vox.log" "voxtype config set audio.device omaremote-mic" || return 1
+  [[ ! -e $F/asoundrc ]]
+}
+s_mic_system_late_plug() {   # picker spec §4.4: a source plugged in after a fresh refresh is still found
+  ready || return 1
+  ipc micSources > /dev/null; wait_for '.micSources.refreshing' false 3 || return 1
+  jq '. + [{"id":45,"type":"PipeWire:Interface:Node","info":{"props":{"media.class":"Audio/Source","node.name":"alsa_input.usb-late","node.description":"Late Mic"}}}]' \
+    "$F/pw-dump.json" > "$F/pw.tmp" && mv "$F/pw.tmp" "$F/pw-dump.json"
+  local r; r=$(ipc micSystem alsa_input.usb-late)
+  [[ $(jq -r .detail <<<"$r") == sourcesRefreshing ]] || { echo "    first: $r"; return 1; }
+  r=$(mic_device alsa_input.usb-late) || { echo "    $r"; return 1; }
+  [[ $(mic_wait "$(jq -r .operationId <<<"$r")") == succeeded ]]
+}
 s_mic_apply_system() {
   ready || return 1
   local r; r=$(ipc mic system)
@@ -633,6 +677,9 @@ scenario mic_apply_unknown_id_is_failure s_mic_apply_unknown_id_is_failure
 scenario mic_apply_waits_for_session s_mic_apply_waits_for_session
 scenario mic_apply_restart_fails_rolls_back s_mic_apply_restart_fails_rolls_back
 scenario mic_apply_job_pending_blocks s_mic_apply_job_pending_blocks
+scenario mic_system_device s_mic_system_device
+scenario mic_system_unknown_source s_mic_system_unknown_source
+scenario mic_system_late_plug s_mic_system_late_plug
 scenario recovery_restart_bounded s_recovery_restart_bounded
 scenario stats_and_capture s_stats_and_capture
 
