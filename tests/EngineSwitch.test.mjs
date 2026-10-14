@@ -7,7 +7,9 @@ import { createMicApply } from "../lib/MicApply.mjs";
 import { normalizeConfig } from "../lib/Config.mjs";
 import { DEFAULT_CONFIG } from "../lib/Defaults.mjs";
 
-const cfg = (voice = {}) => normalizeConfig({ ...DEFAULT_CONFIG, voice: { ...DEFAULT_CONFIG.voice, ...voice } }).config;
+// pressWaitMs 0 unless a test sets it: the press gate (TypelessSession) is orthogonal to switching.
+const cfg = (voice = {}) => normalizeConfig({ ...DEFAULT_CONFIG, voice: { ...DEFAULT_CONFIG.voice, ...voice,
+  typeless: { pressWaitMs: 0, ...(voice.typeless || {}) } } }).config;
 const ev = (state) => ({ state, sender: ":1.42", path: "/org/atvvoice/Daemon", interface: "org.atvvoice.Daemon", member: "MicStateChanged", generation: 0 });
 
 // The contract Service.qml implements (Task 10), in miniature: route inputs per §6.1, perform switch effects, and

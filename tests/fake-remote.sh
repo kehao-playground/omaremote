@@ -1054,6 +1054,28 @@ s_typeless_second_mic_request_keeps_first_paused() {
 }
 scenario typeless_second_mic_request_keeps_first_paused s_typeless_second_mic_request_keeps_first_paused
 
+# ---- hardware acceptance 2026-10-14: the remote start waits for the remote's HID press (§5.2 press gate) ----
+s_typeless_remote_start_waits_for_hid_press() {
+  ready || return 1
+  use_typeless || return 1
+  set_cfg '.voice.typeless.pressWaitMs = 2000' '.typeless.pressWaitMs' 2000 || return 1   # long, so the order is not a race
+  ipc voice state streaming >/dev/null
+  wait_for '.typeless.state.pressDue != null' true 3 || return 1
+  sleep 0.5
+  [[ $(taps_n) == 0 ]] || { echo "    tapped before the HID press:"; sed 's/^/      /' "$F/keytap.log"; return 1; }
+  ipc key mic down >/dev/null; ipc key mic up >/dev/null
+  wait_taps 1 || return 1
+  wait_for '.typeless.state.typeless' on 3 || return 1
+  ipc voice state connected >/dev/null
+  wait_taps 2 || return 1
+  wait_for '.typeless.state.typeless' off 3 || return 1
+  ipc voice state streaming >/dev/null                                 # no HID press this time: the bound opens it
+  wait_for '.typeless.state.pressDue != null' true 3 || return 1
+  [[ $(taps_n) == 2 ]] || { echo "    tapped before the bound"; return 1; }
+  wait_taps 3
+}
+scenario typeless_remote_start_waits_for_hid_press s_typeless_remote_start_waits_for_hid_press
+
 # ---- Plan 5 Task 12: Typeless Doctor rows from host/omaremote-facts ----
 doctor_row() { ipc doctor | jq -r --arg id "$1" '[.rows[] | select(.id == $id) | .status][0] // "absent"'; }
 wait_doctor_row() {   # wait_doctor_row <id> <status>

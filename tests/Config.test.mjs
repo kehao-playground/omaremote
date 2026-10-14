@@ -229,3 +229,15 @@ test("unknown fields under voice.typeless survive normalization", () => {
   const { config } = normalizeConfig({ ...DEFAULT_CONFIG, voice: { ...DEFAULT_CONFIG.voice, typeless: { hotkey: "RightAlt", future: 1 } } });
   assert.equal(config.voice.typeless.future, 1);
 });
+
+test("voice.typeless.pressWaitMs defaults to 250 and accepts integers 0..2000 only", () => {
+  const n = (w) => normalizeConfig({ ...DEFAULT_CONFIG, voice: { ...DEFAULT_CONFIG.voice, typeless: { pressWaitMs: w } } });
+  assert.equal(normalizeConfig(DEFAULT_CONFIG).config.voice.typeless.pressWaitMs, 250);
+  assert.equal(n(0).config.voice.typeless.pressWaitMs, 0);
+  assert.equal(n(2000).config.voice.typeless.pressWaitMs, 2000);
+  for (const bad of [-1, 2001, 1.5, "250", null]) {
+    const r = n(bad);
+    assert.equal(r.config.voice.typeless.pressWaitMs, 250, JSON.stringify(bad));
+    assert.ok(r.problems.some(p => p.code === "typeless-press-wait-invalid"), JSON.stringify(bad));
+  }
+});

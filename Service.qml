@@ -832,6 +832,7 @@ Item {
       , configWrites: { saves: configStore.saves, errors: configStore.saveErrors }
       , engine: root.engineName
       , typeless: { hotkey: root.config ? root.config.voice.typeless.hotkey : null, hotkeyStored: root.hotkeyStored(),
+                    pressWaitMs: root.config ? root.config.voice.typeless.pressWaitMs : null,
                     state: root.typeless ? root.typeless.snapshot() : null, switching: root.switching, view: root.typelessView }
       , doctorSummary: root.doctorSummary
       , unconfigured: root.unconfigured

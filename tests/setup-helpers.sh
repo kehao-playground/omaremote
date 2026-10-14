@@ -130,5 +130,33 @@ else
   check "bash keysyms match lib/Defaults.mjs for all 13 keys" "" "$mismatch"
 fi
 
+# ---- the mic key's keyd action (hardware acceptance 2026-10-14) ------------------------
+# Under keyd `f5 = xfer` the remote's mic key is HELD for the whole hold (autorepeating), and keyd's `macro()` repeats
+# every 50 ms; either puts key events inside Typeless's hotkey tap. `macro2(0, 0, xfer)` sends one pulse at press time.
+# Only keys.mic.trigger "ptt" needs the real down/up, so it keeps the plain mapping.
+mic_line() {   # mic_line <config.json contents or ""> -> the generated f5 line
+  local d; d=$(mktemp -d); [[ -n $1 ]] && printf '%s' "$1" > "$d/config.json"
+  bash -c "
+    DEVICE_ID=2717:32b8; OMA_CONFIG='$d/config.json'
+    $(sed -n '/^declare -A LEARNED_KEYS=(/,/^)/p' "$SRC")
+    $(sed -n '/^KEY_ORDER=/p' "$SRC")
+    $(sed -n '/^keyd_action()/,/^}/p' "$SRC")
+    $(sed -n '/^gen_keyd_conf()/,/^}/p' "$SRC")
+    gen_keyd_conf | grep '^f5 '
+  "
+  rm -r "$d"
+}
+check "mic: no config.json -> one pulse"        "f5           = macro2(0, 0, xfer)" "$(mic_line '')"
+check "mic: trigger toggle -> one pulse"        "f5           = macro2(0, 0, xfer)" "$(mic_line '{"keys":{"mic":{"trigger":"toggle"}}}')"
+check "mic: trigger ptt -> held key"            "f5           = xfer"               "$(mic_line '{"keys":{"mic":{"trigger":"ptt"}}}')"
+check "mic: unreadable config.json -> one pulse" "f5           = macro2(0, 0, xfer)" "$(mic_line '{not json')"
+check "other keys keep their plain mapping"     "up           = f13" "$(bash -c "
+    DEVICE_ID=2717:32b8; OMA_CONFIG=/nonexistent
+    $(sed -n '/^declare -A LEARNED_KEYS=(/,/^)/p' "$SRC")
+    $(sed -n '/^KEY_ORDER=/p' "$SRC")
+    $(sed -n '/^keyd_action()/,/^}/p' "$SRC")
+    $(sed -n '/^gen_keyd_conf()/,/^}/p' "$SRC")
+    gen_keyd_conf | grep '^up '")"
+
 printf '\n%s\n' "$([[ $fail == 0 ]] && echo 'RESULT: PASS' || echo 'RESULT: FAIL')"
 exit $fail

@@ -4,7 +4,9 @@ import { createTypelessSession, HUD } from "../lib/TypelessSession.mjs";
 import { normalizeConfig } from "../lib/Config.mjs";
 import { DEFAULT_CONFIG } from "../lib/Defaults.mjs";
 
-const cfg = (voice = {}) => normalizeConfig({ ...DEFAULT_CONFIG, voice: { ...DEFAULT_CONFIG.voice, engine: "typeless", ...voice } }).config;
+// pressWaitMs 0 unless a test sets it: these tests pin the reconcile rules; the press gate has its own tests below.
+const cfg = (voice = {}) => normalizeConfig({ ...DEFAULT_CONFIG, voice: { ...DEFAULT_CONFIG.voice, engine: "typeless", ...voice,
+  typeless: { pressWaitMs: 0, ...(voice.typeless || {}) } } }).config;
 const sys = (voice = {}) => cfg({ mic: "system", ...voice });
 const taps = (fx) => fx.filter(e => e.type === "tap");
 const huds = (fx) => fx.filter(e => e.type === "hud").map(e => e.text);
@@ -463,4 +465,70 @@ test("a state effect carries the snapshot only when it changed", () => {
   assert.deepEqual(st[0].state.outstanding, { id: 1, kind: "start" });
   assert.equal(st[0].state.since, 0);
   assert.equal(r.res(99, "sent", 1).length, 0, "a stale result changes nothing and emits nothing");
+});
+
+// ---- hardware acceptance 2026-10-14: the remote's HID press must not land inside the start tap ----
+// The remote sends two signals per hold: the ATVV stream and an HID press (keyd → one XF86Xfer pulse). Their order
+// varies. Typeless ignores RightAlt when another key's event falls between its down and up, so in remote mode the
+// start tap waits until the press has been seen, or pressWaitMs has passed.
+const gated = (voice = {}) => cfg({ typeless: { hotkey: "RightAlt", pressWaitMs: 250 }, ...voice });
+
+test("press gate: stream before the HID press → the start waits for the press, then taps", () => {
+  const r = rig(gated());
+  r.off(0); r.press(-1000);                                   // seed: trusted, released, an old press long ago
+  assert.deepEqual(taps(r.on(1000)), [], "the stream arrived first: no tap while the press is still due");
+  assert.equal(r.s.nextDeadline(), 1250);
+  assert.deepEqual(taps(r.press(1030)).map(t => t.kind), ["start"], "the press has passed: start now");
+  assert.equal(r.s.nextDeadline(), 1030 + 60000, "only the session bound remains");
+});
+
+test("press gate: HID press before the stream → the start taps at once", () => {
+  const r = rig(gated());
+  r.off(0);
+  assert.deepEqual(r.press(1000), [], "a press with no stream does nothing in remote mode");
+  assert.deepEqual(taps(r.on(1040)).map(t => t.kind), ["start"]);
+});
+
+test("press gate: no HID press at all → the start taps when pressWaitMs runs out", () => {
+  const r = rig(gated());
+  r.off(0);
+  assert.deepEqual(taps(r.on(1000)), []);
+  assert.deepEqual(taps(r.advance(1249)), []);
+  assert.deepEqual(taps(r.advance(1250)).map(t => t.kind), ["start"]);
+});
+
+test("press gate: a press from an earlier hold does not open the gate for a later stream", () => {
+  const r = rig(gated());
+  r.off(0);
+  r.press(1000); r.on(1010);                                  // hold 1 starts at once
+  r.res(1, "sent", 1100); r.off(2000); r.res(2, "sent", 2100);
+  assert.deepEqual(taps(r.on(2200)), [], "hold 2's stream came first; hold 1's press was already used");
+  assert.deepEqual(taps(r.press(2220)).map(t => t.kind), ["start"]);
+});
+
+test("press gate: release before the gate opens → nothing is ever tapped", () => {
+  const r = rig(gated());
+  r.off(0);
+  r.on(1000); r.off(1100);
+  assert.deepEqual(taps(r.press(1120)), []);
+  assert.deepEqual(taps(r.advance(1300)), []);
+  assert.equal(r.s.nextDeadline(), null);
+});
+
+test("press gate: the stop never waits for a press", () => {
+  const r = rig(gated());
+  r.off(0);
+  r.press(1000); r.on(1010); r.res(1, "sent", 1100);
+  assert.deepEqual(taps(r.off(3000)).map(t => t.kind), ["stop"]);
+});
+
+test("press gate: pressWaitMs 0 turns the gate off", () => {
+  const r = rig(gated({ typeless: { hotkey: "RightAlt", pressWaitMs: 0 } }));
+  r.off(0);
+  assert.deepEqual(taps(r.on(1000)).map(t => t.kind), ["start"]);
+});
+
+test("press gate: system mode is unaffected (each press is still one tap)", () => {
+  const r = rig(gated({ mic: "system" }));
+  assert.deepEqual(taps(r.press(0)).map(t => t.kind), ["press"]);
 });

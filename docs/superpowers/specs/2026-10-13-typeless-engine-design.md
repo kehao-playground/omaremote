@@ -2,7 +2,8 @@
 
 **Date:** 2026-10-13
 **Status:** Approved rev 5 (2026-10-13); implemented by Plan 5
-(docs/superpowers/plans/2026-10-13-omaremote-typeless-engine.md)
+(docs/superpowers/plans/2026-10-13-omaremote-typeless-engine.md). Rev 6 (2026-10-14) adds the press gate (§5.2) and the
+one-pulse keyd mic action (§4.3), found in hardware acceptance (§2 fact 7).
 **Amends:** `2026-09-14-omaremote-design.md` §3 (adds a host component), §5 (voice session), §6.2 (Voice tab);
 `2026-10-12-remote-mic-design.md` §5 (Doctor)
 
@@ -50,6 +51,18 @@ The probe was a throwaway stdlib-Python uinput script, since deleted.
 
    This is an undocumented internal file. omaremote only reads it, for defaults and Doctor hints, and nothing
    depends on it.
+7. **Measured in hardware acceptance, 2026-10-14** (this corrects facts 1 and 3 for the remote):
+   - Typeless `EVIOCGRAB`s every keyboard, the keyd virtual keyboard and `omaremote keytap` included, and
+     re-emits through its own "Typeless Keyboard Helper" uinput devices. It swallows what it treats as its hotkey
+     and forwards the rest.
+   - A tap of the hotkey is **not** recognized when another key's event falls between the hotkey's down and up,
+     or while another key is held.
+   - The remote sends two signals per hold: the ATVV stream and an HID press. With keyd `f5 = xfer` the press is
+     held for the whole hold and autorepeats; keyd's `macro()` repeats every 50 ms. `macro2(0, 0, xfer)` sends
+     one pulse at press time.
+   - The stream and the HID pulse arrive in either order: the pulse came 50 ms before the stream in some holds and
+     about 20–30 ms after it in others. When it came after, it landed inside the start tap, Typeless ignored the
+     start, and every later tap was one behind. Hence the press gate (§5.2) and the one-pulse keyd action (§4.3).
 
 Host prerequisites that are outside this project (recorded in user memory, not automated):
 - Typeless is launched with `env -u DISPLAY TYPELESS_SKIP_SECRET_STORE=1 … --ozone-platform=wayland --password-store=basic`.
@@ -61,6 +74,7 @@ Host prerequisites that are outside this project (recorded in user memory, not a
 |---|---|---|---|
 | `voice.engine` | `"voxtype" \| "typeless"` | `"voxtype"` | anything else normalizes to `"voxtype"` |
 | `voice.typeless.hotkey` | string | `"RightAlt"` | a chord in Typeless's notation (§3.1), stored canonical; an invalid stored value normalizes to `"RightAlt"` plus a config warning |
+| `voice.typeless.pressWaitMs` | integer 0..2000 | `250` | the §5.2 press gate's bound; `0` disables the gate. Anything else normalizes to `250` plus a config warning |
 
 `voice.mic` keeps its meaning and its apply transaction under both engines (§6.2).
 
@@ -216,6 +230,12 @@ classification only. The allowlist is what limits what is ever sent.
 Overrides for tests: `OMAREMOTE_KEYTAP_DIR`, `OMAREMOTE_KEYTAP_UNIT`, `OMAREMOTE_TYPELESS_SETTINGS`,
 `OMAREMOTE_UINPUT`.
 
+**The mic key's keyd action** (§2 fact 7). `omaremote-setup keyd` writes the remote's mic key as
+`f5 = macro2(0, 0, xfer)`: one XF86Xfer pulse at press time, never held and never repeated. It writes the plain
+`f5 = xfer` only when `keys.mic.trigger` is `"ptt"`, which needs the real down and up; that combination cannot drive
+Typeless in `remote` mode reliably. Changing `keys.mic.trigger` to or from `"ptt"` therefore needs a re-run of
+`omaremote-setup keyd`.
+
 ## 5. Plugin — `lib/TypelessSession.mjs`
 
 ### 5.1 Shape
@@ -276,8 +296,14 @@ and every tap result.
 
 **desired** = `streaming && !needRelease && !quiesced`.
 
+**Press gate** (§2 fact 7). When `streaming` rises in `remote` mode, the start also waits for this hold's HID press:
+- an HID press seen at most 500 ms before the rise belongs to the same hold and opens the gate at once;
+- otherwise the gate opens on the next HID press, or `pressWaitMs` after the rise, whichever comes first;
+- a press opens one hold's gate only, and a release closes a pending gate without tapping;
+- only the start waits. The stop never does: the remote sends no key at release.
+
 **Reconcile.** It runs when there is no `outstanding` and `typeless ≠ unsynced`:
-- `typeless = off` and `desired` → send a start tap with the current hotkey, captured as the session chord. The
+- `typeless = off`, `desired` and the press gate open → send a start tap with the current hotkey, captured as the session chord. The
   deadline begins.
 - `typeless = on` and `!desired` → send a stop tap with the captured chord. The deadline also adds HUD "max
   session reached".
@@ -324,7 +350,7 @@ and every tap result.
   was armed, and the first hold starts. If ATVVoice is not running yet, streaming is unknown but `needRelease`
   was never armed, so the new source's first `State` read of `streaming` starts normally.
 
-`hidPress` does nothing in `remote` mode (remote-mic design §4.2). A short press makes a ~1 s stream:
+In `remote` mode `hidPress` never taps (remote-mic design §4.2); it only opens the press gate. A short press makes a ~1 s stream:
 Typeless records about 1 s of silence and stops. This is harmless and not filtered.
 
 ### 5.3 `system` mode: toggle, no recorded Typeless state
@@ -511,6 +537,10 @@ ATVVoice rows still count. A VoiceSession "voxtype not responding" does not make
       hold starts; the same with the new source reporting streaming → nothing starts until a release;
     - dormant under Voxtype: a long history of streaming changes and source losses never produces a tap
       (discriminating: the same history while resumed does tap).
+    - the press gate (§5.2): stream before the HID press waits for it; press before the stream starts at once;
+      no press starts at `pressWaitMs`; an earlier hold's press does not open a later gate; a release before the
+      gate opens taps nothing; the stop never waits; `pressWaitMs: 0` disables it; system mode is unaffected.
+  - `tests/setup-helpers.sh` pins the mic key's keyd action: one pulse unless `keys.mic.trigger` is `"ptt"`.
   - `VoiceSession.test.mjs` adds drain cases:
     - a plugin-owned recording gets `record stop` and is drained at `transcribing`;
     - a keyboard-owned session is untouched and does not block;

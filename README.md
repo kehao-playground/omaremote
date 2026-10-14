@@ -29,6 +29,9 @@ Voxtype. Typeless records, transcribes and pastes on its own; choose its microph
   hotkey with `--hotkey RightAlt+RightShift`, or re-read Typeless's with `--hotkey-from-typeless`. Setup never switches
   the engine.
 - `remote` mic mode: hold the button to talk. In Typeless, select the remote's microphone (小米蓝牙语音遥控器).
+  The start waits for the remote's own key press (at most `voice.typeless.pressWaitMs`, default 250 ms), because
+  Typeless ignores its hotkey when another key event lands inside it. Re-run `omaremote-setup keyd` after upgrading:
+  it now maps the mic key to a single pulse (`macro2(0, 0, xfer)`).
 - `system` mic mode: each press toggles Typeless; it records from whatever microphone Typeless has selected.
 - **Known limitation:** omaremote cannot see Typeless's real state. Pressing the hotkey on the keyboard, Typeless
   stopping by itself (silence or its length limit), or a tap whose result was unknown can leave the two inverted.
