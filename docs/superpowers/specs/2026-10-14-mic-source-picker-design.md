@@ -1,9 +1,11 @@
 # omaremote — microphone source picker (Voxtype)
 
 **Date:** 2026-10-14
-**Status:** Draft for review
+**Status:** Draft rev 2 for review (rev 2 answers the 2026-10-14 review: snapshot before write, locked
+compare-and-set, rollback partial outcomes, cache-miss refresh, structured block state)
 **Amends:** `2026-09-14-omaremote-design.md` §3 (mic apply contract), §6.2 (Voice tab, Doctor);
-`2026-10-12-remote-mic-design.md` §5 (Doctor `voxtype-device`, `last-capture`)
+`2026-10-12-remote-mic-design.md` §3 (the atvvoice asoundrc write becomes locked and atomic), §5 (Doctor
+`voxtype-device`, `last-capture`)
 
 ## 1. Goal
 
@@ -78,23 +80,47 @@ pcm.omaremote-mic {
 # END omaremote mic
 ```
 
-It has its own markers and is edited independently of the atvvoice block. It is never removed:
-when `audio.device` does not name `omaremote-mic` nothing reads it, so leaving it costs nothing and
-saves a delete path.
+It has its own markers and is edited independently of the atvvoice block. A forward apply only
+creates or rewrites it. Only a rollback removes it, and only to restore a file that had no block
+before (§5.2), so a rollback always returns the file to its exact earlier state.
+
+The block's state is one of:
+- `absent`: neither marker is present.
+- `present <node>`: one BEGIN before one END, and between them exactly one `capture_node "<node>"`
+  line whose value matches the §4.2 name pattern.
+- `bad`: anything else. That covers unbalanced or misordered markers, and balanced markers with no
+  `capture_node`, more than one, or a value that fails the pattern.
 
 ### 4.2 `omaremote-setup alsa-mic`
 
 A new subcommand, reusing the atvvoice block's marker logic (replace in place, append if absent,
-refuse unbalanced markers, keep every line outside the markers).
+keep every line outside the markers byte-identical).
 
-- `alsa-mic get` prints the block's current `capture_node`, or `none` if there is no block. Exit 0.
-  Unbalanced markers exit 2.
-- `alsa-mic set <node> --expect <value|none>` compares the file's current value with `--expect`
-  first. On a match it writes `<node>` and exits 0. On a mismatch it leaves the file unchanged,
-  prints the current value (or `none`) on stdout, and exits 3. Unbalanced markers exit 2. The write is atomic: a temporary file in the same directory,
-  then a rename.
-- `<node>` must match `^[A-Za-z0-9_.:-]+$`; anything else is a usage error (exit 64), so a node
-  name can never inject ALSA config syntax.
+Output is one line of JSON, so "no block" can never be confused with a node name:
+`{"state":"absent"}` or `{"state":"present","node":"<node>"}`.
+
+- `alsa-mic get` prints the current state. Exit 0. A `bad` block exits 2.
+- `alsa-mic set (<node> | --absent) (--expect <node> | --expect-absent)` sets the block to `<node>`,
+  or removes it with `--absent`. It compares the current state with the expectation first. On a match
+  it writes and exits 0. On a mismatch it leaves the file unchanged, prints the current state, and
+  exits 3. A `bad` block exits 2, and the file is unchanged. Any other failure (I/O, lock timeout)
+  exits 1, and the file is unchanged.
+- `<node>` must match `^[A-Za-z0-9_.:-]+$`; anything else is a usage error (exit 64), so a node name
+  can never inject ALSA config syntax. No sentinel value is reserved, so every name that passes the
+  pattern is a valid node.
+
+**Locking.** Every writer of this file in the repo takes an exclusive `flock` on a separate lock file,
+`<asoundrc>.omaremote.lock`, and holds it from the read through the compare, generate and rename.
+The wait is bounded at 5 s; a timeout exits 1. The writers are `alsa-mic set` and the existing
+`omaremote-setup atvvoice` step. The atvvoice step also changes from `cp` to the same atomic write:
+a temporary file in the same directory, then a rename. Readers (`alsa-mic get`, `omaremote-facts`)
+take no lock, because the rename means they only ever see a whole file.
+
+**What the lock does not cover.** An editor or tool outside the repo does not take the lock. If one
+saves the file inside the window between `alsa-mic set`'s read and its rename, its edit is lost. An
+outside edit made at any other time is preserved. If it changed the mic block, it is detected by the
+compare (exit 3). Edits outside the managed blocks are always kept, as long as they do not land in
+that window.
 
 It needs no root, prompts nothing, and is safe to call from the plugin.
 
@@ -106,9 +132,11 @@ It needs no root, prompts nothing, and is safe to call from the plugin.
 - `defaultSource(dump)` returns the `name` from the `default` metadata's `default.audio.source`
   entry, or `null`.
 - The Service runs `pw-dump` when the Voice tab is shown and stores the result as
-  `root.micSources`, so a microphone plugged in since the last look appears. A stored
+  `root.micSources`. A microphone plugged in since the last look therefore appears. A stored
   `systemDevice` that is absent from the list is still shown, marked "(not connected)". Nothing ever
   switches to another source on its own.
+- Each refresh records when it started (`startedAt`), and its outcome: a list, or failed when
+  `pw-dump` exits non-zero, its JSON does not parse, or it runs past 3 s.
 
 ### 4.4 IPC and CLI
 
@@ -117,8 +145,18 @@ It needs no root, prompts nothing, and is safe to call from the plugin.
 - `mic remote` is unchanged.
 - Request-time refusals, before anything is queued:
   - `invalid-source`: the node is a monitor, is the ATVVoice node, or fails the §4.2 name pattern.
-  - `no-such-source`: the node is not in the latest `micSources`. The Service refreshes `micSources`
-    first if it is older than 2 s, so a CLI call right after plugging in works.
+  - **A cache miss refreshes before refusing.** `ipcMic` answers at once, but `pw-dump` is
+    asynchronous, so the caller retries. When the node is not in `micSources`:
+    - If no refresh has started since this node's first miss, the Service records the miss time,
+      starts a refresh, and answers `busy` with `detail: "sourcesRefreshing"` and `retryAfterMs: 300`.
+      This is the same convention as `backendStale`.
+    - If a refresh that started after that miss is still running, the answer is the same `busy`.
+    - If such a refresh completed and the node is still missing, the answer is `no-such-source`.
+    - If such a refresh failed, the answer is `sources-unavailable`.
+
+    The miss record is cleared once it has been answered with a terminal reason, or the node is found.
+    A cache hit is accepted without a refresh. A source unplugged since then is caught later, by the
+    capture check (§5.3) and Doctor (§6).
 - `omaremote-setup mic system` and `--mic system` are unchanged (they mean `default`).
 
 ### 4.5 Panel (Voice tab)
@@ -130,8 +168,12 @@ It needs no root, prompts nothing, and is safe to call from the plugin.
   between choices; Enter applies; Esc leaves without applying. This is the same `editing` pattern the
   Keys tab uses.
 - While `micPending`, every choice is disabled (today's behaviour).
-- Refusals display through the existing error line: `no-such-source` as "microphone not found
-  (unplugged?)", `invalid-source` as "not a usable microphone".
+- Refusals display through the existing error line:
+  - `no-such-source`: "microphone not found (unplugged?)"
+  - `invalid-source`: "not a usable microphone"
+  - `sources-unavailable`: "cannot list microphones (pw-dump failed)"
+
+  The panel retries `busy`/`sourcesRefreshing` on its own, so the user never sees it.
 
 ## 5. Mic apply contract changes (`lib/MicApply.mjs`)
 
@@ -140,51 +182,82 @@ target becomes:
 
 - `remote`: `audio.device` = ATVVoice node (unchanged).
 - `system` + `default`: `audio.device` = `default` (unchanged).
-- `system` + node: asoundrc `capture_node` = node, then `audio.device` = `omaremote-mic`.
+- `system` + node: asoundrc block = `present <node>`, then `audio.device` = `omaremote-mic`.
 
-### 5.1 Phases
+### 5.1 Phases: snapshot everything, then write
 
-Only `system` + node adds the two leading phases; every other request runs exactly today's phases
-and issues no `alsa-*` command.
+Only `system` + node adds the two ALSA phases. Every other request runs exactly today's phases and
+issues no `alsa-*` command.
 
 ```
 queued → reserve (preconditions unchanged)
-  → alsa-get   run `alsa-mic get`; record alsaPrev (node or none)
-  → alsa-set   run `alsa-mic set <node> --expect <alsaPrev>`; on exit 0, alsaExpected = node
-  → get        (today) read audio.device
+  ── snapshot (nothing written; any failure ends the operation without rollback) ──
+  → get        (today) read audio.device → prev, expected
+  → alsa-get   run `alsa-mic get` → alsaPrev (absent | present <n>), alsaExpected = alsaPrev
+  → job check  jobPending → fail `job-pending`, no rollback (as today's get does)
+  ── write (mutated from the first successful write on) ──
+  → alsa-set   `alsa-mic set <node> --expect <alsaPrev>`
   → set        (today) write audio.device = omaremote-mic
   → restart    (today)
   → verify     (today) daemon healthy
   → commit     voice.mic = system, voice.systemDevice = node
 ```
 
-- `alsa-get` failing (non-zero exit) fails the operation with `preflight-failed`; nothing was mutated.
-- `alsa-set` exiting 3 fails the operation with `alsa-conflict`; nothing was mutated, so there is no
-  rollback. Any other non-zero exit fails it with `alsa-set-failed`, also with no rollback, since
-  the write is atomic.
-- When `alsaPrev` already equals the node, `alsa-set` is skipped and `alsaExpected = alsaPrev`.
-- When `audio.device` already holds `omaremote-mic` (switching between two specific sources), the
-  `set` still runs as today. The restart is what makes Voxtype read the new block, so it always runs.
+**Snapshot failures.** `get` failing keeps today's `preflight-failed`. `alsa-get` exiting non-zero
+(including 2, a `bad` block) also fails with `preflight-failed`. Neither has a rollback, because
+nothing was written.
+
+**`alsa-set`.** This is the first write.
+- Exit 0: set `mutated = true`, `serviceDirty = true` and `alsaExpected = present <node>`. The flags
+  are set the moment the write succeeds, before the restart. alsa-lib re-reads changed config files
+  when a PCM is opened, so the running daemon's next session would already use the new block.
+- Exit 3: fail with `alsa-conflict`. Nothing was written, so there is no rollback.
+- Exit 1, 2 or other: fail with `alsa-set-failed`. Nothing was written (§4.2), so there is no
+  rollback.
+- When `alsaPrev` already equals `present <node>`, `alsa-set` is skipped. `mutated` and
+  `serviceDirty` then become true at `set`, exactly as today.
+
+**After the first write, every failure rolls back or defers.** This covers `set` failing, a
+`job-pending` found before `set` or `restart`, a reset or external recording, and a verify failure.
+They take today's paths (`beginRollback` or `deferOp`). Those paths now also restore the ALSA block
+(§5.2). This holds even when `audio.device` itself was never written.
+
+**Other rules.**
+- When `audio.device` already holds `omaremote-mic` (switching between two specific sources), `set`
+  still runs as today, and the restart always runs.
 - The `commit` effect carries `device`. `configStore.setVoiceMic(mode, device)` writes both fields;
   `remote` passes no device and leaves `systemDevice` as it is.
 
 ### 5.2 Rollback
 
-Rollback runs in reverse order:
+Rollback runs in this order:
 
-1. Restore `audio.device` exactly as today, including the external-edit check.
-2. If the asoundrc was changed (`alsaExpected !== alsaPrev`), run
-   `alsa-mic set <alsaPrev> --expect <alsaExpected>`. When `alsaPrev` is `none`, the block is left
-   holding the new node instead: no `audio.device` names it once step 1 succeeded, and §4.1 never
-   removes the block. Exit 3 emits today's `conflict` effect
-   (`{ expected: alsaExpected, found: <the value printed by the exit-3 run> }`)
-   with the HUD "microphone config changed externally", and the operation ends `failed` with
-   rollback `conflict`.
-3. Restart, as today.
+1. **`audio.device`**, exactly as today, including the external-edit check (`rollback-get`, then
+   `rollback-set` if needed). A conflict or failure here ends the rollback as today, with no ALSA
+   step. The ALSA block is then left as it is, and the `conflict`/`unconfigured` effect already tells
+   the user the microphone config needs attention.
+2. **`rollback-alsa`**, when `alsaExpected !== alsaPrev`: run
+   `alsa-mic set <alsaPrev as node | --absent> --expect <alsaExpected>`. Removing the block restores
+   a file that had none, so the restore is exact in every case.
+   - Exit 0: `alsaExpected = alsaPrev`. Continue to step 3.
+   - Exit 3: emit today's `conflict` effect,
+     `{ expected: alsaExpected, found: <the state printed by the exit-3 run> }`, with the HUD
+     "microphone config changed externally". Still run step 3, because `audio.device` was restored
+     and the daemon must reload it. The final rollback is `conflict`.
+   - Exit 1, 2 or other: still run step 3, for the same reason. The final rollback is `failed`, with
+     an `unconfigured` effect, reason "microphone partly restored". Nothing is deferred: a `bad` block
+     or a lock timeout does not fix itself, and the effect plus Doctor (§6, condition 2) point the user
+     at it.
+3. **Restart and verify**, as today, when `serviceDirty`. The final rollback is `verified` only when
+   both steps 1 and 2 restored exactly. If step 2 ended `conflict` or `failed`, that outcome stands
+   even if the restart verifies.
 
-Reset priority and deferred rollback follow today's rules. The deferred snapshot also carries
-`alsaPrev` and `alsaExpected`, and a drained `alsa-set` that exited 0 after a defer corrects
-`alsaExpected`, the same way a drained `set` corrects `expected` today.
+A `job-pending` reading before `rollback-alsa` or the restart defers the rest, as today.
+
+**Deferred rollback.** Reset priority and deferral follow today's rules. The deferred snapshot also
+carries `alsaPrev` and `alsaExpected`. A drained `alsa-set` that exited 0 after a defer sets
+`alsaExpected = present <node>`, the same way a drained `set` corrects `expected` today. A drained
+`rollback-alsa` that exited 0 sets `alsaExpected = alsaPrev`.
 
 ### 5.3 Detecting a silent fallback
 
@@ -201,9 +274,10 @@ check runs once per session.
 - `systemDevice = default`: today's check, unchanged.
 - `systemDevice = <node>`: passes only if all three hold. Each failure names its own fix.
   1. `audio.device` is `omaremote-mic`. Fix: `omarchy-shell omaremote mic system <node>`.
-  2. The asoundrc mic block's `capture_node` equals `<node>`. This needs a new fact, `alsa.micNode`,
-     from `host/omaremote-facts` (the `alsa-mic get` value, or `null` when unreadable). Fix: the same
-     command.
+  2. The asoundrc mic block is `present <node>`. This needs a new fact, `alsa.mic`, from
+     `host/omaremote-facts`: the `alsa-mic get` JSON, `{"state":"bad"}` on exit 2, or `null` when it
+     cannot run (`null` makes the row `unknown`). Fix for `absent` or another node: the same command.
+     Fix for `bad`: "repair the omaremote mic block in <asoundrc> by hand".
   3. `<node>` is in `pipewire.sources` (it is plugged in). Fix: "connect the microphone, or pick
      another one in the Voice tab".
 
@@ -222,18 +296,40 @@ The row keeps its `warn` level on a mismatch.
 
 **Unit**
 - `MicApply.test.mjs`:
-  - the full `system` + node success path, in phase order;
-  - `alsa-get` failure; `alsa-set` exit 3 and other failure, each with no rollback;
-  - restart failure, with rollback in order: `audio.device` first, then asoundrc, then restart;
-  - the asoundrc rollback hitting exit 3, which emits `conflict`;
-  - a reset during `restart`, where the deferred snapshot carries `alsaPrev` and `alsaExpected`, and
-    a drained `alsa-set` corrects `alsaExpected`;
+  - the full `system` + node success path, in phase order (`get`, `alsa-get`, `alsa-set`, `set`,
+    `restart`, verify, commit with `device`);
+  - snapshot failures, each ending `preflight-failed` with no write and no rollback: `get` failing,
+    `alsa-get` failing, and `alsa-get` exiting 2;
+  - `job-pending` at the job check ends the operation with no `alsa-set` issued;
+  - `alsa-set` exit 3 (`alsa-conflict`) and exit 1/2 (`alsa-set-failed`), each with no rollback;
+  - after `alsa-set` succeeds:
+    - `set` fails, so the rollback restores the ALSA block, then restarts;
+    - a `job-pending` is found before `set`, so the operation defers, and the deferred rollback later
+      restores the block;
+    - a reset arrives, so the operation defers with `alsaPrev` and `alsaExpected` in the snapshot;
+  - a restart or verify failure rolls back in order: `audio.device`, then `rollback-alsa`, then the
+    restart;
+  - `rollback-alsa` from `absent` issues `--absent` with `--expect` the new node;
+  - `rollback-alsa` exit 3 emits `conflict`, still restarts, and ends with rollback `conflict` even
+    when the restart verifies;
+  - `rollback-alsa` exit 2 still restarts and ends with rollback `failed` and the "partly restored"
+    `unconfigured` effect, with nothing deferred;
+  - a conflict in step 1 (`audio.device`) issues no `rollback-alsa`;
+  - a drained `alsa-set`, and a drained `rollback-alsa`, after a defer correct `alsaExpected`;
   - a source-to-source switch, where `audio.device` is already `omaremote-mic` and the restart still
     runs;
-  - `alsaPrev` equal to the node, which skips `alsa-set`;
-  - `system` + `default` and `remote`, which issue no `alsa-*` command. Assert this against a
-    request that would issue one if the mode branch were wrong, so the absence is not guaranteed by
-    construction.
+  - `alsaPrev` equal to the node skips `alsa-set`, and `mutated` first becomes true at `set`;
+  - `system` + `default` and `remote` issue no `alsa-*` command. Assert this against a request that
+    would issue one if the mode branch were wrong, so the absence is not guaranteed by construction.
+- Service source check (unit-testable helper `lib/MicSources.mjs`, which owns the miss record):
+  - a cache hit is accepted;
+  - a miss starts a refresh and answers `sourcesRefreshing`, even when the cache is fresh, since the
+    device was plugged in after the last refresh;
+  - a retry while that refresh runs answers `sourcesRefreshing` again and starts no second refresh;
+  - a completed refresh that started after the miss and contains the node accepts it; one that lacks
+    it answers `no-such-source`;
+  - a refresh that started *before* the miss never answers `no-such-source`;
+  - a failed refresh answers `sources-unavailable`.
 - `Pipewire.test.mjs`: `captureSources` excludes monitors and the ATVVoice node and picks the
   description fallbacks; `defaultSource` reads the metadata and returns `null` without it.
 - `Doctor.test.mjs`: each of the three `voxtype-device` conditions failing alone; `last-capture`'s
@@ -241,17 +337,32 @@ The row keeps its `warn` level on a mismatch.
 - `Config.test.mjs`: a missing `systemDevice`, and a non-string one, both load as `default`.
 
 **Setup** (new `tests/setup-alsa-mic.sh`, run with `OMAREMOTE_ALSA_RC` in a temp dir)
-- `set` into an empty file creates the block.
+- `set <node> --expect-absent` on an empty or missing file creates the block.
 - `set` replaces the block in place, leaving the atvvoice block and all outside lines byte-identical.
-- An `--expect` mismatch exits 3 and leaves the file byte-identical.
-- Unbalanced markers exit 2.
+- `set --absent --expect <node>` removes the block, and the file is byte-identical to the one before
+  the block was added.
+- An expectation mismatch exits 3, prints the current state as JSON, and leaves the file
+  byte-identical.
+- `bad` blocks exit 2 for both `get` and `set` and leave the file byte-identical. The cases are
+  unbalanced markers, misordered markers, no `capture_node`, two `capture_node` lines, and a value
+  failing the pattern.
 - A node name with a quote, space or brace exits 64.
-- `get` prints `none` with no block and the node with one.
+- A node literally named `none` or `absent` round-trips as `present`.
+- `get` prints `{"state":"absent"}` with no block and `{"state":"present","node":…}` with one.
+- **Concurrency:**
+  - Run `alsa-mic set` and the atvvoice block writer at the same time, 50 times. Each run must end
+    with both blocks present and every outside line intact.
+  - Hold the lock from the test with `flock`. `set` waits, then succeeds once the lock is released
+    within 5 s; held past 5 s, it exits 1 with the file unchanged.
+- The existing atvvoice setup tests still pass with the atomic, locked write.
 
 **Integration** (fake-remote scenarios)
 - `s_mic_system_device`: `ipc mic system <fake node>` issues `alsa-get`, `alsa-set`, `set` and
   `restart` in order, and the config ends with `systemDevice` set.
-- `s_mic_system_unknown_source`: an unknown node answers `no-such-source` and nothing is queued.
+- `s_mic_system_unknown_source`: an unknown node first answers `busy`/`sourcesRefreshing`; after
+  the retry it answers `no-such-source`, and nothing is queued.
+- `s_mic_system_late_plug`: the fake `pw-dump` gains the node right after a refresh; the request
+  answers `sourcesRefreshing`, then the retry is accepted.
 
 **Hardware acceptance (user present)**
 1. Pick the C922 in the panel and dictate. Doctor `last-capture` passes.
