@@ -222,13 +222,17 @@ queued → reserve (preconditions unchanged)
   → get        (today) read audio.device → prev, expected
   → alsa-get   run `alsa-mic get` → alsaPrev (absent | present <n>), alsaExpected = alsaPrev
   → job check  jobPending → fail `job-pending`, no rollback (as today's get does)
-  ── write (mutated from the first successful write on) ──
+  ── write (mutated from the first write command issued) ──
   → alsa-set   `alsa-mic set <node> --expect <alsaPrev>`
   → set        (today) write audio.device = omaremote-mic
   → restart    (today)
   → verify     (today) daemon healthy
   → commit     voice.mic = system, voice.systemDevice = node
 ```
+
+**Comparing block states.** `alsaPrev`, `alsaExpected` and `alsaWrites` are block states parsed from
+JSON. Every equality in this section, written `===`/`!==`, means *same `state`, and the same `node`
+when both are `present`*. It is one helper, `sameAlsa(a, b)`, never object identity.
 
 **Snapshot failures.** `get` failing keeps today's `preflight-failed`. `alsa-get` exiting non-zero
 (including 2, a `bad` block) also fails with `preflight-failed`. Neither has a rollback, because
@@ -432,8 +436,8 @@ The row keeps its `warn` level on a mismatch.
 - The existing atvvoice setup tests still pass with the atomic, locked, single-read write.
 
 **Integration** (fake-remote scenarios)
-- `s_mic_system_device`: `ipc mic system <fake node>` issues `alsa-get`, `alsa-set`, `set` and
-  `restart` in order, and the config ends with `systemDevice` set.
+- `s_mic_system_device`: `ipc mic system <fake node>` issues `get`, `alsa-get`, `alsa-set`, `set`
+  and `restart` in order, and the config ends with `systemDevice` set.
 - `s_mic_system_unknown_source`: an unknown node first answers `busy`/`sourcesRefreshing`; after
   the retry it answers `no-such-source`, and nothing is queued.
 - `s_mic_system_late_plug`: the fake `pw-dump` gains the node right after a refresh; the request
