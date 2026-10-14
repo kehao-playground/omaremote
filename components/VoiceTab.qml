@@ -33,7 +33,8 @@ Item {
   function onShown() { cursor = -1; pick = -1; root.cancelPending(); if (s) s.refreshMicSources() }
   function cancelPending() { root._intent++; root._retry = null; retryTimer.stop() }
   function onHidden() { root.cancelPending() }             // Panel.close(): a closed panel retries nothing
-  function moveCursor(dy) { cursor = cursor < 0 ? 0 : Math.max(0, Math.min(rowCount - 1, cursor + dy)) }
+  function moveCursor(dy) { cursor = cursor < 0 ? 0 : Math.max(0, Math.min(rowCount - 1, cursor + dy)); if (cursor !== 1) pick = -1 }
+  onChoicesChanged: pick = -1                             // a refresh may reorder the list: never let the highlight land on another source
   function activate() {
     if (!cfg) return
     if (cursor === 0) root.requestEngine(cfg.voice.engine === "typeless" ? "voxtype" : "typeless")
