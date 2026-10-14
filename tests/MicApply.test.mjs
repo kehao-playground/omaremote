@@ -807,6 +807,9 @@ test("picker: a defer that expires keeps the partial outcome beside unresolved",
   const fx = mic.advance(10 + 60000);
   assert.equal(byType(fx, "unconfigured")[0].reason, "mic change unresolved");
   assert.deepEqual([mic.statusOf(id).rollback, mic.statusOf(id).partial], ["unresolved", "conflict"]);
+  // spec §5.2 "the Voice tab shows both values": no `done` follows an expiry, so the effect names the record Service
+  // re-reads into micLast
+  assert.equal(byType(fx, "unconfigured")[0].operationId, id);
 });
 
 test("picker: reset while alsa-restore is in flight; its drained exit sets the progress", () => {

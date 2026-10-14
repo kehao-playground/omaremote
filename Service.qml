@@ -164,7 +164,11 @@ Item {
         if (!mic.pending()) root.typelessCall("resume", function(n) { return root.typeless.resume(n, "mic") })   // §6.2: after the terminal outcome
         break
       case "conflict": root.micConflict = { target: e.target, expected: e.expected, found: e.found }; break
-      case "unconfigured": root.unconfiguredReason = e.reason; break
+      case "unconfigured":
+        root.unconfiguredReason = e.reason
+        // a defer that expired emits no `done`: show its final record (rollback unresolved, partial) as the last change
+        if (src === "mic" && e.operationId) root.micLast = Object.assign({ type: "done", operationId: e.operationId }, mic.statusOf(e.operationId))
+        break
       case "stat": stats.add(e.session); statsStore.save(stats.entries()); root.statsSummary = stats.summary(Date.now()); break
       case "selftestExpired": case "selftestFailed": root.onSelftestEnded(); break
       default: console.log("omaremote: unhandled effect " + e.type + " from " + src)
