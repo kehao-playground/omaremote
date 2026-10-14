@@ -22,6 +22,9 @@ The design targets the wider ATVV family (e.g. G20S Pro).
   - `remote`: the remote's own microphone, streamed over Bluetooth through [ATVVoice](https://github.com/b0o/ATVVoice).
     Hold to talk, release to finish.
   - `system`: your desktop microphone. Each press of the mic button starts or stops dictation.
+  - In `system` mode, pick the microphone in the Voice tab, or run `omarchy-shell omaremote micSystem <node>`;
+    `omarchy-shell omaremote micSources` lists the node names. Only Voxtype is affected; Typeless keeps its own
+    microphone setting.
 - **13-key mapping engine.** Per key: tap, hold, double-tap and repeat. Actions can send keys, run Hyprland
   dispatchers, change the volume, control media (`playerctl`), or turn off or lock the screen.
   Holding the panic key (Menu by default) resets everything.
@@ -40,7 +43,7 @@ The design targets the wider ATVV family (e.g. G20S Pro).
 - **Status:** voice and Voxtype state, the remote's connection, mic mode, today's sessions, and a 3-second mic test.
 - **Keys:** the action for each button's tap, hold and double-tap, with the repeat switch. Edit in place, reset to the
   defaults, or tune the timing.
-- **Voice:** the transcription engine, the microphone mode, which trigger sources are active, the HUD options, the
+- **Voice:** the transcription engine, the microphone mode and source, which trigger sources are active, the HUD options, the
   session length limit, and usage stats.
 - **Setup:** Doctor checks for keyd, the Hyprland binds, Voxtype, ATVVoice, the Typeless keytap and the config file.
 
@@ -149,7 +152,7 @@ make dev-restart   # + omarchy-restart-shell (needed for Service.qml changes: ke
 ```
 
 IPC (`omarchy-shell omaremote …`): `ping`, `status`, `doctor`, `key <name> down|up`, `voice state <state>`,
-`voice poll -`, `reset`, `mic remote|system`, `micStatus <id>`, `micToggle`, `engine voxtype|typeless`,
+`voice poll -`, `reset`, `mic remote|system`, `micSystem <node>|default`, `micSources`, `micStatus <id>`, `micToggle`, `engine voxtype|typeless`,
 `typelessHotkey <chord>`, `selftestPing`, `selftestArm`, `selftestStatus|selftestReport|selftestDisarm <id>`.
 
 Design documents are in `docs/superpowers/specs/`: the core design (`2026-09-14-omaremote-design.md`), host setup
