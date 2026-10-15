@@ -130,6 +130,19 @@ test("gate: acquire only from idle, blocks HID start, release restores", () => {
   assert.equal(vs.gate.acquire("selftest"), false);          // not idle now
 });
 
+test("a mic apply's own Voxtype restart is not 'voxtype not responding'; after the apply, a dead Voxtype still is", () => {
+  const vs = createVoiceSession(pttCfg());
+  vs.status("idle", 0, { fresh: true });
+  assert.equal(vs.gate.acquire("mic-apply"), true);
+  const down = vs.status("stopped", 10);                     // the daemon shutting down for the apply's restart
+  assert.deepEqual(byType(down, "error"), []);
+  assert.deepEqual(byType(down, "hud"), [], "no HUD flash during a mic change");
+  assert.equal(vs.snapshot().state, "idle");
+  assert.deepEqual(vs.status("idle", 20, { fresh: true }), []);
+  vs.gate.release("mic-apply");
+  assert.equal(stateOf(vs.status("stopped", 30)), "unconfigured");
+});
+
 // ---- D-Bus arbitration (§5.2) ----
 function idleSession() {
   const vs = createVoiceSession(onDemandCfg());
