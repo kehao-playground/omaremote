@@ -59,11 +59,13 @@ The design targets the wider ATVV family (e.g. G20S Pro).
 ## Install
 
 ```bash
-git clone https://github.com/kehao-playground/omaremote.git
-cd omaremote
-make dev-install                 # copy the plugin into ~/.config/omarchy/plugins and rescan
-bash host/omaremote-setup        # every host step in order (interactive; keyd and verify use sudo)
+omarchy plugin add https://github.com/kehao-playground/omaremote.git --enable
+bash ~/.config/omarchy/plugins/io.github.kehao-chen.omaremote/host/omaremote-setup   # every host step in order
 ```
+
+The setup script is interactive: the `keyd` and `verify` steps use `sudo`, and the `atvvoice` step builds ATVVoice
+from source with `cargo`, at a pinned commit. To work on the plugin from a checkout instead, see
+[Development](#development).
 
 Then add **OmaRemote** to the bar, and open the panel's **Setup** tab: every row should show ✓.
 
@@ -80,6 +82,9 @@ Then add **OmaRemote** to the bar, and open the panel's **Setup** tab: every row
 | `verify` | verifies the loaded binds and sweeps every button through the transport |
 
 Use `--mic system` to skip ATVVoice and dictate from your desktop microphone.
+
+Update with `omarchy plugin update io.github.kehao-chen.omaremote`. After an update, re-run `omaremote-setup keyd` and
+`omaremote-setup binds` if the changelog says the generated files changed.
 
 ## Usage
 
@@ -141,7 +146,39 @@ Notes:
   `systemctl --user restart atvvoice`. This was seen once, and its cause is still unknown.
 - **Stuck state:** hold the panic key (Menu) for 1.5 s, or run `omarchy-shell omaremote reset`.
 
+## Uninstall
+
+Undo the host setup first, because removing the plugin also deletes the setup script:
+
+```bash
+bash ~/.config/omarchy/plugins/io.github.kehao-chen.omaremote/host/omaremote-setup uninstall
+omarchy plugin remove io.github.kehao-chen.omaremote
+```
+
+`uninstall` asks before each item, and only removes what setup itself wrote:
+
+- Voxtype's `audio.device`, when it is one of the two values OmaRemote sets;
+- the two OmaRemote blocks in `~/.config/alsa/asoundrc` (everything else in the file is kept);
+- the `atvvoice` and `omaremote-keytap` user services, and the ATVVoice binary;
+- `~/.config/hypr/omaremote.lua`, its `require` line in `hyprland.lua`, and the `kb_options` block in `input.lua`;
+- `/etc/keyd/omaremote.conf` (this step uses `sudo`).
+
+Options: `--dry-run` lists what it would remove and changes nothing. `--purge` also deletes your settings in
+`~/.config/omaremote`, which are kept by default. `--yes` skips the questions. Every edited file keeps a copy of its
+previous version as `<file>.omaremote.bak`. Packages you installed (`keyd`, `rustup`, `pipewire-alsa`) and the
+`input` group membership are left as they are.
+
 ## Development
+
+From a checkout:
+
+```bash
+git clone https://github.com/kehao-playground/omaremote.git
+cd omaremote
+make dev-install                 # copy the plugin into ~/.config/omarchy/plugins and rescan
+bash host/omaremote-setup        # every host step in order
+```
+
 
 ```bash
 make test          # node --test (pure lib)

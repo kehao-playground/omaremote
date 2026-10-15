@@ -55,11 +55,12 @@ OmaRemote 是一個 [Omarchy](https://omarchy.org) 外掛，讓 ATVV 類型的�
 ## 安裝
 
 ```bash
-git clone https://github.com/kehao-playground/omaremote.git
-cd omaremote
-make dev-install                 # 把外掛複製到 ~/.config/omarchy/plugins 並重新掃描
-bash host/omaremote-setup        # 依序執行所有系統設定步驟（互動式；keyd 和 verify 會用到 sudo）
+omarchy plugin add https://github.com/kehao-playground/omaremote.git --enable
+bash ~/.config/omarchy/plugins/io.github.kehao-chen.omaremote/host/omaremote-setup   # 依序執行所有系統設定步驟
 ```
+
+設定腳本是互動式的：`keyd` 和 `verify` 步驟會用到 `sudo`，`atvvoice` 步驟會用 `cargo` 從原始碼編譯 ATVVoice
+（固定在某個 commit）。如果想從原始碼目錄開發，請看[開發](#開發)。
 
 接著把 **OmaRemote** 加到 bar 上，打開面板的 **Setup** 分頁，每一項都應該是 ✓。
 
@@ -76,6 +77,9 @@ bash host/omaremote-setup        # 依序執行所有系統設定步驟（互動
 | `verify` | 確認快捷鍵已載入，並逐一測試每個按鍵的傳遞路徑 |
 
 加上 `--mic system` 可以跳過 ATVVoice，改用電腦的麥克風語音輸入。
+
+用 `omarchy plugin update io.github.kehao-chen.omaremote` 更新。如果 changelog 說產生的檔案有變，更新後請重新執行
+`omaremote-setup keyd` 和 `omaremote-setup binds`。
 
 ## 使用方式
 
@@ -135,7 +139,37 @@ bash host/omaremote-setup        # 依序執行所有系統設定步驟（互動
   這個狀況目前只出現過一次，原因還不清楚。
 - **狀態卡住**：按住 panic 鍵（Menu）1.5 秒，或執行 `omarchy-shell omaremote reset`。
 
+## 移除
+
+請先還原系統設定，因為移除外掛時，設定腳本也會一起被刪掉：
+
+```bash
+bash ~/.config/omarchy/plugins/io.github.kehao-chen.omaremote/host/omaremote-setup uninstall
+omarchy plugin remove io.github.kehao-chen.omaremote
+```
+
+`uninstall` 每一項都會先問過你，而且只移除 setup 自己寫入的東西：
+
+- Voxtype 的 `audio.device`（只有在它是 OmaRemote 設定的那兩個值時）；
+- `~/.config/alsa/asoundrc` 裡 OmaRemote 的兩個區塊（檔案其他內容保持不變）；
+- `atvvoice` 和 `omaremote-keytap` 兩個 user service，以及 ATVVoice 執行檔；
+- `~/.config/hypr/omaremote.lua`、`hyprland.lua` 裡對應的 `require` 那一行，以及 `input.lua` 裡的 `kb_options` 區塊；
+- `/etc/keyd/omaremote.conf`（這一步會用到 `sudo`）。
+
+選項：`--dry-run` 只列出會移除什麼，不做任何修改。`--purge` 會連 `~/.config/omaremote` 裡的設定一起刪除；預設會保留。
+`--yes` 不逐項詢問。每個被修改的檔案都會把原本的版本留成 `<檔名>.omaremote.bak`。你自己安裝的套件（`keyd`、`rustup`、
+`pipewire-alsa`）和 `input` 群組設定都不會動。
+
 ## 開發
+
+從原始碼目錄安裝：
+
+```bash
+git clone https://github.com/kehao-playground/omaremote.git
+cd omaremote
+make dev-install                 # 把外掛複製到 ~/.config/omarchy/plugins 並重新掃描
+bash host/omaremote-setup        # 依序執行所有系統設定步驟
+```
 
 ```bash
 make test          # node --test（純邏輯模組）
