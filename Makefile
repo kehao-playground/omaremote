@@ -25,6 +25,7 @@ check: test lint
 	bash tests/setup-atvvoice.sh
 	bash tests/setup-alsa-mic.sh
 	bash tests/setup-typeless.sh
+	bash tests/setup-uninstall.sh
 	bash tests/matrix-helpers.sh
 	python3 -I tests/test_keytap.py
 	bash tests/runner-bound.sh

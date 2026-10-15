@@ -387,8 +387,9 @@ cmd_plugin() {
   if omarchy plugin list 2>/dev/null | grep -q "$PLUGIN_ID"; then
     say "plugin present: $PLUGIN_ID"
   else
-    say "Install it from this checkout, then re-run:"
-    say "    omarchy plugin add . --enable"
+    say "Install it, then re-run:"
+    say "    omarchy plugin add https://github.com/kehao-playground/omaremote.git --enable"
+    say "(or, from a checkout of the repo:  make dev-install)"
     return 1
   fi
   $SHELL_CMD shell rescanPlugins >/dev/null 2>&1 || true
@@ -973,6 +974,233 @@ cmd_typeless() {   # cmd_typeless [--hotkey <chord> | --hotkey-from-typeless]
   say "Switch the engine in the panel (Voice tab → Engine: Typeless). Setup never switches it."
 }
 
+# ---- uninstall: undo every step above ----------------------------------------------------------
+# Each item says what it found, asks (unless --yes), and touches only what setup itself wrote: a file it generated is
+# recognised by its header, a block by its markers, a Voxtype value by being one of the two names setup sets. Anything
+# else is left alone and listed at the end. ~/.config/omaremote (your key mappings) is kept unless --purge.
+UNINSTALL_DRY=0
+UNINSTALL_PURGE=0
+UNINSTALL_LEFT=()
+# ensure_xkb's header, and the hand-written one of the first installs (2026-10-07): both open with this and say REQUIRED.
+XKB_MARK_RE='^-- Added by (omaremote-setup|OmaRemote \\(omaremote-setup\\)).*REQUIRED for the remote to work\\.$'
+REQUIRE_LINE='require("hypr.omaremote")'
+
+u_ask() {   # u_ask <question>: 0 = go ahead. A dry run never goes ahead; a "no" is recorded as kept.
+  if (( UNINSTALL_DRY )); then say "  (dry run: nothing changed)"; return 1; fi
+  (( ASSUME_YES )) && return 0
+  local a; read -r -p "$1 [y/N] " a || a=""
+  [[ ${a,,} == y ]] && return 0
+  UNINSTALL_LEFT+=("kept at your request: ${2:-$1}")
+  return 1
+}
+u_left() { warn "$1"; UNINSTALL_LEFT+=("$1"); }
+
+u_voxtype() {
+  step "Voxtype microphone (audio.device)"
+  command -v voxtype >/dev/null 2>&1 || { say "voxtype is not installed; nothing to do"; return 0; }
+  local fv; fv=$(voxtype config get audio.device --json 2>/dev/null | jq -r '.file_value // empty' 2>/dev/null) || fv=""
+  if [[ $fv != "$MIC_PCM" && $fv != "$ATV_NODE" ]]; then
+    say "audio.device is ${fv:-not set} -- not a value OmaRemote sets; left alone"; return 0
+  fi
+  say "audio.device = $fv (set by OmaRemote). Unsetting it returns Voxtype to its default microphone."
+  u_ask "Unset Voxtype's audio.device?" "Voxtype audio.device = $fv" || return 0
+  voxtype config unset audio.device >/dev/null || { u_left "could not unset Voxtype audio.device; run:  voxtype config unset audio.device"; return 0; }
+  say "unset audio.device"
+  U_VOX_RESTART=1
+}
+
+# Under the ALSA lock: drop every well-formed OmaRemote block, keep a copy of the old file. 2 = nothing to drop.
+u_alsa_strip() {
+  alsa_rc_read || return 1
+  local c=$ALSA_CONTENT st pair b e
+  for pair in "$ALSA_BEGIN|$ALSA_END" "$MIC_BEGIN|$MIC_END"; do
+    b=${pair%%|*}; e=${pair#*|}
+    st=$(alsa_block_state "$c" "$b" "$e" 0)
+    [[ $st == present ]] || continue
+    c=$(alsa_rc_put "$c" "$b" "$e" "" && printf x) || return 1
+    c=${c%x}
+  done
+  [[ $c == "$ALSA_CONTENT" ]] && return 2
+  cp -- "$(readlink -m -- "$ALSA_RC")" "$ALSA_RC.omaremote.bak" || return 1
+  alsa_rc_write "$c"
+}
+
+u_alsa() {
+  step "ALSA user config ($ALSA_RC)"
+  alsa_rc_read || { u_left "cannot read $ALSA_RC; its OmaRemote blocks (if any) are still there"; return 0; }
+  local found=() st pair b e name
+  for pair in "$ALSA_BEGIN|$ALSA_END|atvvoice ($ATV_NODE)" "$MIC_BEGIN|$MIC_END|mic ($MIC_PCM)"; do
+    IFS='|' read -r b e name <<< "$pair"
+    st=$(alsa_block_state "$ALSA_CONTENT" "$b" "$e" 0)
+    case $st in
+      present) found+=("$name") ;;
+      bad) u_left "the OmaRemote $name block in $ALSA_RC has broken markers; delete it by hand, from '$b' to '$e'" ;;
+    esac
+  done
+  if (( ${#found[@]} == 0 )); then say "no OmaRemote blocks; nothing to do"
+  else
+    say "OmaRemote blocks: ${found[*]}. Everything outside them stays byte for byte."
+    if u_ask "Remove these blocks from $ALSA_RC?" "the OmaRemote blocks in $ALSA_RC"; then
+      local rc=0; alsa_rc_locked u_alsa_strip || rc=$?
+      case $rc in
+        0) say "removed (previous version at $ALSA_RC.omaremote.bak)"; U_VOX_RESTART=1 ;;
+        2) say "nothing left to remove" ;;
+        *) u_left "could not rewrite $ALSA_RC; its OmaRemote blocks are still there" ;;
+      esac
+    fi
+  fi
+  (( UNINSTALL_DRY )) || rm -f -- "$ALSA_RC.omaremote.lock"
+  # A running Voxtype read ALSA's config and its own at start.
+  if (( ${U_VOX_RESTART:-0} )) && systemctl --user is-active --quiet voxtype; then
+    systemctl --user try-restart voxtype || u_left "could not restart voxtype; run:  systemctl --user restart voxtype"
+  fi
+}
+
+u_unit() {   # u_unit <service> <unit file> <line that marks it as ours>: 0 = removed, 1 = kept, 2 = none of ours
+  local svc=$1 unit=$2 mark=$3
+  if [[ ! -e $unit ]]; then say "no $svc unit; nothing to do"; return 2; fi
+  if ! grep -qxF -- "$mark" "$unit"; then u_left "$unit was not written by omaremote-setup; left alone"; return 2; fi
+  say "$unit (written by omaremote-setup)"
+  u_ask "Stop, disable and delete the $svc user service?" "the $svc user service" || return 1
+  systemctl --user disable --now "$svc" >/dev/null 2>&1 || true
+  rm -f -- "$unit"
+  systemctl --user daemon-reload || true
+  say "removed the $svc service"
+}
+
+u_services() {
+  step "user services"
+  u_unit atvvoice "$ATV_UNIT" '# Generated by omaremote-setup. Do not edit by hand; re-run `omaremote-setup atvvoice`.' || true
+  if [[ -x $ATV_BIN ]]; then
+    say "$ATV_BIN (ATVVoice, built by the atvvoice step)"
+    if u_ask "Uninstall the ATVVoice binary?" "the ATVVoice binary $ATV_BIN"; then
+      if command -v cargo >/dev/null 2>&1 && [[ $ATV_BIN == "$HOME/.cargo/bin/atvvoice" ]]; then cargo uninstall -q atvvoice || rm -f -- "$ATV_BIN"
+      else rm -f -- "$ATV_BIN"; fi
+      say "removed $ATV_BIN"
+    fi
+  fi
+  # The stamp records "this build is live"; it goes with the binary, or alone once the binary is already gone.
+  if [[ -e $ATV_STAMP && ! -e $ATV_BIN ]] && (( ! UNINSTALL_DRY )); then
+    rm -f -- "$ATV_STAMP"; rmdir -- "$(dirname -- "$ATV_STAMP")" 2>/dev/null || true
+  fi
+  if u_unit omaremote-keytap "$KEYTAP_UNIT" 'Description=omaremote keytap (uinput hotkey taps for Typeless)'; then
+    rm -f -- "$KEYTAP_DIR/omaremote-keytap"; rmdir -- "$KEYTAP_DIR" 2>/dev/null || true
+  fi
+}
+
+# u_xkb_strip <file>: print the file without setup's kb_options block (and the blank line before it). 1 = no block,
+# 2 = a marker whose block is not the exact shape ensure_xkb writes.
+u_xkb_strip() {
+  awk -v mark="$XKB_MARK_RE" -v opt="$XKB_OPTION" '
+    { l[NR] = $0 } $0 ~ mark { n++; at = NR }
+    END {
+      if (n == 0) exit 1
+      if (n > 1) exit 2
+      j = at + 1; while (j <= NR && l[j] ~ /^--/) j++
+      if (l[j] != "hl.config({" || l[j+1] != "  input = {" || l[j+2] !~ /^    kb_options = ".*",$/ || index(l[j+2], opt) == 0 || l[j+3] != "  }," || l[j+4] != "})") exit 2
+      from = (at > 1 && l[at-1] == "") ? at - 1 : at
+      for (i = 1; i <= NR; i++) if (i < from || i > j + 4) print l[i]
+    }' "$1"
+}
+
+u_rewrite() {   # u_rewrite <file> <new content file>: keep <file>.omaremote.bak, write in place (a symlink stays one)
+  cp -a -- "$1" "$1.omaremote.bak" && cat -- "$2" > "$1"
+}
+
+u_hypr() {
+  step "Hyprland ($HYPR_DIR)"
+  local changed=0 lua=$HYPR_DIR/omaremote.lua main=$HYPR_DIR/hyprland.lua input=$HYPR_DIR/input.lua
+  local has_lua=0 has_req=0
+  [[ -f $lua && $(head -1 -- "$lua") == "-- Generated by omaremote-setup"* ]] && has_lua=1
+  [[ -f $lua && $has_lua == 0 ]] && u_left "$lua was not generated by omaremote-setup; left alone"
+  grep -qxF -- "$REQUIRE_LINE" "$main" 2>/dev/null && has_req=1
+  if (( has_lua || has_req )); then
+    (( has_lua )) && say "$lua (the remote's 13 binds and the Super+Ctrl+Alt+R reset)"
+    (( has_req )) && say "$main: the line $REQUIRE_LINE"
+    if u_ask "Remove OmaRemote's Hyprland binds?" "OmaRemote's Hyprland binds"; then
+      if (( has_req )); then   # the require goes first: a require of a missing file is a config error
+        grep -vxF -- "$REQUIRE_LINE" "$main" > "$WORKDIR/hyprland.lua" || true
+        u_rewrite "$main" "$WORKDIR/hyprland.lua" && say "removed the require line (previous version at $main.omaremote.bak)"
+      fi
+      (( has_lua )) && rm -f -- "$lua" && say "deleted $lua"
+      changed=1
+    fi
+  else say "no OmaRemote binds; nothing to do"; fi
+
+  local rc=0; [[ -f $input ]] && { u_xkb_strip "$input" > "$WORKDIR/input.lua" || rc=$?; } || rc=1
+  case $rc in
+    0) say "$input: the kb_options block that turns on $XKB_OPTION"
+       say "Removing it returns kb_options to what the rest of your config sets."
+       if u_ask "Remove that block?" "the kb_options block in $input"; then
+         u_rewrite "$input" "$WORKDIR/input.lua" && say "removed it (previous version at $input.omaremote.bak)"; changed=1
+       fi ;;
+    1) say "no OmaRemote kb_options block in input.lua; nothing to do" ;;
+    *) u_left "$input has an OmaRemote kb_options block in an unexpected shape; delete the hl.config block under the '-- Added by ... REQUIRED for the remote to work.' comment by hand" ;;
+  esac
+
+  if (( changed )) && hyprctl version >/dev/null 2>&1; then
+    hyprctl reload >/dev/null || true
+    local e; e=$(hyprctl configerrors 2>&1 | grep -v '^$' || true)
+    [[ -z $e ]] || u_left "Hyprland reports config errors after the reload: $e"
+  fi
+}
+
+u_keyd() {
+  step "keyd ($KEYD_CONF)"
+  local f files=()
+  for f in "$KEYD_CONF" "$KEYD_CONF.bak"; do [[ -e $f ]] && files+=("$f"); done
+  if (( ${#files[@]} == 0 )); then say "no OmaRemote keyd config; nothing to do"; return 0; fi
+  say "${files[*]} (needs sudo to delete)"
+  u_ask "Delete it and reload keyd?" "$KEYD_CONF" || return 0
+  sudo rm -f -- "${files[@]}" || { u_left "could not delete ${files[*]}"; return 0; }
+  say "deleted ${files[*]}"
+  if systemctl is-active --quiet keyd; then sudo keyd reload || u_left "keyd reload failed; run:  sudo keyd reload"; fi
+  say "keyd itself stays installed and enabled. If nothing else uses it:  sudo systemctl disable --now keyd"
+}
+
+u_config() {
+  step "your settings"
+  local cfg; cfg=$(dirname -- "$OMA_CONFIG")
+  local state=${XDG_STATE_HOME:-$HOME/.local/state}/omaremote
+  if (( ! UNINSTALL_PURGE )); then
+    [[ -e $cfg ]] && say "kept $cfg (your key mappings). Delete it by hand, or re-run with --purge."
+    [[ -e $cfg ]] || say "no $cfg; nothing to do"
+    return 0
+  fi
+  local d dirs=(); for d in "$cfg" "$state"; do [[ -e $d ]] && dirs+=("$d"); done
+  if (( ${#dirs[@]} == 0 )); then say "no OmaRemote settings; nothing to do"; return 0; fi
+  say "${dirs[*]}"
+  u_ask "Delete your OmaRemote settings?" "${dirs[*]}" || return 0
+  rm -rf -- "${dirs[@]}" && say "deleted ${dirs[*]}"
+}
+
+cmd_uninstall() {   # cmd_uninstall [--purge] [--dry-run]
+  while (( $# )); do
+    case $1 in
+      --purge) UNINSTALL_PURGE=1; shift ;;
+      --dry-run) UNINSTALL_DRY=1; shift ;;
+      *) die "unknown uninstall option: $1 (usage: omaremote-setup [--yes] uninstall [--purge] [--dry-run])" ;;
+    esac
+  done
+  need jq
+  (( UNINSTALL_DRY )) && say "Dry run: lists what would be removed and changes nothing."
+  u_voxtype
+  u_alsa
+  u_services
+  u_hypr
+  u_keyd
+  u_config
+  step "done"
+  if (( ${#UNINSTALL_LEFT[@]} )); then
+    say "Left in place:"
+    local l; for l in "${UNINSTALL_LEFT[@]}"; do say "  - $l"; done
+  fi
+  say "Not undone: packages you installed (keyd, rustup, pipewire-alsa, ...), input group membership, and older"
+  say "*.bak copies setup left beside the files it edited."
+  say "Last, remove the plugin itself (this deletes this script too):"
+  say "    omarchy plugin remove $PLUGIN_ID"
+}
+
 cmd_all() {
   # keyd and the mic apply both stop for confirmation or restart a daemon, so a bare run is
   # interactive by design. Pass --yes to skip the keyd prompts. Plan 4: the remote's microphone is
@@ -1004,6 +1232,10 @@ usage: omaremote-setup [--yes] [--mic remote|system] <subcommand>
            Typeless dictation hotkey: typeless [--hotkey <chord> | --hotkey-from-typeless]. Never switches the
            engine; do that in the panel (Voice tab → Engine). Not part of the default flow.
   verify   verify the loaded binds and sweep the transport with the injector
+  uninstall [--purge] [--dry-run]
+           undo every step above, asking before each item (--yes skips the questions). Keeps
+           ~/.config/omaremote unless --purge. --dry-run lists what it would remove and changes nothing.
+           Run it before `omarchy plugin remove`, which deletes this script.
   genconf  print the generated keyd config to stdout and exit (writes nothing)
   genlua   print the generated Hyprland binds to stdout and exit (writes nothing)
 
@@ -1043,6 +1275,7 @@ main() {
     mic) if (( MIC_EXPLICIT )); then cmd_mic "${2:-$MIC_MODE}"; else cmd_mic "${2:-system}"; fi ;;
     typeless) shift; cmd_typeless "$@" ;;
     verify) cmd_verify ;;
+    uninstall) shift; cmd_uninstall "$@" ;;
     genconf) cmd_genconf ;;
     genlua) gen_lua ;;
     "") cmd_all ;;
