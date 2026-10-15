@@ -97,21 +97,29 @@ Item {
     }
 
     PanelSectionHeader { text: "Microphone"; foreground: root.fg; fontFamily: root.fontFamily }
-    Flow {
+    Item {
       width: parent.width
-      spacing: Style.space(8)
-      Text { textFormat: Text.PlainText; text: "Voxtype mic:"; color: root.fg; font.family: root.fontFamily; font.pixelSize: Style.font.body }
-      Repeater {
-        model: root.choices
-        delegate: Button {
-          required property var modelData
-          required property int index
-          text: modelData.label
-          selected: modelData.active
-          hasCursor: root.cursor === 1 && (root.pick < 0 ? modelData.active : root.pick === index)
-          foreground: root.fg
-          enabled: root.s && !root.s.micPending && modelData.connected
-          onClicked: if (!modelData.active) root.requestChoice(modelData)
+      height: micFlow.implicitHeight
+      // The cursor frame on the active choice looks like its selected fill, so landing on this row would show no
+      // change (hardware acceptance 2026-10-15). Shade the whole row, as KeyRow does.
+      Rectangle { anchors.fill: parent; radius: Style.cornerRadius; color: root.cursor === 1 ? Style.selectedFillFor(root.fg, Color.accent) : "transparent" }
+      Flow {
+        id: micFlow
+        width: parent.width
+        spacing: Style.space(8)
+        Text { textFormat: Text.PlainText; text: "Voxtype mic:"; color: root.fg; font.family: root.fontFamily; font.pixelSize: Style.font.body }
+        Repeater {
+          model: root.choices
+          delegate: Button {
+            required property var modelData
+            required property int index
+            text: modelData.label
+            selected: modelData.active
+            hasCursor: root.cursor === 1 && (root.pick < 0 ? modelData.active : root.pick === index)
+            foreground: root.fg
+            enabled: root.s && !root.s.micPending && modelData.connected
+            onClicked: if (!modelData.active) root.requestChoice(modelData)
+          }
         }
       }
     }
