@@ -2353,3 +2353,28 @@ Append a `## Outcome (date)` section to this plan with the per-item results and 
 - **Known judgment calls for reviewers.**
   - Rulings 1–7 above.
   - `restoreExit` folds plan ruling 4's "exit 3 at alsaPrev is done" into the drained path too.
+
+## Outcome (2026-10-15)
+
+Hardware acceptance on the Mac mini, with the user at the machine. Engine: Typeless, so the Doctor Voxtype rows report
+`info` in place of pass/fail. `~/.config/alsa/asoundrc` was backed up first.
+
+1. **C922, F9 dictation: pass.** asoundrc `omaremote-mic` → C922, Voxtype `device = "omaremote-mic"`, text typed.
+   Doctor `voxtype-device` showed `omaremote-mic → …C922…`, and `last-capture` showed `captured from: …C922…`. The
+   "recording from …" HUD line cleared on release. F9 is push-to-talk (press and release binds); a tap records 0.0 s
+   and Voxtype logs "No audio was captured".
+2. **Built-in input: pass.** `last-capture` showed `alsa_input.pci-0000_00_1b.0.analog-stereo`; 2.9 s were captured.
+   The transcript was empty, because nothing is plugged into the line-in.
+3. **System default → Remote → C922: pass.** mic-5..7 all succeeded, and Doctor had no failures. Each Voxtype restart
+   logs a DEBUG `voice error voxtype not responding`; nothing is shown on screen.
+4. **Unplug the C922: pass.** The button read `alsa_input.usb-046d_C922_Pr… (not connected)` and was disabled. Doctor
+   `voxtype-device` showed "… is not connected" with the fix "connect the microphone, or pick another one in the Voice
+   tab". The label is the node name, because no description is stored. That is cosmetic and left as is.
+5. **Keyboard-only switch: pass after a fix.**
+   - Defect: on the Microphone row the cursor frame on the active choice looks the same as its selected fill, so the
+     row showed no change when the cursor reached it.
+   - The user pressed Down again, and Left/Right then switched tabs from the HUD row. A debug log confirmed that the
+     routing was correct.
+   - 6f44399 shades the whole row while the cursor is on it. After that, Down Down Left Enter switched to Built-in,
+     then back to C922.
+6. **Final choice: C922** (`voice.mic = system`, `systemDevice` = the C922 node).
