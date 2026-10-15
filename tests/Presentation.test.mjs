@@ -141,6 +141,14 @@ test("micChoices: a stored source missing from the list stays visible, disconnec
   assert.equal(micChoices(null, SRC).length, 4, "no config yet: no stored entry, nothing active");
 });
 
+test("micChoices: a disconnected source keeps the name it was last seen with", () => {
+  const names = { "alsa_input.usb-C922": "C922 Pro Stream Webcam Analog Stereo" };
+  const c = micChoices(cfgFor("system", "alsa_input.usb-C922"), [SRC[1]], names);
+  assert.deepEqual(c.map(x => x.label), ["Remote", "System default", "Built-in", "C922 Pro Stream Webcam Anal… (not connected)"]);
+  assert.equal(c[3].connected, false);
+  assert.equal(micChoices(cfgFor("system", "gone_node"), [], names).pop().label, "gone_node (not connected)", "never seen: the node name");
+});
+
 test("micRefusal and micConflictLine wording", () => {
   assert.equal(micRefusal("no-such-source"), "microphone not found (unplugged?)");
   assert.equal(micRefusal("invalid-source"), "not a usable microphone");

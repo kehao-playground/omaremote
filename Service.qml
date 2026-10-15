@@ -90,6 +90,7 @@ Item {
   property var lastCapture: null                  // null = not yet verified (§3); { node, at, mode }
   readonly property var micSources: MicSources.createMicSources()     // picker spec §4.3/§4.4
   property var micSourceList: []
+  property var micSourceNames: ({})                    // node → description seen this session (MicSources.names)
   property bool micSourcesRefreshing: false
   property var statsSummary: ({ today: { count: 0, seconds: 0 }, week: { count: 0, seconds: 0 }, all: { count: 0, seconds: 0 }, longest: null })
   property var selftest: null
@@ -603,7 +604,7 @@ Item {
   }
   function sourcesDone(rid, list) {
     var again = root.micSources.finished(rid, list)          // false and no change for a stale rid
-    root.micSourceList = root.micSources.list(); root.micSourcesRefreshing = root.micSources.refreshing()
+    root.micSourceList = root.micSources.list(); root.micSourceNames = root.micSources.names(); root.micSourcesRefreshing = root.micSources.refreshing()
     if (again) root.startSourcesRefresh()
   }
   function refreshMicSources() { if (root.micSources.requestRefresh()) root.startSourcesRefresh() }

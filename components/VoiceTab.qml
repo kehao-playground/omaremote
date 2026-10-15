@@ -21,7 +21,7 @@ Item {
   readonly property var s: service
   readonly property var cfg: s && s.config ? s.config : null
   readonly property var current: s && s.micCurrentId ? s.micStatusOf(s.micCurrentId) : null
-  readonly property var choices: Presentation.micChoices(cfg, s ? s.micSourceList : [])
+  readonly property var choices: Presentation.micChoices(cfg, s ? s.micSourceList : [], s ? s.micSourceNames : {})
   property int pick: -1                                   // highlighted choice while the cursor is on the Microphone row
   // Picker spec §4.5 retry ownership: every user choice takes a new intent number. A retry carries the intent that
   // started it and dies when that is no longer current, so a superseded choice can never apply or touch the status line.

@@ -87,3 +87,16 @@ test("requestRefresh while one runs queues exactly one more", () => {
   assert.equal(s.finished(b, [C922]), false, "a second report for the same refresh is ignored");
   assert.equal(s.refreshing(), false);
 });
+
+test("names: every description seen this session survives the source leaving the list", () => {
+  const s = seeded([C922, LATE]);
+  s.requestRefresh(); s.finished(s.started(), [LATE]);           // the C922 was unplugged
+  assert.deepEqual(s.list(), [LATE]);
+  assert.deepEqual(s.names(), { [C922.name]: "C922", [LATE.name]: "Late" });
+  s.requestRefresh(); s.finished(s.started(), null);             // a failed refresh forgets nothing
+  assert.equal(s.names()[C922.name], "C922");
+  s.requestRefresh(); s.finished(s.started(), [{ name: C922.name, description: "" }]);
+  assert.equal(s.names()[C922.name], "C922", "an empty description never replaces a known one");
+  s.names()[LATE.name] = "mutated";
+  assert.equal(s.names()[LATE.name], "Late", "a copy, not the store");
+});
