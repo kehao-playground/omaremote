@@ -3,6 +3,14 @@
 All notable changes to OmaRemote. Versions follow [Semantic Versioning](https://semver.org); while the version is
 0.x, a minor release may change behaviour or generated files.
 
+## 0.1.1 — 2026-10-15
+
+### Changed
+
+- The `atvvoice` setup step checks out ATVVoice's pinned commit by its literal SHA (`git checkout --detach`), in one
+  `&&` chain with the patch and the build, so the marketplace security baseline can verify the pin. The commit built
+  is unchanged.
+
 ## 0.1.0 — 2026-10-15
 
 First public release. Tested on Omarchy 4.0 (alpha) with the Xiaomi Bluetooth Voice Remote (RC003, `2717:32b8`).

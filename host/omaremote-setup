@@ -553,9 +553,19 @@ atv_build() {
   mkdir -p "$src"
   git -C "$src" init -q || die "git init failed; nothing was changed"
   git -C "$src" fetch --depth 1 "$ATV_REPO" "$ATV_REV" || die "git fetch of ATVVoice $ATV_REV failed; nothing was changed"
-  git -C "$src" checkout -q FETCH_HEAD || die "git checkout failed; nothing was changed"
-  git -C "$src" apply "$ATV_PATCH" || die "the ATVVoice patch no longer applies to $ATV_REV; nothing was changed"
-  cargo install --locked --path "$src" --force || die "cargo install failed; nothing was changed"
+  # The marketplace security baseline (remote-git-execution-unpinned) accepts a build only after a checkout of a LITERAL
+  # 40-character SHA with --detach, joined to the build by one && chain. The SHA must equal ATV_REV;
+  # tests/setup-atvvoice.sh checks that. `step` keeps one message per failing command.
+  local step=checkout
+  git -C "$src" checkout -q --detach 0e8f6413dc4bad7a04e3c6b648945439d7a22fac && step=patch &&
+    git -C "$src" apply "$ATV_PATCH" && step=build &&
+    cargo install --locked --path "$src" --force && step=done
+  case $step in
+    done) ;;
+    checkout) die "git checkout failed; nothing was changed" ;;
+    patch) die "the ATVVoice patch no longer applies to $ATV_REV; nothing was changed" ;;
+    *) die "cargo install failed; nothing was changed" ;;
+  esac
 }
 
 gen_atv_unit() {   # gen_atv_unit <addr> > file

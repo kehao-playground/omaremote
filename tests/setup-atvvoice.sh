@@ -83,6 +83,8 @@ check "fresh: git fetch of the pinned rev"    "yes" "$(grep -qE "^git .*fetch --
 check "fresh: git apply of the repo patch"     "yes" "$(grep -qE "^git .*apply .*/host/patches/atvvoice-reset-decoder.patch\$|^git .*apply .*/tests/\.\./host/patches/atvvoice-reset-decoder.patch\$" <<<"$out" && echo yes || echo no)"
 check "fresh: cargo install --path --locked"   "yes" "$(grep -qE '^cargo install --locked --path [^ ]+ --force$' <<<"$out" && echo yes || echo no)"
 check "fresh: no cargo --git install"          "no"  "$(has "$out" "--git")"
+check "fresh: detached checkout of the pinned rev" "yes" "$(grep -qE "^git .*checkout -q --detach $REV\$" <<<"$out" && echo yes || echo no)"
+check "the literal checkout SHA is ATV_REV"     "$REV" "$(grep -oE 'checkout -q --detach [0-9a-f]{40}' "$SRC" | awk '{print $4}')"
 check "fresh: order fetch, apply, install"     "fetch apply install" "$(grep -oE 'fetch|apply|cargo install' <<<"$out" | sed 's/cargo //' | tr '\n' ' ' | sed 's/ $//')"
 check "fresh: stamp holds rev and patch sha"   "$STAMP_LINE" "$(cat "$T/state/atvvoice.build" 2>/dev/null)"
 check "fresh: says built"                      "yes" "$(has "$(cat "$T/out.log")" "built atvvoice ${REV:0:7} + reset-decoder patch")"
